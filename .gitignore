@@ -1,0 +1,7 @@
+.DS_Store
+/.build/
+/.swiftpm/
+/MyMole.app
+*.dmg
+/MyMole-AppStore.app
+/MyMole-AppStore.pkg

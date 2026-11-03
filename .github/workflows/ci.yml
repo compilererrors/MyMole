@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# CI has read access only.
+permissions:
+  contents: read
+
+# Bash with pipefail everywhere, so the checks below behave the same in
+# every step; the negative checks don't rely on pipes.
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    # The package targets macOS 26 with Swift 6.2 tools.
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+
+      # The security tests are part of the suite: safety checks,
+      # staging, restore, keep lists and ownership, run in the sandbox that
+      # closes the home folder and the Trash.
+      - name: Test (sandboxed)
+        run: scripts/test-guarded.sh
+
+      # The App Store edition's own code: never elevates, offers only
+      # sandbox tasks, and keeps folder access to what was chosen. Real
+      # bookmarks and the App Sandbox itself are checked by hand.
+      - name: Test the App Store edition (sandboxed)
+        run: scripts/test-guarded.sh --appstore
+
+      - name: Test policy catches violations
+        run: scripts/test-policy-guard.sh
+
+      - name: Negative string checks catch unreadable binaries and matches
+        run: scripts/test-strings-guard.sh
+
+      - name: Build the direct edition
+        run: |
+          swift build -c release --product MyMole
+          swift build -c release --product MyMoleHelper
+          bin="$(swift build -c release --show-bin-path)"
+          scripts/check-no-strings.sh "$bin/MyMole" 'MYMOLE_SMOKE_HOME|MYMOLE_SMOKE_TRASH|MYMOLE_SMOKE_ELEVATE|MYMOLE_SMOKE_APPS|MYMOLE_SMOKE_GRANTED'
+
+      - name: Build the App Store edition
+        run: |
+          swift build -c release --scratch-path .build/appstore -Xswiftc -DAPPSTORE --product MyMole
+          bin="$(swift build -c release --scratch-path .build/appstore -Xswiftc -DAPPSTORE --show-bin-path)"
+          scripts/check-no-strings.sh "$bin/MyMole" 'osascript|with administrator privileges|SMAppService|MYMOLE_SMOKE_HOME|MYMOLE_SMOKE_TRASH|MYMOLE_SMOKE_ELEVATE|MYMOLE_SMOKE_APPS|MYMOLE_SMOKE_GRANTED'
+
+  thread-sanitizer:
+    # Shared state across threads in one process: the cleanup log's queue
+    # and lock, staging, the sampler, per-move checks, the privileged
+    # client's one job at a time and the model jobs that must not run
+    # twice. Locking between separate copies of the privileged tool is
+    # tested with its own lock file, not here.
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      # The same sandbox as the main suite: no home folder, Trash or network.
+      - name: Thread Sanitizer (sandboxed)
+        run: >
+          scripts/test-guarded.sh --sanitize=thread
+          --filter 'CleanStorageTests|PrivilegedSafetyTests|SamplerTests|PerMoveCheckTests|ModelSafetyTests|DeepCleanModelTests|PrivilegedClientTests|SystemCleanModelTests|ProjectRulesModelTests'
