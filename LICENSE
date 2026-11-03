@@ -1,0 +1,212 @@
+MyMole Source-Available License 1.0
+
+Effective date: 2026-11-01
+
+Copyright (c) 2026 MyMole Authors
+
+This license governs use of the MyMole source code, binaries, and other
+project files to the extent the Licensor owns or controls the necessary
+rights. Third-party components remain under their own licenses.
+
+1. Definitions
+
+"MyMole" means this software project and its source code, binaries,
+documentation, scripts, assets, and related project files.
+
+"Licensor" means the copyright holder or copyright holders identified above.
+
+"You" means the individual or legal entity exercising rights under this
+license.
+
+"Individual Personal Use" means use by a natural person for that person's own
+private, personal, educational, experimental, or hobby purposes, where the use
+is not Business Use and is not intended for commercial advantage, business
+operations, paid services, revenue generation, or other monetary compensation.
+
+"Non-Commercial Use" means Individual Personal Use and other use that is not
+Business Use.
+
+"Business Use" means use by or for a company, partnership, sole
+proprietorship, government agency, nonprofit, school, university, foundation,
+or other organization in connection with that organization's work, operations,
+services, products, customers, infrastructure, employees, contractors,
+research, administration, or revenue-generating activities.
+
+"Commercial License" means a separate paid license or written agreement with
+the Licensor that permits Business Use.
+
+"Authorized Store Purchase" means an authorized purchase or download of an
+official paid version of MyMole through the Mac App Store or another
+distribution channel approved by the Licensor, using an account permitted to
+make that purchase or download.
+
+2. Non-Commercial Permission
+
+Subject to this license, You may use, copy, modify, compile, run, and
+distribute MyMole for Non-Commercial Use.
+
+Examples of Non-Commercial Use include personal learning, private homelab
+use, personal experimentation, academic experimentation outside an
+organization's operations, and hobby projects that are not connected to an
+organization's work, operations, customers, services, products,
+administration, or revenue.
+
+3. Business Use Requires Payment
+
+Business Use is not permitted under this license unless You have a Commercial
+License.
+
+If You want to use MyMole for Business Use, You must obtain and pay for a
+Commercial License from the Licensor before that use begins.
+
+No Business Use rights are granted by downloading, cloning, building,
+installing, modifying, or distributing MyMole under this license.
+
+Business Use includes use on a personal computer, personal account, home
+network, or private build when that use is for or on behalf of an
+organization.
+
+Examples of Business Use include using MyMole to inspect storage, measure
+project footprints, clean caches, remove build artifacts, uninstall software,
+optimize systems, or manage files on computers or projects used by or for an
+organization, including employee, contractor, development, and customer work.
+
+4. Authorized Store Purchases
+
+An Authorized Store Purchase grants the purchaser a Commercial License to use
+the official purchased version of MyMole for Business Use, subject to this
+license, the applicable store terms, and any additional terms presented with
+that purchase.
+
+An Authorized Store Purchase does not grant any right to redistribute MyMole
+outside the authorized store, sublicense MyMole, sell MyMole outside the
+authorized store, or use MyMole's name, logo, icon, or branding for modified
+versions.
+
+5. Redistribution
+
+If You distribute MyMole or a modified version of MyMole under this
+license, You must include this license, preserve copyright notices, and make
+clear that Business Use requires a Commercial License.
+
+Redistribution under this license does not grant Business Use rights to the
+recipient. Each recipient must comply with this license and must obtain a
+Commercial License before Business Use.
+
+6. Contributions
+
+By submitting a contribution to MyMole, You grant the Licensor a perpetual,
+worldwide, non-exclusive, royalty-free, irrevocable license to use, reproduce,
+modify, prepare derivative works of, publicly display, publicly perform,
+distribute, sublicense, and relicense the contribution as part of MyMole,
+including under commercial licenses. You represent that You have the right to
+grant these rights.
+
+7. Third-Party Components and Existing Rights
+
+Third-party components, including external programs, dependencies, libraries,
+fonts, and assets, remain subject to their own license terms.
+
+This license applies only to material the Licensor is entitled to license.
+It does not replace, restrict, or relicense any third-party material.
+Any applicable third-party license controls that material.
+
+Nothing in this license revokes rights already validly granted under an
+earlier license. Contributors must have the necessary rights to grant the
+permissions in section 6; that section does not override third-party terms.
+
+8. No Trademark Rights
+
+This license does not grant permission to use the names, trademarks, logos,
+icons, or branding of MyMole or the Licensor except as reasonably
+necessary to describe an unmodified copy of MyMole.
+
+You may not distribute modified versions using the MyMole name, logo,
+icon, or branding in a way that suggests they are official, endorsed,
+approved, maintained, or provided by the Licensor.
+
+9. Termination
+
+If You violate this license, the rights granted to You under this license
+terminate automatically. The Licensor may reinstate rights in writing.
+
+10. User Responsibility and Operational Risk
+
+MyMole is a local storage-analysis, cleanup, and maintenance application. It
+may inspect files and project footprints, retain scan history, move files to
+the Trash, restore files, run external commands, uninstall applications, or
+request administrator access for system maintenance selected by You.
+
+External cleanup tools may permanently delete files instead of moving them
+to the Trash. Files, caches, backups, project artifacts, settings, application
+data, and system state may change between a preview and an operation.
+Restoration and Undo may fail, including when the Trash has been emptied or
+an original location is no longer available.
+
+You are responsible for how You install, configure, run, modify, distribute,
+and use MyMole; for the files, projects, applications, storage locations,
+permissions, commands, and external tools You select; and for maintaining
+appropriate backups.
+
+Before approving an operation, You are responsible for reviewing its scope,
+selected files, protection rules, permissions, and consequences, and for
+ensuring that Your use is authorized, lawful, and suitable for Your systems.
+
+The Licensor does not control Your files, systems, installed external tools,
+or environment and does not assume operational responsibility for them.
+
+11. Disclaimer of Warranty
+
+MYMOLE IS PROVIDED ON AN "AS IS" AND "AS AVAILABLE" BASIS, WITH ALL FAULTS
+AND WITHOUT WARRANTY OF ANY KIND. TO THE MAXIMUM EXTENT PERMITTED BY
+APPLICABLE LAW, THE LICENSOR DISCLAIMS ALL WARRANTIES AND CONDITIONS,
+WHETHER EXPRESS, IMPLIED, STATUTORY, OR OTHERWISE, INCLUDING WITHOUT
+LIMITATION WARRANTIES OR CONDITIONS OF TITLE, NON-INFRINGEMENT,
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT,
+ACCURACY, RELIABILITY, SECURITY, AVAILABILITY, COMPATIBILITY, AND THAT
+MYMOLE WILL BE ERROR-FREE OR UNINTERRUPTED.
+
+Without limiting the foregoing, the Licensor does not warrant that MyMole
+will protect against data loss, incomplete scans, incorrect classifications,
+backup loss, failed restoration, permanent deletion, application or system
+malfunction, permission errors, downtime, security incidents, or any other
+operational or business impact.
+
+Nothing in this license limits mandatory consumer rights that apply under
+the laws of Your country of residence.
+
+12. Limitation of Liability
+
+TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, IN NO EVENT AND UNDER NO
+LEGAL THEORY, WHETHER IN TORT, CONTRACT, STRICT LIABILITY, NEGLIGENCE,
+WARRANTY, STATUTE, OR OTHERWISE, SHALL THE LICENSOR BE LIABLE TO YOU OR ANY
+THIRD PARTY FOR ANY DIRECT, INDIRECT, SPECIAL, INCIDENTAL, CONSEQUENTIAL,
+EXEMPLARY, OR PUNITIVE DAMAGES, OR FOR ANY LOSS OF PROFITS, REVENUE,
+BUSINESS, GOODWILL, USE, DATA, BACKUPS, FILES, APPLICATIONS, SYSTEMS, SERVICES,
+OR OTHER LOSSES, ARISING OUT OF OR RELATED TO MYMOLE, THIS LICENSE, OR ANY
+USE OF OR INABILITY TO USE MYMOLE, EVEN IF THE LICENSOR HAS BEEN ADVISED
+OF THE POSSIBILITY OF SUCH DAMAGES.
+
+You agree that any use of MyMole is at Your own risk and that You, not the
+Licensor, are responsible for any damage, loss, claim, liability, cost, or
+expense arising from how MyMole is obtained, built, installed, configured,
+run, modified, distributed, or used by You or on Your behalf.
+
+Nothing in this license excludes or limits liability that cannot be excluded
+or limited under applicable law. Some jurisdictions do not allow the exclusion
+of certain warranties or limitations of liability, so some of the above
+exclusions or limitations may not apply to You.
+
+13. Governing Law and Forum
+
+This license is governed by the laws of Sweden, excluding conflict-of-law
+rules. Any dispute arising out of or relating to this license shall be
+resolved by the competent courts of Sweden, unless mandatory law requires
+otherwise.
+
+14. Survival
+
+Sections concerning Business Use, Authorized Store Purchases, redistribution
+obligations, contributions, third-party components, trademark rights, user
+responsibility, warranty disclaimers, limitation of liability, governing law,
+and this survival clause survive termination of this license.
