@@ -21,6 +21,14 @@ public struct CommandRunner: Sendable {
     /// Exit code when a program ran past its limit and part of it may still
     /// be running: something it started left its process group.
     public static let stopUnverified: Int32 = -3
+    /// Exit code when the output was larger than the runner reads: it was
+    /// stopped, and what it printed isn't used.
+    public static let outputTooLarge: Int32 = -4
+    /// Exit code when the program ended but something it started kept its
+    /// output open: the output may be cut short, so it isn't used.
+    public static let outputUnfinished: Int32 = -5
+    /// What one program may print: far more than any reply MyMole reads.
+    public static let standardOutputLimit = 32 << 20
 
     /// Every maintenance program finishes well within this; one that
     /// doesn't is stuck, and waiting on it would hold the helper forever.
@@ -30,15 +38,22 @@ public struct CommandRunner: Sendable {
     /// past `timeLimit` seconds is stopped with everything it started: the
     /// group is asked to quit, then killed, and only reported stopped once
     /// no member is left.
-    public static func processes(timeLimit: TimeInterval, grace: TimeInterval = 3) -> CommandRunner {
+    public static func processes(
+        timeLimit: TimeInterval, grace: TimeInterval = 3, outputLimit: Int = standardOutputLimit, drain: TimeInterval = 5
+    ) -> CommandRunner {
         CommandRunner(
-            run: { exe, args in ProcessGroup.run(exe, args, timeLimit: timeLimit, grace: grace) },
+            run: { exe, args in
+                ProcessGroup.run(exe, args, timeLimit: timeLimit, grace: grace, outputLimit: outputLimit, drain: drain)
+            },
             exists: { FileManager.default.isExecutableFile(atPath: $0) })
     }
 }
 
 enum ProcessGroup {
-    static func run(_ exe: String, _ args: [String], timeLimit: TimeInterval, grace: TimeInterval) -> (code: Int32, output: String) {
+    static func run(
+        _ exe: String, _ args: [String], timeLimit: TimeInterval, grace: TimeInterval,
+        outputLimit: Int = CommandRunner.standardOutputLimit, drain: TimeInterval = 5
+    ) -> (code: Int32, output: String) {
         var pipeFDs: [Int32] = [0, 0]
         guard pipe(&pipeFDs) == 0 else { return (-1, String(cString: strerror(errno))) }
         let (readFD, writeFD) = (pipeFDs[0], pipeFDs[1])
@@ -71,12 +86,30 @@ enum ProcessGroup {
             return (-1, String(cString: strerror(spawned)))
         }
 
-        // Read while it runs, so a full pipe can't stall the program.
-        let output = Mutex(Data())
+        // Read while it runs, so a full pipe can't stall the program, up to
+        // `outputLimit`: past it the group is stopped and nothing is used.
+        let output = Mutex((data: Data(), overflow: false))
         let read = DispatchGroup()
         DispatchQueue.global(qos: .utility).async(group: read) {
-            let d = FileHandle(fileDescriptor: readFD, closeOnDealloc: true).readDataToEndOfFile()
-            output.withLock { $0 = d }
+            defer { close(readFD) }
+            var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+            while true {
+                let n = Darwin.read(readFD, &buffer, buffer.count)
+                if n < 0 && errno == EINTR { continue }
+                guard n > 0 else { return }
+                let over = output.withLock { o -> Bool in
+                    guard o.data.count + n <= outputLimit else {
+                        o.overflow = true
+                        return true
+                    }
+                    o.data.append(contentsOf: buffer[..<n])
+                    return false
+                }
+                if over {
+                    killpg(pid, SIGKILL)
+                    return
+                }
+            }
         }
         let status = Mutex<Int32?>(nil)
         let exited = DispatchSemaphore(value: 0)
@@ -100,11 +133,19 @@ enum ProcessGroup {
                 ? (CommandRunner.timedOut, "Stopped after running for more than \(Int(timeLimit)) seconds.")
                 : (CommandRunner.stopUnverified, "Ran for more than \(Int(timeLimit)) seconds; part of it may still be running.")
         }
-        // A child left holding the pipe mustn't hold the reply too.
-        _ = read.wait(timeout: .now() + 5)
+        // A child left holding the pipe mustn't hold the reply too: it's
+        // stopped with its group, and the cut-short output isn't used.
+        if read.wait(timeout: .now() + drain) == .timedOut {
+            killpg(pid, SIGKILL)
+            _ = read.wait(timeout: .now() + 1)
+            return (CommandRunner.outputUnfinished, "Something it started kept its output open, so the output wasn't used.")
+        }
+        if output.withLock({ $0.overflow }) {
+            return (CommandRunner.outputTooLarge, "It printed more than \(outputLimit >> 20) MB, so it was stopped and its output wasn't used.")
+        }
         let s = status.withLock { $0 } ?? 0
         let code: Int32 = (s & 0x7f) == 0 ? (s >> 8) & 0xff : -(s & 0x7f)
-        return (code, String(decoding: output.withLock { $0 }, as: UTF8.self))
+        return (code, String(decoding: output.withLock { $0.data }, as: UTF8.self))
     }
 
     /// Whether no process is left in group `pgid`, waiting up to `within`.

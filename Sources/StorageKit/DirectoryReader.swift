@@ -15,7 +15,7 @@ struct Entry {
     let modified: TimeInterval
 }
 
-enum ReadOutcome { case ok, denied, failed }
+enum ReadOutcome { case ok, denied, failed, cancelled }
 
 /// Reads whole directories with `getattrlistbulk(2)`: one system call
 /// returns a batch of entries with their attributes, instead of a `readdir`
@@ -38,7 +38,8 @@ enum DirectoryReader {
     private static let packInvalid: UInt64 = 0x0000_0008
     private static let bufferSize = 256 * 1024
 
-    static func read(_ path: String, _ body: (Entry) -> Void) -> ReadOutcome {
+    static func read(_ path: String, isCancelled: () -> Bool = { false }, _ body: (Entry) -> Void) -> ReadOutcome {
+        guard !isCancelled() else { return .cancelled }
         let fd = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard fd >= 0 else { return errno == EACCES || errno == EPERM ? .denied : .failed }
         defer { close(fd) }
@@ -51,17 +52,20 @@ enum DirectoryReader {
         let buffer = UnsafeMutableRawPointer.allocate(byteCount: bufferSize, alignment: 8)
         defer { buffer.deallocate() }
 
+        var outcome = ReadOutcome.ok
         while true {
+            guard !isCancelled() else { return .cancelled }
             let count = getattrlistbulk(fd, &list, buffer, bufferSize, packInvalid)
             if count < 0 {
-                if errno == ENOTSUP || errno == EINVAL { return readFallback(fd: fd, body) }
+                if errno == ENOTSUP || errno == EINVAL { return readFallback(fd: fd, isCancelled: isCancelled, body) }
                 return errno == EACCES || errno == EPERM ? .denied : .failed
             }
-            if count == 0 { return .ok }
+            if count == 0 { return outcome }
             var record = buffer
             for _ in 0..<count {
+                guard !isCancelled() else { return .cancelled }
                 let length = Int(record.loadUnaligned(as: UInt32.self))
-                if let e = parse(record + 4) { body(e) }
+                if let e = parse(record + 4) { body(e) } else { outcome = .failed }
                 record += length
             }
         }
@@ -78,6 +82,8 @@ enum DirectoryReader {
         p += MemoryLayout<attribute_set_t>.size
         let error = p.loadUnaligned(as: UInt32.self)
         p += 4
+        let required = cmnName | cmnDevID | cmnObjType | cmnModTime | cmnFileID
+        guard error == 0, returned.commonattr & required == required else { return nil }
 
         let nameRef = p.loadUnaligned(as: attrreference_t.self)
         let name = String(cString: (p + Int(nameRef.attr_dataoffset)).assumingMemoryBound(to: CChar.self))
@@ -94,7 +100,7 @@ enum DirectoryReader {
         p += 4
         let alloc = p.loadUnaligned(as: Int64.self)
 
-        if error != 0 || name.isEmpty { return nil }
+        if name.isEmpty { return nil }
         let kind: Entry.Kind =
             switch objType {
             case 1: .file  // VREG
@@ -110,17 +116,30 @@ enum DirectoryReader {
             modified: TimeInterval(mod.tv_sec) + TimeInterval(mod.tv_nsec) / 1e9)
     }
 
-    private static func readFallback(fd: Int32, _ body: (Entry) -> Void) -> ReadOutcome {
+    static func readFallback(fd: Int32, isCancelled: () -> Bool = { false }, _ body: (Entry) -> Void) -> ReadOutcome {
         let dupFD = dup(fd)
-        guard dupFD >= 0, let dir = fdopendir(dupFD) else { return .failed }
+        guard dupFD >= 0 else { return .failed }
+        guard let dir = fdopendir(dupFD) else {
+            close(dupFD)
+            return .failed
+        }
         defer { closedir(dir) }
-        while let ent = readdir(dir) {
+        var outcome = ReadOutcome.ok
+        while true {
+            guard !isCancelled() else { return .cancelled }
+            // readdir's nil means either EOF or an error; another system
+            // call's errno mustn't turn a complete directory into a failure.
+            errno = 0
+            guard let ent = readdir(dir) else { return errno == 0 ? outcome : .failed }
             let name = withUnsafeBytes(of: ent.pointee.d_name) { raw in
                 String(cString: raw.bindMemory(to: CChar.self).baseAddress!)
             }
             if name == "." || name == ".." { continue }
             var st = stat()
-            guard fstatat(fd, name, &st, AT_SYMLINK_NOFOLLOW) == 0 else { continue }
+            guard fstatat(fd, name, &st, AT_SYMLINK_NOFOLLOW) == 0 else {
+                outcome = .failed
+                continue
+            }
             let type = st.st_mode & S_IFMT
             let kind: Entry.Kind =
                 type == S_IFREG ? .file : type == S_IFDIR ? .folder : type == S_IFLNK ? .symlink : .other
@@ -130,7 +149,6 @@ enum DirectoryReader {
                     linkCount: UInt32(st.st_nlink), fileID: UInt64(st.st_ino), device: st.st_dev,
                     modified: TimeInterval(st.st_mtimespec.tv_sec)))
         }
-        return .ok
     }
 
     /// Device of a path, to keep the walk on one volume.

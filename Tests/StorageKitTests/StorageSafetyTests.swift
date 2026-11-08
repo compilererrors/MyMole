@@ -36,7 +36,7 @@ final class StorageSafetyFixture: @unchecked Sendable {
   _ = try b.app("Applications/Editor.app/Contents/Library/LoginItems/Updater.app", id: "com.example.SharedUpdater")
   _ = try b.app("Applications/Pro.app/Contents/Library/LoginItems/Updater.app", id: "com.example.SharedUpdater")
   let cache = try b.file("Library/Caches/com.example.SharedUpdater/data").deletingLastPathComponent().path
-  let own = AppIdentity.owned(AppIdentity.of(a), of: a, installed: [a,other])
+  let own = try #require(AppIdentity.owned(for: a, installed: [a,other], readers: .init(groups: { _ in [] })))
   let found = AppLeftovers.find(for: a, home: b.root.path, installed: [a,other], identity: own)
   #expect(!found.contains { $0.path == cache })
  }
@@ -45,7 +45,7 @@ final class StorageSafetyFixture: @unchecked Sendable {
   let top = try b.folder("Project/build")
   let gate = TrashGate(still: { p in
    (p == top || p.hasPrefix(top + "/")) && Trasher.noLinksBetween(top, and: p)
-  })
+  }, protections: TrashGate.keepsNothing)
   #expect(Trasher.clear([top], through: gate).allowed == [top])
  }
  @Test func cleanWorktreeWithKeyMustStay() throws {
@@ -86,6 +86,28 @@ final class StorageSafetyFixture: @unchecked Sendable {
   #expect(kill(child, 0) != 0)
  }
 
+ @Test func outputPastTheLimitStopsTheProgramAndIsNotUsed() {
+  let result = CommandRunner.processes(timeLimit: 10, outputLimit: 1 << 20).run("/bin/sh", ["-c", "while :; do echo synthetic-noise; done"])
+  #expect(result.code == CommandRunner.outputTooLarge)
+  let small = CommandRunner.processes(timeLimit: 10, outputLimit: 1 << 20).run("/bin/echo", ["synthetic"])
+  #expect(small.code == 0 && small.output == "synthetic\n")
+ }
+
+ @Test func aChildHoldingTheOutputOpenDoesntHoldTheReply() throws {
+  let b = try StorageSafetyFixture()
+  let pidFile = b.root.appending(path: "holder.pid")
+  // The shell ends at once; the child it leaves keeps the output open.
+  let command = "/bin/sh -c 'echo $$ > \"$1\"; exec /bin/sleep 20' synthetic-holder '" + pidFile.path + "' & echo partial"
+  let started = Date()
+  let result = CommandRunner.processes(timeLimit: 10, drain: 0.3).run("/bin/sh", ["-c", command])
+  if let holder = Int32((try? String(contentsOf: pidFile, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "") {
+   defer { kill(holder, SIGKILL) }
+   #expect(kill(holder, 0) != 0)
+  }
+  #expect(result.code == CommandRunner.outputUnfinished)
+  #expect(Date().timeIntervalSince(started) < 5)
+ }
+
  @Test func smallCredentialInsideChosenFolderMustWarn() throws {
   let b = try StorageSafetyFixture()
   _ = try b.file("ToolState/.npmrc")
@@ -93,4 +115,32 @@ final class StorageSafetyFixture: @unchecked Sendable {
   #expect(PathRisk.inside(folder) != nil)
  }
 
+}
+
+@Suite struct FoundFilesBudgetTests {
+    @Test func foundFilesAreKeptOnlyForSomeoneWhoDrainsThemAndAtMostTheLimit() {
+        let quiet = ScanProgress()
+        quiet.add([FoundFile(name: "a", folder: "/synthetic", size: 1, modified: .distantPast, kind: .other)])
+        #expect(quiet.drainFound().isEmpty)
+
+        let listening = ScanProgress(collectsFound: true)
+        let many = (0..<(ScanProgress.foundLimit + 10)).map {
+            FoundFile(name: "f\($0)", folder: "/synthetic", size: Int64($0), modified: .distantPast, kind: .other)
+        }
+        listening.add(many)
+        let kept = listening.drainFound()
+        #expect(kept.count == ScanProgress.foundLimit)
+        // The largest stay.
+        #expect(kept.map(\.size).min() == 10)
+    }
+}
+
+@Suite struct HardLinkTests {
+    @Test func aFileWithAnotherNameIsSaid() throws {
+        let box = try Sandbox()
+        let a = try box.file("a.bin", bytes: 100).path
+        let single = try box.file("single.bin", bytes: 100).path
+        #expect(link(a, box.path + "/b.bin") == 0)
+        #expect(HardLinks.otherNames(of: [a, single]) == [a: 1])
+    }
 }

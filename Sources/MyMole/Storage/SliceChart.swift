@@ -5,6 +5,7 @@ import SwiftUI
 /// total in the middle). Small items fold into one "Other" slice so every
 /// slice that's drawn is big enough to see and to label.
 struct SliceChart: View {
+    @Environment(\.palette) private var palette
     enum Style { case pie, wheel }
 
     @Bindable var model: StorageModel
@@ -33,7 +34,7 @@ struct SliceChart: View {
                         let hot = s.segment.map(model.isHighlighted) ?? false
                         let path = g.path(s)
                         ctx.fill(path, with: .color(hot ? s.color.mix(with: .white, by: 0.3) : s.color))
-                        ctx.stroke(path, with: .color(Color(nsColor: .windowBackgroundColor)), lineWidth: 1.5)
+                        ctx.stroke(path, with: .color(palette.workspace.color), lineWidth: 1.5)
                     }
                     drawLabels(ctx, g)
                 }
@@ -82,7 +83,7 @@ struct SliceChart: View {
         if !rest.isEmpty {
             let size = rest.reduce(0) { $0 + $1.size }
             out.append(
-                Slice(segment: nil, name: "\(rest.count) smaller items", size: size, start: a, end: 2 * .pi,
+                Slice(segment: nil, name: String(localized: "\(rest.count) smaller items"), size: size, start: a, end: 2 * .pi,
                       color: Color(nsColor: .tertiaryLabelColor)))
         }
         return out
@@ -92,7 +93,7 @@ struct SliceChart: View {
     /// the bigger slices are named outside on a short leader line. Names
     /// are whole either way (see `ChartLabel`).
     private func drawLabels(_ ctx: GraphicsContext, _ g: Geo) {
-        let background = Color(nsColor: .windowBackgroundColor)
+        let background = palette.workspace.color
         var outside: [(slice: Slice, y: CGFloat)] = []
         for s in slices {
             let size = ByteCountFormatter.string(fromByteCount: s.size, countStyle: .file)

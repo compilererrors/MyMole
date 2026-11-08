@@ -107,7 +107,12 @@ public final class SystemSampler: Sendable {
     private struct State {
         var previous: Previous?
         var hardware: SystemSnapshot.Hardware?
+        var hardwareAt: Date = .distantPast
     }
+
+    /// The model and chip don't change, but the disk's own health can: it's
+    /// read again this often.
+    public static let hardwareFor: TimeInterval = 3_600
 
     private let state = Mutex(State())
     private let readers: SystemReaders
@@ -125,9 +130,12 @@ public final class SystemSampler: Sendable {
                 s.previous = counters(at: clock())
                 if warmup > .zero { Thread.sleep(forTimeInterval: warmup / .seconds(1)) }
             }
-            let hardware = s.hardware ?? readers.hardware()
-            s.hardware = hardware
             let now = counters(at: clock())
+            // The time of this reading, not a second look at the clock.
+            let at = now.at
+            let hardware = s.hardware.flatMap { at.timeIntervalSince(s.hardwareAt) < Self.hardwareFor ? $0 : nil } ?? readers.hardware()
+            if s.hardware != hardware || at.timeIntervalSince(s.hardwareAt) >= Self.hardwareFor { s.hardwareAt = at }
+            s.hardware = hardware
             let prev = s.previous!
             s.previous = now
             let seconds = max(0.001, now.at.timeIntervalSince(prev.at))

@@ -35,6 +35,29 @@ import Testing
         #expect((byName["Legacy.mpkg"]?.bytes ?? 0) >= box.allocated("Downloads/Legacy.mpkg/Contents/Archive.pax"))
     }
 
+    @Test func findsDeviceSoftwareDiskImagesAndMacOSInstallers() throws {
+        let box = try Sandbox()
+        try box.file("Downloads/Linux.iso", bytes: 9_000)
+        try box.file("Downloads/iPhone_Restore.ipsw", bytes: 9_000)
+        // Apple's installer of macOS, and an app that only looks like one.
+        try box.file("Downloads/Install macOS Test.app/Contents/SharedSupport/SharedSupport.dmg", bytes: 20_000)
+        try PropertyListSerialization.data(fromPropertyList: ["CFBundleIdentifier": "com.apple.InstallAssistant.Test"], format: .xml, options: 0)
+            .write(to: box.url.appending(path: "Downloads/Install macOS Test.app/Contents/Info.plist"))
+        try box.file("Downloads/Install macOS Fake.app/Contents/MacOS/fake", bytes: 2_000)
+        try PropertyListSerialization.data(fromPropertyList: ["CFBundleIdentifier": "com.vendor.Fake"], format: .xml, options: 0)
+            .write(to: box.url.appending(path: "Downloads/Install macOS Fake.app/Contents/Info.plist"))
+
+        let found = InstallerFinder.find(in: locations(box))
+        let byName = Dictionary(uniqueKeysWithValues: found.map { ($0.name, $0) })
+        #expect(Set(byName.keys) == ["Linux.iso", "iPhone_Restore.ipsw", "Install macOS Test.app"])
+        #expect(byName["Linux.iso"]?.kind == .diskImage && byName["iPhone_Restore.ipsw"]?.kind == .firmware)
+        let installer = try #require(byName["Install macOS Test.app"])
+        #expect(installer.kind == .macOSInstaller && installer.isFolder && installer.bytes >= 20_000)
+        #expect(InstallerFinder.isStillInstaller(installer, in: locations(box)))
+        // In Applications only the macOS installers count.
+        #expect(InstallerFinder.kind(of: "/Applications/Archive.dmg") == nil)
+    }
+
     @Test func aCancelledScanFindsNothingMore() throws {
         let box = try Sandbox()
         try box.file("Downloads/A.dmg", bytes: 1_000)

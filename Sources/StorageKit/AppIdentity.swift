@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Security
 
@@ -11,10 +12,14 @@ public struct AppIdentity: Sendable, Equatable {
     public var helperIDs: [String] = []
     /// App group IDs from the app's entitlements.
     public var groups: [String] = []
+    /// Bundle and helper IDs claimed by other installed apps. These must
+    /// survive every fallback match, including vendor and deeper searches.
+    public var otherOwnerIDs: [String] = []
 
-    public init(helperIDs: [String] = [], groups: [String] = []) {
+    public init(helperIDs: [String] = [], groups: [String] = [], otherOwnerIDs: [String] = []) {
         self.helperIDs = helperIDs
         self.groups = groups
+        self.otherOwnerIDs = otherOwnerIDs
     }
 
     /// Where an app keeps code with identities of its own.
@@ -33,63 +38,197 @@ public struct AppIdentity: Sendable, Equatable {
         return parts.prefix(2).joined(separator: ".") + "."
     }
 
-    /// Every identity the bundle at `path` carries, whatever its namespace:
-    /// helpers, login items, services, extensions and launchd labels.
-    public static func carried(atPath path: String) -> Set<String> {
+    /// A missing optional folder is empty; unreadable or malformed metadata is unknown.
+    public static func carried(atPath path: String) -> Set<String>? { contents(atPath: path)?.ids }
+
+    private struct Contents {
+        let ids: Set<String>
+        let code: [String]
+    }
+
+    private static func contents(atPath path: String) -> Contents? {
         var found = Set<String>()
-        for folder in bundleFolders {
-            let dir = path + "/" + folder
-            for name in AppFinder.contents(dir) {
-                let p = dir + "/" + name
-                if let inner = NSDictionary(contentsOfFile: p + "/Contents/Info.plist")?["CFBundleIdentifier"] as? String {
-                    found.insert(inner)
-                } else if let inner = NSDictionary(contentsOfFile: p + "/Info.plist")?["CFBundleIdentifier"] as? String {
-                    found.insert(inner)
-                } else if folder == "Contents/Library/LaunchServices" {
-                    // A blessed helper is a bare program named by its label.
-                    found.insert(name)
+        var code: [String] = []
+        var remaining = 10_000
+        func visit(_ path: String, depth: Int) -> Bool {
+            guard depth <= 8 else { return false }
+            code.append(path)
+            for folder in bundleFolders {
+                let dir = path + "/" + folder
+                guard let names = identityNames(in: folder, bundle: path) else { return false }
+                remaining -= names.count
+                guard remaining >= 0 else { return false }
+                for name in names {
+                    let item = dir + "/" + name
+                    var st = stat()
+                    guard lstat(item, &st) == 0 else { return false }
+                    if st.st_mode & S_IFMT == S_IFDIR {
+                        let candidates = [item + "/Contents/Info.plist", item + "/Info.plist"]
+                        var identified = false
+                        for file in candidates {
+                            switch readPlist(file, within: item) {
+                            case .missing: continue
+                            case .invalid: return false
+                            case .value(let info):
+                                guard let id = info["CFBundleIdentifier"] as? String, AppLeftovers.isWellFormed(id) else { return false }
+                                found.insert(id)
+                                identified = true
+                                guard visit(item, depth: depth + 1) else { return false }
+                            }
+                            break
+                        }
+                        // An opaque directory in a code location may hold another owner.
+                        guard identified else { return false }
+                    } else if st.st_mode & S_IFMT == S_IFREG {
+                        if st.st_mode & 0o111 != 0 { code.append(item) }
+                        if folder == "Contents/Library/LaunchServices", AppLeftovers.isWellFormed(name) {
+                            found.insert(name)
+                        }
+                    } else {
+                        return false
+                    }
                 }
+                guard Trasher.noLinksBetween(path, and: dir) || names.isEmpty else { return false }
             }
-        }
-        for folder in jobFolders {
-            let dir = path + "/" + folder
-            for name in AppFinder.contents(dir) where name.hasSuffix(".plist") {
-                if let label = NSDictionary(contentsOfFile: dir + "/" + name)?["Label"] as? String { found.insert(label) }
+            for folder in jobFolders {
+                let dir = path + "/" + folder
+                guard let names = identityNames(in: folder, bundle: path) else { return false }
+                remaining -= names.count
+                guard remaining >= 0 else { return false }
+                for name in names where name.hasSuffix(".plist") {
+                    guard case .value(let info) = readPlist(dir + "/" + name, within: path),
+                        let label = info["Label"] as? String, AppLeftovers.isWellFormed(label)
+                    else { return false }
+                    found.insert(label)
+                }
+                guard Trasher.noLinksBetween(path, and: dir) || names.isEmpty else { return false }
             }
+            return true
         }
-        return found.filter(AppLeftovers.isWellFormed)
+        guard visit(path, depth: 0) else { return nil }
+        return Contents(ids: found, code: code)
     }
 
-    /// What `app` carries. Apple's identities and the app's own are left out.
-    public static func of(_ app: AppBundle) -> AppIdentity {
-        guard let id = app.bundleID, let space = namespace(of: id) else { return AppIdentity() }
-        let found = carried(atPath: app.path)
+    /// Include groups claimed by nested apps, services and executable helpers.
+    public static func groupClaims(_ path: String, reader: (String) -> [String]? = AppIdentity.entitlementGroups) -> [String]? {
+        guard let tree = contents(atPath: path) else { return nil }
+        var groups = Set<String>()
+        for code in tree.code {
+            guard let claims = reader(code) else { return nil }
+            groups.formUnion(claims)
+        }
+        return groups.sorted()
+    }
+
+    /// Readers are injected for synthetic unsigned bundles and read-failure tests.
+    public struct Readers: Sendable {
+        public var carried: @Sendable (String) -> Set<String>?
+        public var groups: @Sendable (String) -> [String]?
+
+        public init(
+            carried: @escaping @Sendable (String) -> Set<String>? = AppIdentity.carried,
+            groups: @escaping @Sendable (String) -> [String]? = { AppIdentity.groupClaims($0) }
+        ) {
+            self.carried = carried
+            self.groups = groups
+        }
+        public static let live = Readers()
+    }
+
+    /// What the app carries, or nil when ownership cannot be established.
+    public static func of(_ app: AppBundle, readers: Readers = .live) -> AppIdentity? {
+        guard let id = app.bundleID, let space = namespace(of: id) else { return nil }
+        guard let found = readers.carried(app.path), let groups = readers.groups(app.path) else { return nil }
         let helpers = found.filter { $0 != id && $0.hasPrefix(space) && !$0.hasPrefix("com.apple.") && AppLeftovers.isWellFormed($0) }
-        let groups = entitlementGroups(app.path).filter { !$0.hasPrefix("com.apple.") && isGroupID($0) }
-        return AppIdentity(helperIDs: helpers.sorted(), groups: groups.sorted())
+        return AppIdentity(helperIDs: helpers.sorted(), groups: groups.filter(isRemovableGroup).sorted())
     }
 
-    /// `identity` without what another installed app also answers to: a
-    /// helper, login item or job another app carries too (a shared updater,
-    /// say) or that's named under another app's ID, and app groups another
-    /// app of the same vendor claims. Those are theirs as much as this app's;
-    /// a shared vendor prefix proves nothing about who owns them.
-    public static func owned(_ identity: AppIdentity, of app: AppBundle, installed: [AppBundle]) -> AppIdentity {
+    /// Shared identities stay. An unknown competing owner is never an empty set.
+    public static func owned(_ identity: AppIdentity, of app: AppBundle, installed: [AppBundle], readers: Readers = .live) -> AppIdentity? {
         let others = installed.filter { $0.path != app.path }
         var helpers = identity.helperIDs
+        var groups = identity.groups
+        guard others.allSatisfy({ $0.bundleID != nil }) else { return nil }
+        let otherIDs = Set(others.compactMap(\.bundleID))
+        var carried = Set<String>()
+        for other in others {
+            guard let ids = readers.carried(other.path) else { return nil }
+            carried.formUnion(ids)
+        }
         if !helpers.isEmpty {
-            let otherIDs = Set(others.compactMap(\.bundleID))
-            let carried = Set(others.flatMap { carried(atPath: $0.path) })
+            let claimed = Set(carried.map { $0.lowercased() })
             helpers = helpers.filter { h in
-                !carried.contains(h) && !otherIDs.contains { o in h == o || h.hasPrefix(o + ".") }
+                let h = h.lowercased()
+                return !claimed.contains(h) && !otherIDs.contains { o in h == o.lowercased() || h.hasPrefix(o.lowercased() + ".") }
             }
         }
-        var groups = identity.groups
-        if !groups.isEmpty, let space = app.bundleID.flatMap(namespace) {
-            let claimed = Set(others.filter { $0.bundleID?.hasPrefix(space) ?? false }.flatMap { entitlementGroups($0.path) })
-            groups = groups.filter { !claimed.contains($0) }
+        if !groups.isEmpty {
+            var claimed = Set<String>()
+            // Bundle prefixes can differ while apps still share an app group.
+            for other in others {
+                guard let ids = readers.groups(other.path) else { return nil }
+                claimed.formUnion(ids)
+            }
+            let folded = Set(claimed.map { $0.lowercased() })
+            groups = groups.filter { !folded.contains($0.lowercased()) }
         }
-        return AppIdentity(helperIDs: helpers, groups: groups)
+        return AppIdentity(helperIDs: helpers, groups: groups, otherOwnerIDs: carried.union(otherIDs).sorted())
+    }
+
+    public static func owned(for app: AppBundle, installed: [AppBundle], readers: Readers = .live) -> AppIdentity? {
+        guard let identity = of(app, readers: readers) else { return nil }
+        return owned(identity, of: app, installed: installed, readers: readers)
+    }
+
+    private static func identityNames(in folder: String, bundle: String) -> [String]? {
+        var path = bundle
+        for (index, part) in ([""] + folder.split(separator: "/").map(String.init)).enumerated() {
+            if !part.isEmpty { path += "/" + part }
+            var st = stat()
+            guard lstat(path, &st) == 0 else { return index > 0 && errno == ENOENT ? [] : nil }
+            guard st.st_mode & S_IFMT == S_IFDIR else { return nil }
+        }
+        return DirectoryListing.names(path)
+    }
+
+    private enum Plist {
+        case missing, invalid
+        case value([String: Any])
+    }
+
+    /// Shared bounded reader for the primary bundle identity and display metadata.
+    public static func bundleInfo(atPath path: String) -> [String: Any]? {
+        guard case .value(let info) = readPlist(path + "/Contents/Info.plist", within: path) else { return nil }
+        return info
+    }
+
+    private static func readPlist(_ path: String, within root: String) -> Plist {
+        let fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)
+        guard fd >= 0 else { return errno == ENOENT ? .missing : .invalid }
+        defer { close(fd) }
+        let parent = (path as NSString).deletingLastPathComponent
+        guard Trasher.noLinksBetween(root, and: parent) else { return .invalid }
+        var before = stat()
+        guard fstat(fd, &before) == 0, before.st_mode & S_IFMT == S_IFREG,
+            before.st_size > 0, before.st_size <= 1_048_576
+        else { return .invalid }
+        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: false)
+        guard let data = try? handle.read(upToCount: 1_048_577), data.count == before.st_size,
+            let info = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
+        else { return .invalid }
+        var after = stat()
+        guard fstat(fd, &after) == 0, before.st_size == after.st_size,
+            before.st_mtimespec.tv_sec == after.st_mtimespec.tv_sec, before.st_mtimespec.tv_nsec == after.st_mtimespec.tv_nsec,
+            before.st_ctimespec.tv_sec == after.st_ctimespec.tv_sec, before.st_ctimespec.tv_nsec == after.st_ctimespec.tv_nsec,
+            Trasher.noLinksBetween(root, and: parent)
+        else { return .invalid }
+        return .value(info)
+    }
+
+    private static func isRemovableGroup(_ id: String) -> Bool {
+        guard isGroupID(id) else { return false }
+        let name = id.hasPrefix("group.") ? String(id.dropFirst(6)) : String(id.dropFirst(11))
+        return !name.lowercased().hasPrefix("com.apple.")
     }
 
     /// "group.com.vendor.Shared" or "TEAMID1234.com.vendor.Shared".
@@ -100,14 +239,28 @@ public struct AppIdentity: Sendable, Equatable {
         return AppLeftovers.isWellFormed(String(parts[1]))
     }
 
-    /// The app groups the app's signature claims, or none when it can't be read.
-    static func entitlementGroups(_ path: String) -> [String] {
+    /// An unsigned program has no signed groups. Every other read error is unknown.
+    public static func entitlementGroups(_ path: String) -> [String]? {
         var code: SecStaticCode?
-        guard SecStaticCodeCreateWithPath(URL(fileURLWithPath: path) as CFURL, [], &code) == errSecSuccess, let code else { return [] }
+        let creation = SecStaticCodeCreateWithPath(URL(fileURLWithPath: path) as CFURL, [], &code)
+        if creation == errSecCSUnsigned { return [] }
+        guard creation == errSecSuccess, let code else { return nil }
         var info: CFDictionary?
-        guard SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
-            let dict = info as? [String: Any], let ents = dict[kSecCodeInfoEntitlementsDict as String] as? [String: Any]
-        else { return [] }
-        return ents["com.apple.security.application-groups"] as? [String] ?? []
+        let result = SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation), &info)
+        if result == errSecCSUnsigned { return [] }
+        guard result == errSecSuccess, let dict = info as? [String: Any] else { return nil }
+        return signedGroups(dict)
+    }
+
+    static func signedGroups(_ info: [String: Any]) -> [String]? {
+        guard let value = info[kSecCodeInfoEntitlementsDict as String] else { return [] }
+        guard let entitlements = value as? [String: Any] else { return nil }
+        guard let value = entitlements["com.apple.security.application-groups"] else { return [] }
+        guard let groups = value as? [String], groups.count <= 4_096,
+            groups.allSatisfy({ !$0.isEmpty && $0.utf8.count <= 2_048 && !$0.contains("\0") })
+        else { return nil }
+        // Preserve other identifier formats for ownership comparison. Only
+        // supported, non-Apple IDs can later become removal candidates.
+        return groups
     }
 }

@@ -1,28 +1,83 @@
 import AppKit
+import StorageKit
 import SwiftUI
+import UserNotifications
 
 @main
 struct MyMoleApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @State private var app = AppModel()
+    @State private var app: AppModel
+    @AppStorage(MenuBarSettings.showKey) private var showMenuBar = MenuBarSettings.showStandard
+
+    static let mainWindow = "main"
+
+    init() {
+        let model = AppModel()
+        AppModel.live = model
+        _app = State(initialValue: model)
+    }
 
     var body: some Scene {
-        WindowGroup("MyMole") {
+        // One main window: the app's scans, choices and Undo are shared
+        // state, so a second window would only show the same pane twice and
+        // leave commands without a clear target. New Window is left out below.
+        Window("MyMole", id: Self.mainWindow) {
             RootView(app: app)
                 .task { app.prefetchScans() }
         }
         .defaultSize(width: 1240, height: 800)
         .commands {
+            CommandGroup(replacing: .newItem) {}
+            CommandGroup(replacing: .appSettings) { commandButton(.settings) }
+            CommandGroup(replacing: .undoRedo) {
+                // Text fields keep their own Undo and Redo; elsewhere Undo
+                // puts back the pane's last move to the Trash.
+                Button(app.command(.undo).title) {
+                    if !Self.sendToTextField(Selector(("undo:"))) { app.command(.undo).perform() }
+                }
+                .keyboardShortcut("z", modifiers: .command)
+                Button("Redo") { _ = Self.sendToTextField(Selector(("redo:"))) }
+                    .keyboardShortcut("z", modifiers: [.command, .shift])
+            }
+            CommandGroup(after: .textEditing) { commandButton(.find) }
+            CommandGroup(before: .sidebar) {
+                commandButton(.back)
+                commandButton(.forward)
+                Divider()
+                commandButton(.refresh)
+                commandButton(.palette)
+                Divider()
+            }
             CommandGroup(after: .sidebar) {
-                ForEach(Array(Pane.allCases.enumerated()), id: \.element) { i, pane in
-                    if i < 9 {
+                // The panes the sidebar shows, in its order.
+                ForEach(Pane.groups.flatMap(\.1)) { pane in
+                    if let key = pane.shortcut {
                         Button(pane.title) { app.pane = pane }
-                            .keyboardShortcut(KeyEquivalent(Character("\(i + 1)")), modifiers: .command)
+                            .keyboardShortcut(key, modifiers: .command)
                     }
                 }
             }
+            // The system's "Help isn't available" makes way for the real places.
+            CommandGroup(replacing: .help) {
+                Link("MyMole Website", destination: Links.website)
+                Link("MyMole Support", destination: Links.support)
+            }
             // The disk map's views, also in the pane's toolbar menu.
-            CommandMenu("Disk Map") {
+            CommandMenu(String(localized: "Disk Map")) {
+                commandButton(.chooseFolder)
+                commandButton(.enclosingFolder)
+                Divider()
+                Button("Save Scan…") {
+                    app.pane = .diskMap
+                    app.storage.exportScan()
+                }
+                .disabled(app.storage.root == nil || app.storage.scanning || app.storage.opened != nil)
+                Button("Open Saved Scan…") {
+                    app.pane = .diskMap
+                    app.storage.openExportedScan()
+                }
+                .disabled(app.storage.scanning || app.storage.trashing)
+                Divider()
                 ForEach(Array(StorageModel.Chart.allCases.enumerated()), id: \.element) { i, chart in
                     Toggle(
                         chart.title,
@@ -38,23 +93,172 @@ struct MyMoleApp: App {
                 }
             }
         }
+
+        MenuBarExtra(isInserted: menuBarInserted) {
+            MenuBarPanel(app: app).disabled(app.leaving)
+        } label: {
+            MenuBarLabel(app: app)
+        }
+        .menuBarExtraStyle(.window)
+    }
+}
+
+extension MyMoleApp {
+    /// The status item reports its visibility back on every scene update,
+    /// usually unchanged. Writing that to the setting again invalidates every
+    /// scene, which shows the item again and reports again: a loop that keeps
+    /// the main thread busy. Only a real change is saved.
+    private var menuBarInserted: Binding<Bool> {
+        Binding(
+            get: { showMenuBar },
+            set: { inserted in
+                if inserted != showMenuBar { showMenuBar = inserted }
+            })
+    }
+
+    /// A menu item for a registered command, off while it can't run.
+    func commandButton(_ id: AppCommand.ID) -> some View {
+        let c = app.command(id)
+        return Button(c.title, action: c.perform)
+            .keyboardShortcut(c.key ?? " ", modifiers: c.modifiers)
+            .disabled(c.blocker != nil)
+    }
+
+    /// Sends an edit action to the text field being typed in, if one is;
+    /// false when none is.
+    @MainActor static func sendToTextField(_ action: Selector) -> Bool {
+        guard let text = NSApp.keyWindow?.firstResponder as? NSTextView, text.isEditable else { return false }
+        return NSApp.sendAction(action, to: text, from: nil)
     }
 }
 
 /// Makes the SwiftPM executable behave like a normal foreground app:
-/// shows in the Dock and takes focus on launch.
-final class AppDelegate: NSObject, NSApplicationDelegate {
+/// shows in the Dock and takes focus on launch. With the menu bar item on,
+/// closing the window leaves MyMole running there, without a Dock icon,
+/// until its window is opened again or it's quit.
+final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.regular)
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp.servicesProvider = self
+        if LoginItem.startsInMenuBar(openedAtLogin: LoginItem.wasOpenedAtLogin(), menuBar: MenuBarSettings.show()) {
+            startInMenuBar()
+        } else {
+            NSApp.setActivationPolicy(.regular)
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        if Notifier.isAvailable { UNUserNotificationCenter.current().delegate = self }
+        NotificationCenter.default.addObserver(self, selector: #selector(windowWillClose), name: NSWindow.willCloseNotification, object: nil)
     }
-    func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool { true }
+
+    /// "Uninstall with MyMole" in Finder's Services menu: the apps chosen
+    /// there open in Uninstall's review, as a drop does.
+    @MainActor @objc func uninstallApps(_ pasteboard: NSPasteboard, userData: String?, error: AutoreleasingUnsafeMutablePointer<NSString>) {
+        let urls = (pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL]) ?? []
+        guard !urls.isEmpty else {
+            error.pointee = String(localized: "No apps were chosen.") as NSString
+            return
+        }
+        application(NSApp, open: urls)
+    }
+
+    /// Apps dropped on the Dock icon: the window opens on Uninstall with them.
+    @MainActor func application(_ application: NSApplication, open urls: [URL]) {
+        guard let app = AppModel.live else { return }
+        app.showWindow(on: .uninstall)
+        app.apps.open(urls)
+    }
+
+    /// Opened by macOS at login: straight to the menu bar. The scene shows
+    /// its window as the launch ends, so it's closed now and again shortly
+    /// after, unless the user has asked for it meanwhile.
+    @MainActor private func startInMenuBar() {
+        AppModel.live?.waitsInMenuBar = true
+        NSApp.setActivationPolicy(.accessory)
+        Task { @MainActor in
+            for wait in [0, 50, 250, 700] {
+                try? await Task.sleep(for: .milliseconds(wait))
+                guard AppModel.live?.waitsInMenuBar == true else { return }
+                for window in NSApp.windows where Self.isDocument(window) && window.isVisible { window.close() }
+            }
+        }
+    }
+
+    /// The last window of the app's own closing while the menu bar item is
+    /// on: the Dock icon goes with it.
+    @MainActor @objc private func windowWillClose(_ note: Notification) {
+        guard MenuBarSettings.show(), let closing = note.object as? NSWindow, Self.isDocument(closing) else { return }
+        // Asked once the window has gone.
+        Task { @MainActor in
+            if !NSApp.windows.contains(where: { $0 !== closing && $0.isVisible && Self.isDocument($0) }) {
+                NSApp.setActivationPolicy(.accessory)
+            }
+        }
+    }
+
+    /// A window of the app's own, as opposed to the menu bar item's panel or a sheet.
+    @MainActor private static func isDocument(_ window: NSWindow) -> Bool {
+        window.canBecomeMain && !(window is NSPanel)
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool { !MenuBarSettings.show() }
+
+    /// A click on a notification opens the window on the pane it's about.
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
+        let info = response.notification.request.content.userInfo
+        let pane = (info[Alert.paneKey] as? String).flatMap(Pane.init)
+        let showOrphans = (info[Alert.actionKey] as? String) == Alert.showOrphans
+        await MainActor.run {
+            AppModel.live?.showWindow(on: pane)
+            if showOrphans { AppModel.live?.orphans.requested = true }
+        }
+    }
+
+    /// Shown also while MyMole is in front: its window may be closed.
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
+        [.banner, .list]
+    }
+
+    /// Opened again while it runs in the menu bar: the window comes back.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag { AppModel.live?.showWindow() }
+        return true
+    }
+
+    /// A quit during a move or removal stops it before its next item and
+    /// waits for the job to end, so its history record is written. A job
+    /// that doesn't end within the time limit, such as one waiting for an
+    /// administrator's password, is left to the quit.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        let jobs = TrashJobs.shared
+        guard jobs.isBusy else { return .terminateNow }
+        jobs.stop()
+        Task { @MainActor in
+            let deadline = ContinuousClock.now + .seconds(10)
+            while jobs.isBusy, ContinuousClock.now < deadline {
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            // A pane writes its record right after its job ends.
+            try? await Task.sleep(for: .milliseconds(200))
+            CleanupLog.flush()
+            StoreWrites.flush()
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
 }
 
 struct RootView: View {
     @Bindable var app: AppModel
     /// A change of density makes every view, and the AppKit tables, again.
     @AppStorage(Density.key) private var density = Density.standard.rawValue
+    @AppStorage(ThemeFamily.key) private var theme = ThemeFamily.standard.rawValue
+    @AppStorage(AppearanceMode.key) private var mode = AppearanceMode.system.rawValue
+    @AppStorage(TableLines.key) private var lines = TableLines.standard.rawValue
+    @AppStorage(MenuBarSettings.showKey) private var showMenuBar = MenuBarSettings.showStandard
+    /// Read once per window: the first start asks about the menu bar item.
+    @State private var askMenuBar = MenuBarSettings.shouldAsk()
+
+    private var palette: Palette { (ThemeFamily(rawValue: theme) ?? .standard).palette }
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         NavigationSplitView {
@@ -81,10 +285,34 @@ struct RootView: View {
             .safeAreaInset(edge: .bottom) { editionBadge }
         } detail: {
             detail
+                .background(palette.workspace.color)
+                .safeAreaInset(edge: .top, spacing: 0) {
+                    if askMenuBar { MenuBarQuestion(asking: $askMenuBar) }
+                }
                 .frame(minWidth: 760, minHeight: 560)
         }
-        .tint(Theme.accent)
+        .tint(palette.accent.color)
+        // A theme reaches every view through the environment: they redraw,
+        // nothing is made again and no scan restarts.
+        .environment(\.palette, palette)
+        .environment(\.tableLines, TableLines(rawValue: lines) ?? .standard)
+        .environment(\.findRequest, app.findRequest)
+        // For Back and Forward in every pane's toolbar (`paneToolbar`).
+        .environment(app)
+        .sheet(isPresented: $app.showPalette) { CommandPalette(app: app).environment(\.palette, palette) }
         .id(density)
+        .emptyTrashFlow(app.trash)
+        .overlay(alignment: .topTrailing) {
+            if !app.apps.uninstalling, !app.deepClean.trashing, !app.installers.trashing,
+               !app.projects.trashing, !app.duplicates.trashing, !app.orphans.trashing {
+                ConfirmationToast {
+                    app.settingsQuery = String(localized: "Confirmations")
+                    app.pane = .settings
+                }
+            }
+        }
+        // The window's appearance, which its AppKit tables follow too.
+        .preferredColorScheme((AppearanceMode(rawValue: mode) ?? .system).colorScheme)
         // Each pane draws its own title in the toolbar (see `paneToolbar`).
         .toolbar(removing: .title)
         // Re-probe whenever the app comes forward — the user is most likely
@@ -92,15 +320,22 @@ struct RootView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             app.recheckDiskAccess()
         }
+        .task {
+            app.openWindow = { openWindow(id: MyMoleApp.mainWindow) }
+            app.startMonitoring()
+            if askMenuBar { MenuBarSettings.markAsked() }
+        }
+        // Chosen in Settings meanwhile: nothing left to ask.
+        .onChange(of: showMenuBar) { withAnimation(Motion.snappy) { askMenuBar = false } }
     }
 
     @ViewBuilder private var detail: some View {
         if let place = app.gate(for: app.pane) {
             FolderAccessGate(app: app, place: place)
-                .paneToolbar(app.pane.title, subtitle: "Needs access to \(place.inSentence)")
+                .paneToolbar("\(app.pane.title)", subtitle: "Needs access to \(place.inSentence)")
         } else if app.pane.needsDiskAccess && !app.fullDiskAccess {
             FullDiskAccessGate(app: app)
-                .paneToolbar(app.pane.title, subtitle: "Needs Full Disk Access")
+                .paneToolbar("\(app.pane.title)", subtitle: "Needs Full Disk Access")
         } else {
             switch app.pane {
             case .dashboard: DashboardView(app: app)
@@ -108,11 +343,13 @@ struct RootView: View {
             case .clean: DeepCleanView(model: app.deepClean, openSystemClean: { app.pane = .systemClean })
             case .systemClean: SystemCleanView(model: app.systemClean)
             case .installer: InstallersView(model: app.installers)
-            case .uninstall: UninstallView(model: app.apps)
+            case .uninstall: UninstallView(model: app.apps, orphans: app.orphans, selfRemoval: app.selfRemoval)
             case .diskMap: StorageView(model: app.storage)
             case .projects: ProjectsView(app: app, model: app.projects)
             case .status: StatusView(app: app)
             case .history: HistoryView(app: app)
+            case .startup: StartupView(model: app.startup)
+            case .duplicates: DuplicatesPane(duplicates: app.duplicates, similar: app.similar)
             case .settings: SettingsView(app: app)
             }
         }
@@ -124,11 +361,13 @@ struct RootView: View {
         let busy =
             (pane == .optimize && app.maintenance.phase != .idle)
             || (pane == .systemClean && (app.systemClean.scanning || app.systemClean.removing))
-            || (pane == .uninstall && (app.apps.loading || app.apps.uninstalling))
+            || (pane == .uninstall && (app.apps.loading || app.apps.uninstalling || app.orphans.loading || app.orphans.trashing))
             || (pane == .diskMap && app.storage.scanning)
             || (pane == .projects && app.projects.scanning)
             || (pane == .installer && app.installers.scanning)
             || (pane == .clean && (app.deepClean.scanning || app.deepClean.trashing))
+            || (pane == .duplicates && (app.duplicates.scanning || app.duplicates.trashing || app.similar.scanning || app.similar.trashing))
+            || (pane == .startup && (app.startup.loading || app.startup.trashing))
         if busy {
             PulseDot(size: 7)
         } else if let text = app.badge(for: pane) {
@@ -139,13 +378,13 @@ struct RootView: View {
     }
 
     private var brandHeader: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: DS.Space.sm) {
             AppIconImage(size: 30)
             Text("MyMole").font(.title3.weight(.semibold))
             Spacer()
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 6)
+        .padding(.horizontal, DS.Space.md)
+        .padding(.vertical, DS.Space.xs)
     }
 
     private var editionBadge: some View {
@@ -153,13 +392,13 @@ struct RootView: View {
             Circle()
                 .fill(app.canScan ? Color.green : Color.orange)
                 .frame(width: 7, height: 7)
-            Text(Edition.current.isSandboxed ? (app.canScan ? "App Store edition" : "Needs folder access") : (app.canScan ? "Ready" : "Needs Full Disk Access"))
+            Text(Edition.current.isSandboxed ? (app.canScan ? String(localized: "App Store edition") : String(localized: "Needs folder access")) : (app.canScan ? String(localized: "Ready") : String(localized: "Needs Full Disk Access")))
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Spacer()
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(.horizontal, DS.Space.lg)
+        .padding(.vertical, DS.Space.sm)
     }
 }
 
@@ -177,7 +416,7 @@ struct FullDiskAccessGate: View {
             subtitle:
                 "Cleaning and disk maps read your whole home folder, including other apps' data. Without Full Disk Access macOS asks again for every folder it protects. Turn on MyMole in System Settings → Privacy & Security → Full Disk Access — if it isn't listed, click + and pick MyMole.app. Nothing is scanned until then."
         ) {
-            HStack {
+            DSFlow(spacing: DS.Space.md) {
                 Button("Open System Settings") { FullDiskAccess.openSettings() }
                     .primaryAction()
                 Button("Show MyMole.app") {
@@ -189,5 +428,13 @@ struct FullDiskAccessGate: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // A switch turned on in System Settings is noticed while this shows,
+        // without having to come back to MyMole first.
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(2))
+                app.recheckDiskAccess()
+            }
+        }
     }
 }

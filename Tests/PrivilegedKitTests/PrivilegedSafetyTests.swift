@@ -30,6 +30,17 @@ final class PrivilegedSafetyFixture: @unchecked Sendable {
 
 @testable import PrivilegedKit
 @Suite struct PrivilegedSafetyTests {
+ @Test func nulCannotDisguiseANeverRemovableSystemCache() throws {
+  let b = try PrivilegedSafetyFixture()
+  let protected = try b.file("Caches/com.apple.dyld/cache")
+  let path = protected.deletingLastPathComponent().path
+  let disguised = path + "\0.synthetic"
+  let roots = [SystemCleanRules.Root(path: b.root.appending(path: "Caches").path, reason: "Synthetic")]
+  #expect(!SystemCleanRules.allowed(disguised, roots: roots))
+  let report = SystemCleanRules.remove([disguised], roots: roots)
+  #expect(report.removed.isEmpty && report.refused == [disguised])
+  #expect(FileManager.default.fileExists(atPath: protected.path))
+ }
  @Test func cleanupMustNotDeleteUnselectedStagingContent() throws {
   let b = try PrivilegedSafetyFixture()
   let pending = try b.file("Caches/.mymole-removing/previous-selection")

@@ -1,21 +1,24 @@
 import Darwin
 import Foundation
 
-// Installers left behind once their app is in place: disk images, packages
-// and Xcode archives in the folders downloads end up in. They're found by
+// Installers left behind once their app is in place: disk images, packages,
+// Xcode archives, iPhone and iPad software in the folders downloads end up
+// in, and "Install macOS …" apps in Applications. They're found by
 // file type only; MyMole never guesses from names whether one is still
 // wanted, so everything found is offered and nothing is chosen for the user.
 
 /// One installer on disk.
 public struct InstallerFile: Sendable, Hashable, Codable, Identifiable {
     public enum Kind: String, Sendable, Codable, CaseIterable {
-        case diskImage, package, archive
+        case diskImage, package, archive, firmware, macOSInstaller
 
         public var title: String {
             switch self {
             case .diskImage: "Disk Image"
             case .package: "Installer Package"
             case .archive: "Xcode Archive"
+            case .firmware: "iPhone or iPad Software"
+            case .macOSInstaller: "macOS Installer"
             }
         }
     }
@@ -77,7 +80,7 @@ public struct InstallerListing: Sendable {
 
 public enum InstallerFinder {
     static let kinds: [String: InstallerFile.Kind] = [
-        "dmg": .diskImage, "pkg": .package, "mpkg": .package, "xip": .archive,
+        "dmg": .diskImage, "iso": .diskImage, "pkg": .package, "mpkg": .package, "xip": .archive, "ipsw": .firmware,
     ]
 
     /// Folders whose insides are never installers lying around: other
@@ -92,11 +95,30 @@ public enum InstallerFinder {
             InstallerLocation(path: home + "/Desktop", depth: 2),
             InstallerLocation(path: home + "/Documents", depth: 2),
             InstallerLocation(path: home + "/Library/Caches/Homebrew/downloads", depth: 1),
+            // Finder and Apple Configurator keep every device update they fetched.
+            InstallerLocation(path: home + "/Library/iTunes/iPhone Software Updates", depth: 1),
+            InstallerLocation(path: home + "/Library/iTunes/iPad Software Updates", depth: 1),
+            // Only "Install macOS …" apps are taken from here.
+            InstallerLocation(path: "/Applications", depth: 1),
         ]
     }
 
     public static func kind(of path: String) -> InstallerFile.Kind? {
-        kinds[(path as NSString).pathExtension.lowercased()]
+        if isMacOSInstaller(path) { return .macOSInstaller }
+        // Outside the user's own folders only macOS installers count.
+        guard !path.hasPrefix("/Applications/") else { return nil }
+        return kinds[(path as NSString).pathExtension.lowercased()]
+    }
+
+    /// An "Install macOS …" app: Apple's installer of the whole system,
+    /// 13 GB or more, left in Applications after an upgrade.
+    static func isMacOSInstaller(_ path: String) -> Bool {
+        let name = (path as NSString).lastPathComponent
+        guard name.hasPrefix("Install macOS "), name.hasSuffix(".app"),
+            let info = NSDictionary(contentsOfFile: path + "/Contents/Info.plist"),
+            let id = info["CFBundleIdentifier"] as? String
+        else { return false }
+        return id.hasPrefix("com.apple.InstallAssistant.")
     }
 
     /// Every installer in `locations`, largest first.

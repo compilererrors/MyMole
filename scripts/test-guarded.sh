@@ -5,7 +5,7 @@
 # Writes are allowed only inside a fresh run folder and the package's build
 # folder; tests move files into a "Trash" folder of their own. A test that
 # reached for real user data would fail instead of acting.
-# Usage: scripts/test-guarded.sh [--appstore | --sanitize=thread] [--filter <pattern>]
+# Usage: scripts/test-guarded.sh [--appstore | --sanitize=thread | --release] [--filter <pattern>]
 set -euo pipefail
 umask 077
 
@@ -13,6 +13,10 @@ umask 077
 build=()
 if [ "${1:-}" = --sanitize=thread ]; then
   build=(--sanitize=thread)
+  shift
+elif [ "${1:-}" = --release ]; then
+  # Optimized as shipped, using the same isolated fixtures.
+  build=(-c release -Xswiftc -enable-testing --scratch-path .build/release-tests)
   shift
 elif [ "${1:-}" = --appstore ]; then
   # The App Store edition's code, built apart so the two never mix.
@@ -87,6 +91,7 @@ if [ "${build[0]:-}" = --sanitize=thread ]; then
   [ -n "$insert" ] || fail "The Thread Sanitizer runtime wasn't found in the toolchain."
 fi
 status=0
+matched=0
 for dir in Tests/*/; do
   target=$(basename "$dir")
   bundle="$bin/$target.xctest/Contents/MacOS/$target"
@@ -94,10 +99,23 @@ for dir in Tests/*/; do
   echo "== $target"
   # macOS drops DYLD_ variables when it starts a system program such as
   # sandbox-exec, so they're set inside, right before the helper starts.
-  TMPDIR="$root/tmp/" MYMOLE_GUARDED_TEST=1 XDG_CACHE_HOME="$root/cache" PLATFORM="$developer/Platforms/MacOSX.platform/Developer" \
+  if TMPDIR="$root/tmp/" MYMOLE_GUARDED_TEST=1 XDG_CACHE_HOME="$root/cache" PLATFORM="$developer/Platforms/MacOSX.platform/Developer" \
     INSERT="$insert" /usr/bin/sandbox-exec -f "$profile" /bin/sh -c \
     '[ -z "$INSERT" ] || export DYLD_INSERT_LIBRARIES="$INSERT"; DYLD_FRAMEWORK_PATH="$PLATFORM/Library/Frameworks" DYLD_LIBRARY_PATH="$PLATFORM/usr/lib" exec "$@"' sh \
-    "$helper" --test-bundle-path "$bundle" --testing-library swift-testing "$@" ||
-    status=1
+    "$helper" --test-bundle-path "$bundle" --testing-library swift-testing "$@"; then
+    matched=$((matched + 1))
+  else
+    code=$?
+    # Swift Testing's no-tests exit is expected for a filter that matches
+    # another bundle. Every other error, including a failed test, stays fatal.
+    if [ "$code" = 69 ]; then
+      echo "No matching tests in $target."
+    else
+      echo "$target failed (exit $code)." >&2
+      matched=$((matched + 1))
+      status=1
+    fi
+  fi
 done
+[ "$matched" -gt 0 ] || fail "No test bundle matched the requested run."
 exit $status

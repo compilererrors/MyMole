@@ -16,21 +16,22 @@ enum Heat: Int, CaseIterable, Comparable {
 
     var title: String {
         switch self {
-        case .today: "Active today"
-        case .week: "Active this week"
-        case .month: "Active this month"
-        case .dormant: "Dormant"
+        case .today: String(localized: "Active today")
+        case .week: String(localized: "Active this week")
+        case .month: String(localized: "Active this month")
+        case .dormant: String(localized: "Dormant")
         }
     }
 
     var symbol: String { self == .dormant ? "moon.zzz" : "flame.fill" }
 
+    /// Only the status colours: red and orange mark what's being worked on
+    /// now, and the rest is neutral, told apart by its symbol and title.
     var color: Color {
         switch self {
         case .today: .red
         case .week: .orange
-        case .month: .yellow
-        case .dormant: .secondary
+        case .month, .dormant: .secondary
         }
     }
 
@@ -38,7 +39,7 @@ enum Heat: Int, CaseIterable, Comparable {
         switch self {
         case .today: .systemRed
         case .week: .systemOrange
-        case .month: .systemYellow
+        case .month: .secondaryLabelColor
         case .dormant: .tertiaryLabelColor
         }
     }

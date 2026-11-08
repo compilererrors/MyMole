@@ -21,20 +21,20 @@ enum Density: String, CaseIterable, Identifiable {
 
     static let key = "appearance.density"
     static let standard = Density.spacious
-    /// Read once at launch and set by Settings, on the main thread, before
-    /// the views are made again; every measure is a plain lookup.
-    nonisolated(unsafe) static var current = Density(rawValue: UserDefaults.standard.string(forKey: key) ?? "") ?? standard
+    /// Read once at launch and set by Settings before the views are made
+    /// again; every measure is a plain lookup, on the main actor only.
+    @MainActor static var current = Density(rawValue: UserDefaults.standard.string(forKey: key) ?? "") ?? standard
 
     var id: String { rawValue }
-    var title: String { self == .compact ? "Compact" : "Spacious" }
+    var title: String { self == .compact ? String(localized: "Compact") : String(localized: "Spacious") }
 
-    static func pick(_ compact: CGFloat, _ spacious: CGFloat) -> CGFloat {
+    @MainActor static func pick(_ compact: CGFloat, _ spacious: CGFloat) -> CGFloat {
         current == .compact ? compact : spacious
     }
 }
 
 enum DS {
-    enum Space {
+    @MainActor enum Space {
         static var xxs: CGFloat { Density.pick(2, 3) }
         static var xs: CGFloat { Density.pick(4, 5) }
         static var sm: CGFloat { Density.pick(8, 10) }
@@ -48,13 +48,23 @@ enum DS {
     }
 
     /// Rows of the AppKit tables and outlines, and the gap between their columns.
-    enum Table {
+    @MainActor enum Table {
         static var row: CGFloat { Density.pick(34, 40) }
         static var compactRow: CGFloat { Density.pick(26, 32) }
         static var tallRow: CGFloat { Density.pick(46, 54) }
         static var headerRow: CGFloat { Density.pick(32, 38) }
         static var columnGap: CGFloat { Density.pick(6, 10) }
+        /// The gap with the table's lines: wider in a grid, where a line runs down its middle.
+        static func columnGap(_ lines: TableLines) -> CGFloat { columnGap + (lines == .grid ? 6 : 0) }
         static var cellInset: CGFloat { Density.pick(2, 6) }
+        /// The slot an outline's disclosure arrow is centred in, and the gap after it.
+        static let disclosure: CGFloat = 16
+        static var disclosureGap: CGFloat { Density.pick(2, 4) }
+        /// One level of an outline: a slot and its gap, so a row's arrow sits under its parent's tick box.
+        static var indent: CGFloat { disclosure + disclosureGap }
+        /// A tick box, or an icon, and the gap to what follows it.
+        static var tickStep: CGFloat { Density.pick(22, 24) }
+        static let iconStep: CGFloat = 22
         /// Inset rows with rounded selection, as Finder and Mail draw them, when there's room.
         static var style: NSTableView.Style { Density.current == .compact ? .fullWidth : .inset }
     }
@@ -67,6 +77,17 @@ enum DS {
         .monospacedSystemFont(ofSize: size, weight: weight)
     }
 
+    /// The two big-number roles. A tile's number stands alone in a dashboard
+    /// card, so it's a little larger; a pane's sits beside its caption in
+    /// the pane header.
+    enum MetricRole {
+        case tile, pane
+
+        var font: Font {
+            .system(size: self == .tile ? 28 : 26, weight: .semibold, design: .rounded)
+        }
+    }
+
     /// Continuous radii: chips 7,
     /// controls and rows 8, cards and panels 10, sheets 12.
     enum Radius {
@@ -76,12 +97,19 @@ enum DS {
         static let sheet: CGFloat = 12
     }
 
-    enum Size {
+    @MainActor enum Size {
         static var rowMinHeight: CGFloat { Density.pick(28, 34) }
         static var iconColumn: CGFloat { Density.pick(20, 22) }
         static let inspectorWidth: CGFloat = 320
+        /// The narrowest a chart beside a list may get.
+        static let chartMinWidth: CGFloat = 280
+        /// A draggable divider: wide enough to grab, drawn as a hairline.
+        static let splitHandle: CGFloat = 7
         /// Widest a page's content gets; wider windows centre it.
         static let pageMaxWidth: CGFloat = 1200
+        static let reviewWidth: CGFloat = 720
+        /// Long reviews scroll their body and keep the action footer reachable.
+        static let reviewBodyMaxHeight: CGFloat = 640
         /// The status strip under a pane header: fixed, so nothing jumps.
         static var stripHeight: CGFloat { Density.pick(26, 28) }
     }
@@ -136,20 +164,57 @@ enum Breakable {
     }
 }
 
+/// What a component shows: a phrase of the interface, looked up in the
+/// string catalog (Localization/Localizable.xcstrings), or a value shown as
+/// it is, such as a name, a path, a size or text made elsewhere. A literal
+/// handed to a component is a phrase; a `String` value is shown as it is.
+///
+/// A component's `String` form is generic over `StringProtocol`, as SwiftUI's
+/// own text views are: a concrete `LocalizedStringResource` then outranks it
+/// for a literal, which `@_disfavoredOverload` alone doesn't manage once a
+/// second argument is given, so the phrase reaches the catalog.
+struct Phrase {
+    private let resource: LocalizedStringResource?
+    private let verbatim: String
+
+    init(_ resource: LocalizedStringResource) {
+        self.resource = resource
+        verbatim = ""
+    }
+
+    init(verbatim: String) {
+        resource = nil
+        self.verbatim = verbatim
+    }
+
+    var text: Text { resource.map { Text($0) } ?? Text(verbatim: verbatim) }
+    /// As the reader sees it, for tooltips and accessibility.
+    var string: String { resource.map { String(localized: $0) } ?? verbatim }
+}
+
 /// Plain copy in a text role. Wraps to show everything unless `lines` caps it.
 struct DSText: View {
-    let text: String
+    let text: Phrase
     var role: TextRole = .body
     var lines: Int? = nil
 
-    init(_ text: String, _ role: TextRole = .body, lines: Int? = nil) {
-        self.text = text
+    init(_ text: LocalizedStringResource, _ role: TextRole = .body, lines: Int? = nil) {
+        self.init(phrase: Phrase(text), role, lines: lines)
+    }
+
+    @_disfavoredOverload
+    init<S: StringProtocol>(_ text: S, _ role: TextRole = .body, lines: Int? = nil) {
+        self.init(phrase: Phrase(verbatim: String(text)), role, lines: lines)
+    }
+
+    init(phrase: Phrase, _ role: TextRole = .body, lines: Int? = nil) {
+        text = phrase
         self.role = role
         self.lines = lines
     }
 
     var body: some View {
-        Text(text)
+        text.text
             .font(role.font)
             .foregroundStyle(role.style)
             .lineLimit(lines)
@@ -237,16 +302,22 @@ struct DSValue: View {
 
 /// A small colored capsule label.
 struct DSBadge: View {
-    let text: String
+    let text: Phrase
     let tint: Color
 
-    init(_ text: String, tint: Color) {
-        self.text = text
+    init(_ text: LocalizedStringResource, tint: Color) {
+        self.text = Phrase(text)
+        self.tint = tint
+    }
+
+    @_disfavoredOverload
+    init<S: StringProtocol>(_ text: S, tint: Color) {
+        self.text = Phrase(verbatim: String(text))
         self.tint = tint
     }
 
     var body: some View {
-        Text(text)
+        text.text
             .font(.caption2.weight(.semibold))
             .foregroundStyle(tint)
             .padding(.horizontal, 6)
@@ -299,8 +370,23 @@ extension View {
 /// The filter field above a list: magnifying glass, placeholder, and a
 /// clear button once there's text. Looks like the system search field.
 struct DSFilterField: View {
+    /// Whether a row with these texts (name, folder…) passes `query`: every
+    /// word typed appears in one of them, in any case.
+    nonisolated static func matches(_ query: String, _ texts: String...) -> Bool {
+        TextQuery(query).matches(texts: texts)
+    }
+
+    /// "· 3 chosen hidden by the filter", so a choice the filter hides is never a surprise.
+    static func hiddenNote(chosen: Set<String>, shown: Set<String>) -> String {
+        let hidden = chosen.subtracting(shown).count
+        return hidden == 0 ? "" : String(localized: " · \(hidden) hidden by the filter")
+    }
+
     let prompt: String
     @Binding var text: String
+    @Environment(\.palette) private var palette
+    @Environment(\.findRequest) private var findRequest
+    @FocusState private var focused: Bool
 
     init(_ prompt: String, text: Binding<String>) {
         self.prompt = prompt
@@ -312,6 +398,11 @@ struct DSFilterField: View {
             Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
             TextField(prompt, text: $text, prompt: Text(prompt))
                 .textFieldStyle(.plain)
+                .focused($focused)
+                // Escape clears what's typed, then leaves the field.
+                .onExitCommand { if text.isEmpty { focused = false } else { text = "" } }
+                .onChange(of: findRequest) { focused = true }
+                .accessibilityLabel(prompt)
             if !text.isEmpty {
                 Button {
                     text = ""
@@ -320,11 +411,17 @@ struct DSFilterField: View {
                 }
                 .buttonStyle(.borderless)
                 .help("Clear")
+                .accessibilityLabel("Clear search")
             }
         }
         .padding(.horizontal, DS.Space.sm)
-        .frame(height: 26)
-        .background(.quaternary.opacity(0.6), in: .rect(cornerRadius: DS.Radius.control))
+        .frame(height: 28)
+        .background(palette.field.color, in: .rect(cornerRadius: DS.Radius.control))
+        .overlay {
+            RoundedRectangle(cornerRadius: DS.Radius.control, style: .continuous)
+                .strokeBorder(focused ? palette.accentText.color : palette.separator.color, lineWidth: 1)
+                .allowsHitTesting(false)
+        }
     }
 }
 
@@ -333,5 +430,30 @@ struct DSFilterField: View {
 func nothingMoved(_ failed: [(path: String, reason: String)]) -> String {
     let count = failed.count == 1 ? "it" : "\(failed.count) items"
     let why = failed.first.map { ": \($0.reason.trimmingCharacters(in: CharacterSet(charactersIn: ".")))" } ?? ""
-    return "Nothing was moved to the Trash; MyMole couldn't move \(count)\(why)."
+    return String(localized: "Nothing was moved to the Trash; MyMole couldn't move \(count)\(why).")
+}
+
+/// An empty result from a scan that couldn't read everything: nothing was
+/// found in what could be read, which isn't the same as nothing being there.
+struct DSIncompleteEmpty: View {
+    let what: String
+    let unreadable: [String]
+    let retry: () -> Void
+
+    var body: some View {
+        ContentUnavailableView {
+            Label("No \(what) in What Could Be Read", systemImage: "exclamationmark.triangle")
+        } description: {
+            Text(Self.explanation(unreadable))
+        } actions: {
+            Button("Scan Again", action: retry)
+        }
+    }
+
+    static func explanation(_ unreadable: [String]) -> String {
+        let places = unreadable.prefix(3).map { ($0 as NSString).abbreviatingWithTildeInPath }.joined(separator: ", ")
+        let more = unreadable.count > 3 ? String(localized: " and \(unreadable.count - 3) more") : ""
+        return String(localized: "MyMole couldn't read \(places)\(more), so this may not be everything. ")
+            + String(localized: "Give MyMole Full Disk Access or access to those folders, then scan again.")
+    }
 }

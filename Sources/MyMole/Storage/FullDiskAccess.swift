@@ -1,4 +1,5 @@
 import AppKit
+import OSLog
 import Foundation
 import StorageKit
 
@@ -14,19 +15,35 @@ enum FullDiskAccess {
         "Library/Application Support/com.apple.TCC",
     ]
 
-    static var isGranted: Bool {
-        let home = URL(fileURLWithPath: Home.path)
+    private static let log = Logger(subsystem: "com.viktornyberg.mymole", category: "access")
+
+    /// Granted, refused, or not known: none of the probes said either way.
+    enum State: Equatable {
+        case granted, denied, unknown
+    }
+
+    /// Access is assumed while it's unknown, so a Mac without the probed
+    /// folders isn't locked out; Settings says it couldn't tell.
+    static var isGranted: Bool { state() != .denied }
+
+    /// One listing per probe, at most three, and no prompt: listing a
+    /// protected folder never asks the user.
+    static func state(home: String = Home.path, list: (String) throws -> Void = { _ = try FileManager.default.contentsOfDirectory(atPath: $0) }) -> State {
         for rel in probes {
             do {
-                _ = try FileManager.default.contentsOfDirectory(atPath: home.appending(path: rel).path)
-                return true
+                try list(home + "/" + rel)
+                log.debug("Full Disk Access probe \(rel, privacy: .public): readable")
+                return .granted
             } catch let e as CocoaError where e.code == .fileReadNoPermission {
-                return false
+                // The underlying error can name paths: kept private in the log.
+                log.debug("Full Disk Access probe \(rel, privacy: .public): no permission, \(String(describing: e.underlying), privacy: .private)")
+                return .denied
             } catch {
+                log.debug("Full Disk Access probe \(rel, privacy: .public): inconclusive, \(String(describing: error), privacy: .private)")
                 continue
             }
         }
-        return true
+        return .unknown
     }
 
     static func openSettings() {

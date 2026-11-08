@@ -54,7 +54,9 @@ public enum SystemLeftovers {
     }
 
     static func matches(_ entry: String, id: String, rule: Rule) -> Bool {
-        switch rule {
+        let entry = entry.lowercased()
+        let id = id.lowercased()
+        return switch rule {
         case .exactID: entry == id
         case .idPlist: entry == id + ".plist"
         case .jobPlist: entry.hasSuffix(".plist") && (entry == id + ".plist" || entry.hasPrefix(id + "."))
@@ -100,26 +102,62 @@ public enum SystemLeftovers {
     /// in it) and each user's Applications folder. Nil when /Applications
     /// can't be read: then ownership can't be checked and nothing goes.
     static func installedOwners(base: String) -> Set<String>? {
-        guard let top = try? FileManager.default.contentsOfDirectory(atPath: base + "/Applications") else { return nil }
+        // A folder that isn't there holds no apps; one that is there but
+        // can't be read, or an app whose identity can't be read, leaves the
+        // map incomplete, and then nothing is removed.
+        func names(_ dir: String) -> [String]? { DirectoryListing.names(dir) }
+        // /Applications is always there: missing, it's a map of nothing.
+        guard let top = try? FileManager.default.contentsOfDirectory(atPath: base + "/Applications"),
+            let users = names(base + "/Users")
+        else { return nil }
         var folders = [base + "/Applications"]
-        folders += top.filter { !$0.hasSuffix(".app") && !$0.hasPrefix(".") }.map { base + "/Applications/" + $0 }
-        for user in (try? FileManager.default.contentsOfDirectory(atPath: base + "/Users")) ?? [] where !user.hasPrefix(".") {
-            let apps = base + "/Users/" + user + "/Applications"
+        guard let subfolders = ownerSubfolders(top, in: base + "/Applications") else { return nil }
+        folders += subfolders
+        for user in users {
+            let home = base + "/Users/" + user
+            var st = stat()
+            guard lstat(home, &st) == 0, st.st_mode & S_IFMT != S_IFLNK else { return nil }
+            guard st.st_mode & S_IFMT == S_IFDIR else { continue }
+            let apps = home + "/Applications"
+            guard let inside = names(apps) else { return nil }
             folders.append(apps)
-            folders += ((try? FileManager.default.contentsOfDirectory(atPath: apps)) ?? [])
-                .filter { !$0.hasSuffix(".app") && !$0.hasPrefix(".") }.map { apps + "/" + $0 }
+            guard let subfolders = ownerSubfolders(inside, in: apps) else { return nil }
+            folders += subfolders
         }
         var owners = Set<String>()
         for dir in folders {
-            for name in (try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? [] where name.hasSuffix(".app") {
+            guard let inside = names(dir) else { return nil }
+            for name in inside where name.lowercased().hasSuffix(".app") {
                 let app = dir + "/" + name
-                if let id = NSDictionary(contentsOfFile: app + "/Contents/Info.plist")?["CFBundleIdentifier"] as? String {
-                    owners.insert(id)
-                }
-                owners.formUnion(AppIdentity.carried(atPath: app))
+                guard isFolder(app) else { return nil }
+                let plist = app + "/Contents/Info.plist"
+                var st = stat()
+                // Not a bundle at all: nothing to own anything.
+                if lstat(plist, &st) != 0 && errno == ENOENT { continue }
+                guard st.st_mode & S_IFMT == S_IFREG, Trasher.noLinksBetween(app, and: app + "/Contents") else { return nil }
+                guard let id = AppIdentity.bundleInfo(atPath: app)?["CFBundleIdentifier"] as? String, AppLeftovers.isWellFormed(id) else { return nil }
+                owners.insert(id.lowercased())
+                guard let carried = AppIdentity.carried(atPath: app) else { return nil }
+                owners.formUnion(carried.map { $0.lowercased() })
             }
         }
         return owners
+    }
+
+    private static func isFolder(_ path: String) -> Bool {
+        var st = stat()
+        return lstat(path, &st) == 0 && st.st_mode & S_IFMT == S_IFDIR
+    }
+
+    private static func ownerSubfolders(_ names: [String], in root: String) -> [String]? {
+        var folders: [String] = []
+        for name in names where !name.lowercased().hasSuffix(".app") {
+            let path = root + "/" + name
+            var st = stat()
+            guard lstat(path, &st) == 0, st.st_mode & S_IFMT != S_IFLNK else { return nil }
+            if st.st_mode & S_IFMT == S_IFDIR { folders.append(path) }
+        }
+        return folders
     }
 
     /// The IDs a request may name: the app's own, and others in the app's
@@ -132,7 +170,9 @@ public enum SystemLeftovers {
     /// Removes what passes `allowed`, permanently. Nothing goes while the
     /// app itself is installed, and no entry that matches an app still
     /// installed, or something one carries, whatever the request says. A
-    /// launch daemon's job is stopped first; one that can't be stopped stays.
+    /// launch daemon's job is stopped first; one that can't be stopped
+    /// stays, and so does one whose job isn't named after the app: its
+    /// file would go while the job ran on until the next restart.
     /// One removal runs at a time; each stages only its own entries.
     public static func remove(
         _ paths: [String], appID: String, ids: [String], base: String = "",
@@ -142,7 +182,7 @@ public enum SystemLeftovers {
         defer { Staging.lock.unlock() }
         var report = RemovalReport()
         let all = requestable(appID: appID, ids: ids)
-        guard !all.isEmpty, let owners = installedOwners(base: base), !owners.contains(appID) else {
+        guard !all.isEmpty, let owners = installedOwners(base: base), !owners.contains(appID.lowercased()) else {
             report.refused = paths
             return report
         }
@@ -156,21 +196,29 @@ public enum SystemLeftovers {
         defer { staging.finish() }
         for path in sorted {
             let name = (path as NSString).lastPathComponent
-            guard let place = allowed(path, ids: all, base: base),
-                !owners.contains(where: { matches(name, id: $0, rule: place.rule) })
+            guard let currentOwners = installedOwners(base: base), !currentOwners.contains(appID.lowercased()),
+                let place = allowed(path, ids: all, base: base),
+                !currentOwners.contains(where: { matches(name, id: $0, rule: place.rule) })
             else {
                 report.refused.append(path)
                 continue
             }
-            if place.folder == "/Library/LaunchDaemons", let label = label(path),
-                all.contains(where: { label == $0 || label.hasPrefix($0 + ".") })
-            {
+            if place.folder == "/Library/LaunchDaemons", let label = label(path) {
+                // Only a job named after the app is stopped: the tool never
+                // stops one by a name that just happens to be in the file.
+                guard AppLeftovers.isWellFormed(label), all.contains(where: { label == $0 || label.hasPrefix($0 + ".") }) else {
+                    report.failed[path] = "Its job isn't named after the app, so it stays."
+                    continue
+                }
                 if let why = stop(label, runner: runner) {
                     report.failed[path] = why
                     continue
                 }
             }
-            removeStaged(path, staging: &staging, recheck: { size($0) != nil }, size: { size($0) ?? 0 }, report: &report)
+            removeStaged(path, staging: &staging, recheck: { candidate in
+                guard size(candidate) != nil, let latest = installedOwners(base: base), !latest.contains(appID.lowercased()) else { return false }
+                return !latest.contains { matches(name, id: $0, rule: place.rule) }
+            }, size: { size($0) ?? 0 }, report: &report)
         }
         return report
     }
@@ -185,10 +233,10 @@ public enum SystemLeftovers {
         return "Its job couldn't be stopped (launchctl \(r.code)), so it stays."
     }
 
-    /// A launchd job's label, when it's a well-formed ID.
+    /// The label a launchd job's file gives it. Nil when it has none: it
+    /// can't have been loaded as a job then, so there's nothing to stop.
     static func label(_ plist: String) -> String? {
-        guard let label = NSDictionary(contentsOfFile: plist)?["Label"] as? String, AppLeftovers.isWellFormed(label) else { return nil }
-        return label
+        NSDictionary(contentsOfFile: plist)?["Label"] as? String
     }
 
     /// Size of a real file or folder, nil for anything else.

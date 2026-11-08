@@ -2,8 +2,8 @@ import SwiftUI
 
 /// A Finder-style date criterion: recent, older than, or a custom range.
 /// Every list that filters by date uses this one type and control.
-struct DateFilter: Hashable {
-    enum Preset: String, CaseIterable, Identifiable {
+struct DateFilter: Hashable, Codable {
+    enum Preset: String, CaseIterable, Identifiable, Codable {
         case any, today, week, month, year
         case olderMonth, olderHalfYear, olderYear, olderTwoYears
         case before, after, between
@@ -11,18 +11,18 @@ struct DateFilter: Hashable {
 
         var title: String {
             switch self {
-            case .any: "Any Time"
-            case .today: "Today"
-            case .week: "Last 7 Days"
-            case .month: "Last 30 Days"
-            case .year: "Last 12 Months"
-            case .olderMonth: "Older than 1 Month"
-            case .olderHalfYear: "Older than 6 Months"
-            case .olderYear: "Older than 1 Year"
-            case .olderTwoYears: "Older than 2 Years"
-            case .before: "Before a Date…"
-            case .after: "After a Date…"
-            case .between: "Between Dates…"
+            case .any: String(localized: "Any Time")
+            case .today: String(localized: "Today")
+            case .week: String(localized: "Last 7 Days")
+            case .month: String(localized: "Last 30 Days")
+            case .year: String(localized: "Last 12 Months")
+            case .olderMonth: String(localized: "Older than 1 Month")
+            case .olderHalfYear: String(localized: "Older than 6 Months")
+            case .olderYear: String(localized: "Older than 1 Year")
+            case .olderTwoYears: String(localized: "Older than 2 Years")
+            case .before: String(localized: "Before a Date…")
+            case .after: String(localized: "After a Date…")
+            case .between: String(localized: "Between Dates…")
             }
         }
 
@@ -43,7 +43,7 @@ struct DateFilter: Hashable {
     var isActive: Bool { preset != .any }
     var isCustom: Bool { [.before, .after, .between].contains(preset) }
 
-    func matches(_ date: Date) -> Bool {
+    nonisolated func matches(_ date: Date) -> Bool {
         let cal = Calendar.current
         let now = Date.now
         func ago(_ c: Calendar.Component, _ n: Int) -> Date { cal.date(byAdding: c, value: -n, to: now) ?? now }
@@ -67,13 +67,14 @@ struct DateFilter: Hashable {
     }
 }
 
-/// The date filter as a menu, with date fields beside it for a custom range.
+/// The date filter as a menu, with labelled date fields below for a custom range.
 struct DateFilterControl: View {
     @Binding var filter: DateFilter
-    var label = "Modified"
+    var label = String(localized: "Modified")
+    var showsLabel = true
 
     var body: some View {
-        HStack(spacing: DS.Space.xs) {
+        VStack(alignment: .leading, spacing: DS.Space.xs) {
             Menu {
                 Picker(label, selection: $filter.preset) {
                     ForEach(Array(DateFilter.Preset.groups.enumerated()), id: \.offset) { i, group in
@@ -83,24 +84,30 @@ struct DateFilterControl: View {
                 }
                 .pickerStyle(.inline)
             } label: {
-                Label(filter.isActive ? "\(label): \(filter.preset.title.replacingOccurrences(of: "…", with: ""))" : label,
-                      systemImage: "calendar")
+                Label(
+                    showsLabel ? (filter.isActive ? "\(label): \(value)" : label) : value,
+                    systemImage: "calendar")
             }
             .fixedSize()
             .help("Show only items by the date they last changed")
             if filter.isCustom {
-                DatePicker(filter.preset == .between ? "From" : "Date", selection: $filter.start, displayedComponents: .date)
-                    .labelsHidden()
+                DSFlow(spacing: DS.Space.sm) {
+                    DatePicker(
+                        filter.preset == .between ? String(localized: "From") : String(localized: "Date"), selection: $filter.start,
+                        displayedComponents: .date
+                    )
                     .datePickerStyle(.field)
                     .fixedSize()
-                if filter.preset == .between {
-                    Text("–").foregroundStyle(.secondary)
-                    DatePicker("To", selection: $filter.end, displayedComponents: .date)
-                        .labelsHidden()
-                        .datePickerStyle(.field)
-                        .fixedSize()
+                    if filter.preset == .between {
+                        DatePicker(String(localized: "To"), selection: $filter.end, displayedComponents: .date)
+                            .datePickerStyle(.field)
+                            .fixedSize()
+                    }
                 }
+                .frame(width: 260, alignment: .leading)
             }
         }
     }
+
+    private var value: String { filter.preset.title.replacingOccurrences(of: "…", with: "") }
 }

@@ -18,10 +18,10 @@ extension ProjectsModel {
 
         var title: String {
             switch self {
-            case .cleanPath(let p, _): "Clean \((p as NSString).lastPathComponent)"
-            case .cleanName(let n): "Clean every folder named “\(n)”"
-            case .keepPath(let p): "Keep \((p as NSString).lastPathComponent)"
-            case .keepName(let n): "Keep everything named “\(n)”"
+            case .cleanPath(let p, _): String(localized: "Clean \((p as NSString).lastPathComponent)")
+            case .cleanName(let n): String(localized: "Clean every folder named “\(n)”")
+            case .keepPath(let p): String(localized: "Keep \((p as NSString).lastPathComponent)")
+            case .keepName(let n): String(localized: "Keep everything named “\(n)”")
             }
         }
 
@@ -121,14 +121,14 @@ extension ProjectsModel {
         panel.canChooseFiles = true
         panel.allowsMultipleSelection = true
         panel.directoryURL = URL(fileURLWithPath: project)
-        panel.prompt = "Clean"
-        panel.message = "Choose folders or files to clean as part of \((project as NSString).lastPathComponent)."
+        panel.prompt = String(localized: "Clean")
+        panel.message = String(localized: "Choose folders or files to clean as part of \((project as NSString).lastPathComponent).")
         guard panel.runModal() == .OK else { return }
         let picked = panel.urls.map { ($0.path as NSString).standardizingPath }
         let refused = picked.filter { !ProjectRules.canClean($0, project: project) }
         clean(picked, in: project)
         if !refused.isEmpty {
-            show(Notice(text: "\(refused.count) can't be cleaned: the project folder, its history or a protected place", canUndo: false))
+            show(Notice(text: String(localized: "\(refused.count) can't be cleaned: the project folder, its history or a protected place"), canUndo: false))
         }
     }
 
@@ -139,8 +139,8 @@ extension ProjectsModel {
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = true
-        panel.prompt = "Add"
-        panel.message = "Choose folders that hold your projects."
+        panel.prompt = String(localized: "Add")
+        panel.message = String(localized: "Choose folders that hold your projects.")
         guard panel.runModal() == .OK else { return }
         for url in panel.urls where !roots.contains(url.path) { roots.append(url.path) }
         scan()

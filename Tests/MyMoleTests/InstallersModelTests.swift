@@ -25,9 +25,11 @@ import Testing
         }
 
         @MainActor func model() -> InstallersModel {
-            InstallersModel(
+            let m = InstallersModel(
                 locations: [InstallerLocation(path: downloads, depth: 1)], base: url.appending(path: "store"),
                 logURL: url.appending(path: "history.json"), trash: testBin(url))
+            m.protections = UserProtections(root: url.appending(path: "lists"))
+            return m
         }
 
     }
@@ -49,6 +51,7 @@ import Testing
                 held.wait()
                 return folder.moveOne(path)
             })
+        model.protections = UserProtections(root: box.url.appending(path: "lists"))
         model.scan()
         await model.scanJob?.value
         let scannedBefore = try #require(model.scannedAt)
@@ -98,6 +101,34 @@ import Testing
         #expect(model.files.contains { $0.path == go })
     }
 
+    @Test func anEarlierMoveOfTheSessionCanStillBePutBack() async throws {
+        let box = try Box()
+        let first = try box.file("First.dmg")
+        let second = try box.file("Second.pkg")
+        let model = box.model()
+        model.scan()
+        await model.scanJob?.value
+        model.chosen = [first]
+        model.trashChosen()
+        await model.trashJob?.value
+        let firstRun = try #require(model.undoLogID)
+        model.chosen = [second]
+        model.trashChosen()
+        await model.trashJob?.value
+        let secondRun = try #require(model.undoLogID)
+        #expect(firstRun != secondRun && model.canUndo(run: firstRun) && model.canUndo(run: secondRun))
+
+        // The earlier one, as History asks for it: only it comes back.
+        model.undoTrash(run: firstRun)
+        await model.trashJob?.value
+        #expect(FileManager.default.fileExists(atPath: first) && !FileManager.default.fileExists(atPath: second))
+        #expect(!model.canUndo(run: firstRun) && model.undoLogID == secondRun)
+        // The latest is still Undo's.
+        model.undoTrash()
+        await model.trashJob?.value
+        #expect(FileManager.default.fileExists(atPath: second) && !model.canUndo)
+    }
+
     @Test func nothingIsTrashedWhileScanning() async throws {
         let box = try Box()
         let a = try box.file("A.dmg")
@@ -121,13 +152,14 @@ import Testing
         let first = box.model()
         first.scan()
         await first.scanJob?.value
-        // The save runs in the background after the scan.
-        for _ in 0..<50 where InstallerStore.load(for: first.locations, base: box.url.appending(path: "store")) == nil {
-            try await Task.sleep(for: .milliseconds(20))
-        }
+        // The save runs in the background after the scan, queued behind other writes.
+        StoreWrites.flush()
+        #expect(InstallerStore.load(for: first.locations, base: box.url.appending(path: "store")) != nil)
 
         try box.file("B.dmg")
         let next = box.model()
+        // The saved result is read off the main actor, then shown.
+        await next.restoreJob?.value
         #expect(next.files.map(\.name) == ["A.dmg"])
         #expect(next.isStale)
         next.scan()

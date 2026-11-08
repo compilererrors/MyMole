@@ -15,11 +15,11 @@ final class ProjectsModel {
 
         var title: String {
             switch self {
-            case .any: "Any Age"
-            case .week: "Older than 1 Week"
-            case .month: "Older than 1 Month"
-            case .quarter: "Older than 3 Months"
-            case .year: "Older than 1 Year"
+            case .any: String(localized: "Any Age")
+            case .week: String(localized: "Older than 1 Week")
+            case .month: String(localized: "Older than 1 Month")
+            case .quarter: String(localized: "Older than 3 Months")
+            case .year: String(localized: "Older than 1 Year")
             }
         }
 
@@ -54,7 +54,7 @@ final class ProjectsModel {
     private(set) var rules = ProjectRules()
     /// Set when the saved rules couldn't be read: nothing is moved, and the
     /// file isn't saved over, until they can be.
-    private(set) var rulesError: String?
+    private(set) var rulesError: Problem?
     private(set) var trashing = false
     /// Projects being measured again after their rules changed.
     private(set) var rescanning = Set<String>()
@@ -92,17 +92,43 @@ final class ProjectsModel {
     /// What's inside entries the user opened, measured on demand; the most
     /// recent few are kept.
     var contents: [String: Folder] = [:]
-    var loadingContents = Set<String>()
+    /// Entries being measured. Not observed: the outline asks for contents
+    /// from its data source while SwiftUI updates it, and nothing draws this.
+    @ObservationIgnored var loadingContents = Set<String>()
     @ObservationIgnored var contentsOrder: [String] = []
 
     private var progress: ScanProgress?
-    private var undoRecords: [TrashRecord] = []
-    private var undoEntries: [Chosen] = []
+    /// A move that can still be put back, the entries it took, and whether
+    /// putting it back needs a scan (items kept in part were around it).
+    private struct Run: UndoableRun {
+        let id: UUID
+        var records: [TrashRecord]
+        var entries: [Chosen]
+        var needsScan: Bool
+    }
+
+    private var shelf = UndoShelf<Run>()
+    /// The move an Undo works on: one History asked for, or else the latest.
+    private var target: UUID?
+    private var undone: Run? { target.flatMap(shelf.run) ?? shelf.latest }
+    private var undoRecords: [TrashRecord] {
+        get { undone?.records ?? [] }
+        set { if let id = undone?.id { shelf.update(id) { $0.records = newValue } } }
+    }
+    private var undoEntries: [Chosen] {
+        get { undone?.entries ?? [] }
+        set { if let id = undone?.id { shelf.update(id) { $0.entries = newValue } } }
+    }
+    private var undoNeedsScan: Bool {
+        get { undone?.needsScan ?? false }
+        set { if let id = undone?.id { shelf.update(id) { $0.needsScan = newValue } } }
+    }
     /// The history record of the move Undo would put back.
-    private(set) var undoLogID: UUID?
+    var undoLogID: UUID? { undone?.id }
     /// Something from the last move can still be put back, and nothing else runs.
     var canUndo: Bool { !undoRecords.isEmpty && !trashing }
-    private var undoNeedsScan = false
+    /// Whether the move of this history record can still be put back.
+    func canUndo(run id: UUID) -> Bool { !(shelf.run(id)?.records.isEmpty ?? true) && !trashing }
     private var scannedThisLaunch = false
 
     /// Where results, history and rules are saved, the searched folders,
@@ -110,28 +136,73 @@ final class ProjectsModel {
     private let base: URL
     private let defaults: UserDefaults
     private let logURL: URL
+    /// Deep Clean's keep list: what it keeps stays here too.
+    private let keepList: URL
+    /// What Deep Clean keeps, as last read: shown locked and never chosen.
+    /// The move reads the list again itself.
+    private(set) var keptInDeepClean = CleanKeepList()
+
+    /// Kept in Deep Clean, or inside something kept there. A folder that
+    /// only holds something kept can still be chosen: it goes around it.
+    func isKeptElsewhere(_ path: String) -> Bool {
+        keptInDeepClean.paths.contains { path == $0 || path.hasPrefix($0 + "/") }
+    }
 
     /// For tests: these footprints and no saved roots or results; rules
-    /// are saved in `base`.
-    init(footprints: [ProjectFootprint], base: URL, defaults: UserDefaults, logURL: URL) {
+    /// are saved in `base`, and Deep Clean's keep list is one of the test's
+    /// own there unless given.
+    init(footprints: [ProjectFootprint], base: URL, defaults: UserDefaults, logURL: URL, keepList: URL? = nil) {
         self.base = base
         self.defaults = defaults
         self.logURL = logURL
+        self.keepList = keepList ?? base.appending(path: "deep-clean-keep.json")
         roots = []
         self.footprints = footprints
         reloadRules()
     }
 
-    init(base: URL = ProjectStore.defaultBase, defaults: UserDefaults = .standard, logURL: URL = CleanupLog.defaultURL) {
+    init(
+        base: URL = ProjectStore.defaultBase, defaults: UserDefaults = .standard, logURL: URL = CleanupLog.defaultURL,
+        keepList: URL = CleanKeepList.defaultURL
+    ) {
         self.base = base
         self.defaults = defaults
         self.logURL = logURL
+        self.keepList = keepList
         roots = defaults.stringArray(forKey: "projects.roots") ?? ProjectFinder.defaultRoots()
-        history = ProjectStore.loadHistory(base: base)
+        // The rules stay read here: nothing may be moved before it's known
+        // whether they could be read. They're small; the results aren't.
         reloadRules()
-        if let last = ProjectStore.loadLast(roots: roots, base: base) {
+        restored = false
+        let roots = roots
+        restoreJob = Task { [weak self] in
+            let (history, last) = await Task.detached(priority: .userInitiated) {
+                (ProjectStore.loadHistory(base: base), ProjectStore.loadLast(roots: roots, base: base))
+            }.value
+            self?.restore(history: history, last: last)
+        }
+    }
+
+    /// Reading the saved results off the main actor, so a caller can wait
+    /// for them. Nil for the test initializer, which has nothing to read.
+    private(set) var restoreJob: Task<Void, Never>?
+    private var restored = true
+    /// A launch scan asked for before the saved result was read, which
+    /// decides whether it's needed.
+    private var scanWhenRestored: Bool?
+
+    /// Shows the saved result once read, unless a scan has started first;
+    /// then runs the launch scan that waited for it.
+    private func restore(history saved: [String: [ProjectStore.Sample]], last: ProjectStore.Saved?) {
+        restored = true
+        if history.isEmpty { history = saved }
+        if let last, !scannedThisLaunch, scannedAt == nil {
             footprints = last.footprints
             scannedAt = last.date
+        }
+        if let background = scanWhenRestored {
+            scanWhenRestored = nil
+            scanIfNeeded(background: background)
         }
     }
 
@@ -149,6 +220,10 @@ final class ProjectsModel {
     /// pane opens on the last result and refreshes. `background` is for a
     /// scan nobody is waiting on yet, which uses fewer threads.
     func scanIfNeeded(background: Bool = false) {
+        guard restored else {
+            scanWhenRestored = background
+            return
+        }
         guard !scannedThisLaunch, !scanning else { return }
         if let at = scannedAt, Date().timeIntervalSince(at) < Self.freshFor { return }
         scan(background: background)
@@ -164,6 +239,7 @@ final class ProjectsModel {
         progress?.cancel()
         let p = ScanProgress()
         progress = p
+        reloadKeptElsewhere()
         rescanJobs = [:]
         rescanning = []
         scannedThisLaunch = true
@@ -175,17 +251,27 @@ final class ProjectsModel {
         let workers = level.workers(background: background)
         // Projects walks every project folder, so even a scan someone waits
         // on stays a step below the other panes.
+        let list = listProjects
         scanJob = Task.detached(priority: level.priority(background: true)) { [weak self] in
-            let all = ProjectScanner.scan(
-                roots: roots, rules: rules, progress: p, workers: workers,
-                onFound: { found in
+            let all = list(
+                roots, rules, p, workers,
+                { found in
                     DispatchQueue.main.async { MainActor.assumeIsolated { self?.found(found, run: p) } }
                 },
-                onProject: { done in
+                { done in
                     DispatchQueue.main.async { MainActor.assumeIsolated { self?.measured(done, run: p) } }
                 })
             DispatchQueue.main.async { MainActor.assumeIsolated { self?.finished(all, run: p) } }
         }
+    }
+
+    /// Finds and measures every project; tests hold it to keep a scan under
+    /// way, on projects of their own.
+    @ObservationIgnored var listProjects: @Sendable (
+        _ roots: [String], _ rules: ProjectRules, _ progress: ScanProgress, _ workers: Int,
+        _ onFound: ([ProjectFootprint]) -> Void, _ onProject: (ProjectFootprint) -> Void
+    ) -> ProjectListing = {
+        ProjectScanner.list(roots: $0, rules: $1, progress: $2, workers: $3, onFound: $4, onProject: $5)
     }
 
     func stop() { progress?.cancel() }
@@ -211,32 +297,37 @@ final class ProjectsModel {
     }
 
     /// Only a complete scan is saved, and becomes the base for growth.
-    private func finished(_ all: [ProjectFootprint], run: ScanProgress) {
+    private func finished(_ listing: ProjectListing, run: ScanProgress) {
         guard run === progress else { return }
         scanning = false
         progress = nil
         guard !run.isCancelled else { return }
-        footprints = all
+        footprints = listing.footprints
         scannedAt = Date()
         prune()
         // Saved off the main thread; only the newest complete scan lands.
-        incomplete = all.contains(where: \.incomplete)
+        incomplete = !listing.isComplete
+        unreadablePlaces = listing.unreadable
         let roots = roots
         let base = base
         saveGeneration += 1
         let generation = saveGeneration
         Task {
             let history = await withCheckedContinuation { cont in
-                Self.saves.async { cont.resume(returning: ProjectStore.save(all, roots: roots, base: base)) }
+                Self.saves.async { cont.resume(returning: ProjectStore.save(listing, roots: roots, base: base)) }
             }
             if generation == saveGeneration { self.history = history }
         }
     }
 
     private var saveGeneration = 0
-    /// The last scan couldn't read part of a project, so its sizes are a
-    /// lower bound and it didn't replace the last complete result.
+    /// The last scan couldn't read a searched folder, a place outside the
+    /// projects or part of one, so what it shows may be short of projects
+    /// or sizes, and it didn't replace the last complete result.
     private(set) var incomplete = false
+    /// The folders the last scan couldn't read even though they're there:
+    /// what's in them isn't listed.
+    private(set) var unreadablePlaces: [String] = []
     /// Saves run one at a time, in the order the scans finished.
     private static let saves = DispatchQueue(label: "mymole.projects-save", qos: .utility)
 
@@ -291,7 +382,7 @@ final class ProjectsModel {
 
     /// The item's entries that the age filter lets through.
     func eligible(_ item: FootprintItem) -> [FootprintEntry] {
-        item.removable ? item.entries(olderThan: age.cutoff) : []
+        item.removable ? item.entries(olderThan: age.cutoff).filter { !isKeptElsewhere($0.path) } : []
     }
 
     enum Check { case off, mixed, on }
@@ -340,17 +431,26 @@ final class ProjectsModel {
 
     func chooseRebuildable(in ids: some Collection<String>, now: Date = Date()) {
         var recent = 0
+        var byName = 0
         for id in ids {
             guard let f = footprint(id) else { continue }
             for item in f.items where item.category.rebuildable || item.category == .marked {
+                // Tied by a name alone, it may be another project's: ticked by hand only.
+                guard item.attribution != .nameMatch else {
+                    byName += 1
+                    continue
+                }
                 let entries = eligible(item)
                 let old = entries.filter { now.timeIntervalSince($0.modified) > Self.recentlyActive }
                 recent += entries.count - old.count
                 choose(old.map(\.path))
             }
         }
-        if recent > 0 {
-            show(Notice(text: "\(recent) item\(recent == 1 ? "" : "s") changed in the last week left unchosen; tick them yourself if they can go", canUndo: false))
+        var left: [String] = []
+        if recent > 0 { left.append(String(localized: "\(recent) item\(recent == 1 ? "" : "s") changed in the last week")) }
+        if byName > 0 { left.append(String(localized: "\(byName) group\(byName == 1 ? "" : "s") matched by name only")) }
+        if !left.isEmpty {
+            show(Notice(text: String(localized: "Left unchosen: \(left.joined(separator: " and ")); tick them yourself if they can go"), canUndo: false))
         }
     }
 
@@ -363,6 +463,15 @@ final class ProjectsModel {
 
     // MARK: Trash
 
+    /// Why nothing can be moved now, or nil. A running scan replaces the
+    /// list when it ends, so a move waits for it, as in the other panes.
+    var trashBlocker: String? {
+        if rulesError != nil { return String(localized: "Your project rules couldn't be read") }
+        if scanning { return String(localized: "Wait for the scan to finish.") }
+        if trashing { return String(localized: "Moving to the Trash…") }
+        return nil
+    }
+
     /// Moves the chosen entries to the Trash off the main thread. The rules
     /// are read again from disk first, and a list that can't be read stops
     /// the run. Whatever is kept stays, even inside a chosen folder: the
@@ -370,18 +479,37 @@ final class ProjectsModel {
     func trashChosen() {
         let picked = chosenEntries
         guard !picked.isEmpty, !trashing else { return }
+        // A scan that started after the move was asked for would put back
+        // in the list what the move takes out of it.
+        guard !scanning else {
+            show(Notice(text: String(localized: "Nothing was moved: a scan is running. Try again when it's done."), canUndo: false))
+            return
+        }
         let onDisk: ProjectRules
         let base = base
         do {
             onDisk = try ProjectStore.loadRules(base: base)
             rulesError = nil
         } catch {
-            rulesError = error.localizedDescription
-            show(Notice(text: "Nothing was moved: your project rules couldn't be read.", canUndo: false))
+            rulesError = Problem(.projectRules, error)
+            show(Notice(text: String(localized: "Nothing was moved: your project rules couldn't be read."), canUndo: false))
+            return
+        }
+        // What Deep Clean keeps stays here too; a list that can't be read
+        // stops the run, as unreadable rules do.
+        let keepList = keepList
+        do {
+            keptInDeepClean = try CleanKeepList.load(from: keepList)
+        } catch {
+            show(Notice(text: String(localized: "Nothing was moved: Deep Clean's keep list couldn't be read."), canUndo: false))
             return
         }
         let current = rules
-        let guarding = current.merging(onDisk)
+        // A path kept in Deep Clean counts as one kept here: it's left
+        // alone, and a chosen folder holding it goes around it.
+        var merged = current.merging(onDisk)
+        merged.keepPaths.formUnion(keptInDeepClean.paths)
+        let guarding = merged
         // What the user left out of a chosen folder stays, like a kept path.
         let picks = picked.map {
             (path: $0.entry.path, project: $0.project, worktree: $0.item.category == .worktrees, leftOut: excluded(inside: $0.entry.path))
@@ -389,7 +517,7 @@ final class ProjectsModel {
         let backend = trashBackend
         trashing = true
         Task {
-            let (plan, held, outcome) = await Task.detached(priority: .userInitiated) {
+            let (plan, held, outcome) = await jobs.perform(.moveToTrash) { job in
                 // The picks never overlap: one inside another sits in
                 // something the outer one leaves out.
                 var plan: [String: [String]] = [:]
@@ -410,9 +538,14 @@ final class ProjectsModel {
                     still: { p in
                         owner[p].map { top in (p == top || p.hasPrefix(top + "/")) && Trasher.noLinksBetween(top, and: p) } ?? false
                     },
-                    protections: { let now = current.merging(try ProjectStore.loadRules(base: base)); return { now.guards($0) } })
-                return (plan, held, Trasher.moveToTrash(plan.values.flatMap { $0 }, through: gate, backend: backend))
-            }.value
+                    protections: {
+                        var read = current.merging(try ProjectStore.loadRules(base: base))
+                        read.keepPaths.formUnion(try CleanKeepList.load(from: keepList).paths)
+                        let now = read
+                        return { now.guards($0) }
+                    })
+                return (plan, held, job.moveToTrash(plan.values.flatMap { $0 }, through: gate, backend: backend))
+            }
             applyTrash(outcome, plan: plan, held: held, picked: picked)
         }
     }
@@ -433,21 +566,25 @@ final class ProjectsModel {
         chosen = chosen.filter { p in !partly.union(held.keys).contains { p == $0 || p.hasPrefix($0 + "/") } }
         tidyExcluded()
         dropContents(touching: moved)
-        undoRecords = outcome.moved
-        undoEntries = gone
-        undoNeedsScan = !partly.isEmpty
-        // Parts went from inside entries, which are measured again.
-        if partly.isEmpty { for project in Set(gone.filter(\.part).map(\.project)) { rescan(project) } }
+        // Parts went from inside entries, which are measured again; so is a
+        // project whose measuring began before the move and would show
+        // what went as still there.
+        if partly.isEmpty {
+            let stale = Set(gone.map(\.project)).intersection(rescanning)
+            for project in Set(gone.filter(\.part).map(\.project)).union(stale) { rescan(project) }
+        }
         let record = CleanupRecord(source: "Projects", items: outcome.moved.count, bytes: freed, failed: outcome.failed.count)
-        undoLogID = record.id
+        if !outcome.moved.isEmpty {
+            shelf.add(Run(id: record.id, records: outcome.moved, entries: gone, needsScan: !partly.isEmpty))
+        }
         CleanupLog.submit(record, to: logURL)
         var text = outcome.moved.isEmpty && !outcome.failed.isEmpty
             ? nothingMoved(outcome.failed)
-            : "Moved \(outcome.moved.count) item\(outcome.moved.count == 1 ? "" : "s") (\(ByteCountFormatter.string(fromByteCount: freed, countStyle: .file))) to the Trash"
-        if !outcome.moved.isEmpty && !outcome.failed.isEmpty { text += " · \(outcome.failed.count) couldn't be moved" }
-        if !partly.isEmpty { text += " · \(partly.count) kept in part" }
+            : String(localized: "Moved \(outcome.moved.count) item\(outcome.moved.count == 1 ? "" : "s") (\(ByteCountFormatter.string(fromByteCount: freed, countStyle: .file))) to the Trash")
+        if !outcome.moved.isEmpty && !outcome.failed.isEmpty { text += String(localized: " · \(outcome.failed.count) couldn't be moved") }
+        if !partly.isEmpty { text += String(localized: " · \(partly.count) kept in part") }
         if let why = held.values.sorted().first {
-            text += " · \(held.count) protected (\(why.trimmingCharacters(in: CharacterSet(charactersIn: "."))))"
+            text += String(localized: " · \(held.count) protected (\(why.trimmingCharacters(in: CharacterSet(charactersIn: "."))))")
         }
         show(Notice(text: text, canUndo: !outcome.moved.isEmpty))
         // Folders emptied around kept items are measured again.
@@ -456,16 +593,25 @@ final class ProjectsModel {
 
     /// Where moved items go; tests use a folder of their own.
     var trashBackend: TrashBackend = .live
+    /// Where its moves and Undos wait their turn among every pane's.
+    var jobs: TrashJobs = .shared
 
-    /// Puts the last move back, off the main thread.
-    func undoTrash() {
-        guard !trashing, !undoRecords.isEmpty else { return }
+    /// Puts a move back, off the main thread: the one of history record
+    /// `id`, or the latest.
+    func undoTrash(run id: UUID? = nil) {
+        guard !trashing else { return }
+        target = id ?? shelf.latest?.id
+        guard target.flatMap(shelf.run) != nil, !undoRecords.isEmpty else {
+            target = nil
+            return
+        }
         let records = undoRecords
         trashing = true
         Task {
-            let failedRecords = await Task.detached(priority: .userInitiated) { Trasher.restore(records) }.value
+            let failedRecords = await jobs.perform(.putBack) { $0.putBack(records) }
             trashing = false
             applyUndo(failedRecords)
+            target = nil
         }
     }
 
@@ -485,12 +631,15 @@ final class ProjectsModel {
         // What couldn't come back stays ready for another try.
         undoRecords = failedRecords
         undoEntries = undoEntries.filter { e in failed.contains { e.entry.path == $0 || e.entry.path.hasPrefix($0 + "/") } }
-        if failed.isEmpty { undoLogID = nil }
-        if undoNeedsScan || scanAfterTrash { scan() }
+        let needsScan = undoNeedsScan
         undoNeedsScan = false
+        if failed.isEmpty, let id = undone?.id { shelf.remove(id) }
+        // A scan under way may have passed these folders before they came
+        // back: it starts over, so its result has them.
+        if needsScan || scanAfterTrash || scanning { scan() }
         scanAfterTrash = false
         show(Notice(
-            text: failed.isEmpty ? "Restored \(restored) item\(restored == 1 ? "" : "s")" : "Restored \(restored); \(failed.count) couldn't be put back. Undo tries those again.",
+            text: failed.isEmpty ? String(localized: "Restored \(restored) item\(restored == 1 ? "" : "s")") : String(localized: "Restored \(restored); \(failed.count) couldn't be put back. Undo tries those again."),
             canUndo: !failed.isEmpty))
     }
 
@@ -501,7 +650,7 @@ final class ProjectsModel {
     /// A notice with Undo stays until it's used, closed or replaced; any
     /// other passes after a few seconds.
     func show(_ n: Notice) {
-        withAnimation(.snappy) { notice = n }
+        withAnimation(Motion.snappy) { notice = n }
         if n.canUndo {
             undoNotice = n
             return
@@ -509,11 +658,11 @@ final class ProjectsModel {
         Task {
             try? await Task.sleep(for: .seconds(4))
             guard notice == n else { return }
-            withAnimation(.snappy) { notice = undoRecords.isEmpty ? nil : undoNotice }
+            withAnimation(Motion.snappy) { notice = undoRecords.isEmpty ? nil : undoNotice }
         }
     }
 
-    func dismissNotice() { withAnimation(.snappy) { notice = nil } }
+    func dismissNotice() { withAnimation(Motion.snappy) { notice = nil } }
 
     /// Changes the rules on disk as they are now, then measures again what
     /// they touch: one project for a path rule, every project for a name
@@ -525,10 +674,10 @@ final class ProjectsModel {
             rulesError = nil
         } catch {
             if (try? ProjectStore.loadRules(base: base)) == nil {
-                rulesError = error.localizedDescription
-                show(Notice(text: "Not saved: your project rules couldn't be read.", canUndo: false))
+                rulesError = Problem(.projectRules, error)
+                show(Notice(text: String(localized: "Not saved: your project rules couldn't be read."), canUndo: false))
             } else {
-                show(Notice(text: "Couldn't save your project rules: \(error.localizedDescription)", canUndo: false))
+                show(Notice(text: String(localized: "Couldn't save your project rules: \(Problem(.projectRules, error).description)"), canUndo: false))
             }
             return
         }
@@ -588,7 +737,14 @@ final class ProjectsModel {
             rules = try ProjectStore.loadRules(base: base)
             rulesError = nil
         } catch {
-            rulesError = error.localizedDescription
+            rulesError = Problem(.projectRules, error)
         }
+        reloadKeptElsewhere()
+    }
+
+    /// Reads what Deep Clean keeps, for showing it locked. A list that
+    /// can't be read leaves what was known; a move stops on it by itself.
+    private func reloadKeptElsewhere() {
+        if let kept = try? CleanKeepList.load(from: keepList) { keptInDeepClean = kept }
     }
 }

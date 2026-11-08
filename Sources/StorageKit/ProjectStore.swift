@@ -17,6 +17,25 @@ public enum ProjectStore {
     public struct Sample: Sendable, Codable, Hashable {
         public let date: Date
         public let bytes: Int64
+        /// Part of the project couldn't be read or measured, so `bytes` is a
+        /// lower bound: never a base or an end point for growth.
+        public let incomplete: Bool
+
+        public init(date: Date, bytes: Int64, incomplete: Bool = false) {
+            self.date = date
+            self.bytes = bytes
+            self.incomplete = incomplete
+        }
+
+        enum CodingKeys: String, CodingKey { case date, bytes, incomplete }
+
+        public init(from decoder: any Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            date = try c.decode(Date.self, forKey: .date)
+            bytes = try c.decode(Int64.self, forKey: .bytes)
+            // Saved before samples said so: taken as complete, as they were shown.
+            incomplete = try c.decodeIfPresent(Bool.self, forKey: .incomplete) ?? false
+        }
     }
 
     /// 2: tied to the folders searched, footprints say when they're incomplete.
@@ -52,6 +71,7 @@ public enum ProjectStore {
     }
 
     public static func saveRules(_ rules: ProjectRules, base: URL = defaultBase) throws {
+        defer { KeepChanges.post(base) }
         try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         try JSONEncoder().encode(rules).write(to: base.appending(path: "rules.json"), options: .atomic)
     }
@@ -73,31 +93,43 @@ public enum ProjectStore {
         return (try? JSONDecoder().decode([String: [Sample]].self, from: d)) ?? [:]
     }
 
-    /// Saves a complete scan: as the last result, and as a sample per project.
+    /// Saves a scan of `roots`: each project's total joins its history, and
+    /// the result replaces the last complete one only when the scan read
+    /// everything. A scan that couldn't read a searched folder, a place
+    /// outside or part of a project leaves the last complete result as it
+    /// is, and its samples are marked so growth never measures against them.
     @discardableResult
-    /// Saves a complete scan of `roots` as the last result, and adds each
-    /// project's total to its history. A scan with unreadable parts adds to
-    /// the history but doesn't replace the last complete result.
+    public static func save(_ listing: ProjectListing, roots: [String], date: Date = Date(), base: URL = defaultBase)
+        -> [String: [Sample]]
+    {
+        save(listing.footprints, roots: roots, date: date, base: base, complete: listing.isComplete)
+    }
+
+    /// The same for footprints alone: complete when none of them is incomplete.
+    @discardableResult
     public static func save(_ footprints: [ProjectFootprint], roots: [String], date: Date = Date(), base: URL = defaultBase)
+        -> [String: [Sample]]
+    {
+        save(footprints, roots: roots, date: date, base: base, complete: !footprints.contains(where: \.incomplete))
+    }
+
+    private static func save(_ footprints: [ProjectFootprint], roots: [String], date: Date, base: URL, complete: Bool)
         -> [String: [Sample]]
     {
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         var history = loadHistory(base: base)
         for f in footprints {
-            history[f.id] = adding(Sample(date: date, bytes: f.bytes), to: history[f.id, default: []])
+            let sample = Sample(date: date, bytes: f.bytes, incomplete: f.incomplete || !f.measured)
+            history[f.id] = adding(sample, to: history[f.id, default: []])
         }
         let enc = JSONEncoder()
-        if !footprints.contains(where: \.incomplete),
-            let d = try? enc.encode(Saved(version: formatVersion, roots: roots, date: date, footprints: footprints))
-        {
+        if complete, let d = try? enc.encode(Saved(version: formatVersion, roots: roots, date: date, footprints: footprints)) {
             try? d.write(to: base.appending(path: "last.json"), options: .atomic)
         }
         if let d = try? enc.encode(history) { try? d.write(to: base.appending(path: "history.json"), options: .atomic) }
         return history
     }
 
-    /// The newest sample replaces the current one until the sample before
-    /// it is `sampleInterval` old; then it's kept and a new current one starts.
     /// Adds a scan's total. The newest sample moves with every scan; it's
     /// kept for good only once it's `sampleInterval` after the last kept one,
     /// so kept samples are always at least that far apart.
@@ -113,13 +145,15 @@ public enum ProjectStore {
         return Array(out.suffix(keep))
     }
 
-    /// Change of a project's total against the newest sample at least
-    /// `window` older than the current one, and when that sample was taken.
+    /// Change of a project's total against the newest complete sample at
+    /// least `window` older than the current one, and when that sample was
+    /// taken. Unknown while the current sample is incomplete: a read error
+    /// is neither a shrink nor, once access is back, growth.
     public static func growth(_ samples: [Sample], window: TimeInterval = growthWindow)
         -> (bytes: Int64, since: Date)?
     {
-        guard let now = samples.last,
-            let base = samples.last(where: { now.date.timeIntervalSince($0.date) >= window })
+        guard let now = samples.last, !now.incomplete,
+            let base = samples.last(where: { !$0.incomplete && now.date.timeIntervalSince($0.date) >= window })
         else { return nil }
         return (now.bytes - base.bytes, base.date)
     }

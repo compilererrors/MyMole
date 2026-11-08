@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 import Testing
 
 @testable import StorageKit
@@ -22,6 +23,74 @@ import Testing
         try FileManager.default.createSymbolicLink(
             atPath: box.path + "/Library/Caches/linked", withDestinationPath: box.path + "/Documents")
         return box
+    }
+
+    @Test func condaPackagesAreFoundButNeverItsEnvironments() throws {
+        let box = try Sandbox()
+        try box.file("miniconda3/pkgs/numpy-1.0.tar.bz2", bytes: 9_000)
+        try box.file("miniconda3/envs/work/lib/numpy.so", bytes: 9_000)
+        try box.file(".conda/pkgs/x.conda", bytes: 9_000)
+        let found = CleanScanner.list(home: box.path, workers: 1).candidates
+        let byPath = Dictionary(uniqueKeysWithValues: found.map { ($0.path, $0) })
+        #expect(byPath[box.path + "/miniconda3/pkgs"]?.safety == .review)
+        #expect(byPath[box.path + "/.conda/pkgs"] != nil)
+        #expect(!found.contains { $0.path.contains("/envs") })
+        // Left alone while conda runs, and checked again before it moves.
+        #expect(CleanRules.inUse(box.path + "/miniconda3/pkgs", home: box.path, running: ["conda"]))
+        #expect(!CleanRules.inUse(box.path + "/miniconda3/pkgs", home: box.path, running: ["python3"]))
+        #expect(CleanScanner.isStillCandidate(box.path + "/miniconda3/pkgs", home: box.path))
+        #expect(!CleanScanner.isStillCandidate(box.path + "/miniconda3/envs", home: box.path))
+    }
+
+    @Test func findsCachesInAppDataFoldersAndMoreToolCaches() throws {
+        let box = try Sandbox()
+        try box.file("Library/Application Support/Slack/Code Cache/js/a", bytes: 9_000)
+        try box.file("Library/Application Support/Slack/Service Worker/CacheStorage/b", bytes: 9_000)
+        try box.file("Library/Application Support/Slack/storage/messages.db", bytes: 9_000)
+        try box.file("Library/Application Support/Google/Chrome/Default/GPUCache/c", bytes: 9_000)
+        try box.file("Library/Application Support/Google/Chrome/Profile 2/Code Cache/d", bytes: 9_000)
+        try box.file("Library/Application Support/Google/Chrome/Default/History", bytes: 9_000)
+        try box.file(".bun/install/cache/e", bytes: 9_000)
+        try box.file(".m2/repository/org/f.jar", bytes: 9_000)
+        try box.file("Library/Developer/Xcode/UserData/Previews/g", bytes: 9_000)
+
+        let found = CleanScanner.list(home: box.path, workers: 1).candidates
+        let support = box.path + "/Library/Application Support"
+        let byPath = Dictionary(uniqueKeysWithValues: found.map { ($0.path, $0) })
+        let slack = try #require(byPath[support + "/Slack/Code Cache"])
+        #expect(slack.safety == .review && slack.contentsOnly && slack.name == "Slack · Code Cache")
+        #expect(byPath[support + "/Slack/Service Worker/CacheStorage"] != nil)
+        #expect(byPath[support + "/Google/Chrome/Default/GPUCache"]?.name == "Google Chrome Default · GPUCache")
+        #expect(byPath[support + "/Google/Chrome/Profile 2/Code Cache"] != nil)
+        // Never the data around the caches.
+        #expect(!found.contains { $0.path.hasSuffix("/storage") || $0.path.hasSuffix("/History") || $0.path == support + "/Slack" })
+        #expect(byPath[box.path + "/.bun/install/cache"]?.safety == .safe)
+        #expect(byPath[box.path + "/.m2/repository"]?.safety == .review)
+        #expect(byPath[box.path + "/Library/Developer/Xcode/UserData/Previews"] != nil)
+        // Left alone while the app or browser using it runs.
+        #expect(CleanRules.inUse(support + "/Slack/Code Cache", home: box.path, running: ["Slack"]))
+        #expect(CleanRules.inUse(support + "/Google/Chrome/Default/GPUCache", home: box.path, running: ["Google Chrome"]))
+        #expect(!CleanRules.inUse(support + "/Slack/Code Cache", home: box.path, running: ["Google Chrome"]))
+        #expect(CleanScanner.isStillCandidate(support + "/Slack/Code Cache", home: box.path))
+        #expect(!CleanScanner.isStillCandidate(support + "/Slack/storage", home: box.path))
+    }
+
+    /// The scan reports as each place is measured, so a pane fills in while
+    /// it runs: steps only grow, end at the total, and the last one holds
+    /// exactly what the finished listing does.
+    @Test func reportsWhatItFoundAsEachPlaceIsMeasured() throws {
+        let box = try home()
+        let steps = Mutex<[CleanScanStep]>([])
+        let listing = CleanScanner.list(home: box.path, workers: 2, onStep: { s in steps.withLock { $0.append(s) } })
+        let seen = steps.withLock { $0 }
+        #expect(!seen.isEmpty)
+        let done = seen.map(\.done).sorted()
+        #expect(done == Array(1...seen.count))
+        #expect(seen.allSatisfy { $0.total == seen[0].total && $0.done <= $0.total })
+        let last = try #require(seen.max { $0.done < $1.done })
+        #expect(last.done == last.total && last.fraction == 1)
+        #expect(last.found.map(\.path) == listing.candidates.map(\.path))
+        #expect(listing.candidates.map(\.path) == CleanScanner.scan(home: box.path, workers: 2).map(\.path))
     }
 
     @Test func findsWhatTheRulesNameAndNothingElse() throws {

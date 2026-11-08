@@ -7,41 +7,14 @@ import SwiftUI
 // the system controls (toolbar, sidebar) rather than painted onto content.
 
 enum Theme {
-    /// The signature teal, sampled from the app icon (#25CDD3).
-    static let brand = Color(.sRGB, red: 0.145, green: 0.804, blue: 0.827)
-
-    /// The single brand accent: prominent actions, selection, key gauges.
-    /// The signature teal in Dark Mode; a shade deeper in Light Mode so white
-    /// button labels and thin marks stay legible on a light background.
-    static let accent = Color(
-        nsColor: NSColor(name: "MyMoleAccent") { appearance in
-            appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-                ? NSColor(srgbRed: 0.145, green: 0.804, blue: 0.827, alpha: 1)
-                : NSColor(srgbRed: 0.059, green: 0.659, blue: 0.682, alpha: 1)
-        })
+    // The accent and the other colour roles are the theme's: see
+    // Design/Palette.swift and `EnvironmentValues.palette`.
 
     // Aliases into the design tokens (Design/DesignComponents.swift).
-    static let pad = DS.Space.page  // content inset from the pane edges
-    static let gap = DS.Space.md  // between cards and grid cells
+    // Computed, so they follow a change of density like the tokens do.
+    @MainActor static var pad: CGFloat { DS.Space.page }  // content inset from the pane edges
+    @MainActor static var gap: CGFloat { DS.Space.md }  // between cards and grid cells
     static let radius = DS.Radius.card
-
-    static func sectionSymbol(_ name: String) -> String {
-        switch name {
-        case "User essentials": "person.crop.circle"
-        case "App caches": "app.badge"
-        case "Browsers": "globe"
-        case "Cloud & Office": "icloud"
-        case "Developer tools", "Development": "hammer"
-        case "System", "System caches": "lock.shield"
-        case "Trash": "trash"
-        case "Application Support": "folder"
-        case "App leftovers": "shippingbox"
-        case "Virtualization": "server.rack"
-        case "Device backups & firmware": "iphone"
-        case "Large files": "doc.richtext"
-        default: "square.stack.3d.up"
-        }
-    }
 
     /// Green → amber → red as a percentage climbs.
     static func load(_ pct: Double) -> Color {
@@ -66,16 +39,18 @@ struct AppIconImage: View {
 // MARK: - Pane chrome
 
 extension View {
-    /// Puts the pane's title and subtitle at the leading edge of the window
-    /// toolbar and its tools at the trailing edge, the same on every pane.
+    /// Puts Back and Forward, then the pane's title and subtitle, at the
+    /// leading edge of the window toolbar and its tools at the trailing
+    /// edge, the same on every pane.
     func paneToolbar<Tools: ToolbarContent>(
-        _ title: String, subtitle: String, @ToolbarContentBuilder tools: () -> Tools
+        _ title: LocalizedStringResource, subtitle: LocalizedStringResource, @ToolbarContentBuilder tools: () -> Tools
     ) -> some View {
         toolbar {
+            ToolbarItem(placement: .navigation) { PaneHistoryControls() }
             ToolbarItem(placement: .navigation) {
                 VStack(alignment: .leading, spacing: 1) {
                     Text(title).font(.headline)
-                    Text(subtitle).font(.caption).foregroundStyle(.secondary).lineLimit(1).help(subtitle)
+                    Text(subtitle).font(.caption).foregroundStyle(.secondary).lineLimit(1).help(Text(subtitle))
                 }
                 .padding(.horizontal, 6)
             }
@@ -84,10 +59,10 @@ extension View {
             ToolbarSpacer(.flexible)
             tools()
         }
-        .navigationTitle(title)
+        .navigationTitle(Text(title))
     }
 
-    func paneToolbar(_ title: String, subtitle: String) -> some View {
+    func paneToolbar(_ title: LocalizedStringResource, subtitle: LocalizedStringResource) -> some View {
         paneToolbar(title, subtitle: subtitle) { ToolbarItem { EmptyView() } }
     }
 
@@ -96,9 +71,10 @@ extension View {
         buttonStyle(.borderedProminent).controlSize(.large).fixedSize()
     }
 
-    /// Standard content container: one radius, one fill, one hairline.
-    func card(padding: CGFloat = 16) -> some View {
-        self.padding(padding)
+    /// Standard content container: one radius, one fill, one hairline;
+    /// card padding follows the density unless a tighter one is asked for.
+    func card(padding: CGFloat? = nil) -> some View {
+        self.padding(padding ?? DS.Space.lg)
             .frame(maxWidth: .infinity, alignment: .leading)
             .dsCard()
     }
@@ -109,14 +85,18 @@ extension View {
 /// symbol shows a spinner.
 struct CenterCard<Actions: View>: View {
     let symbol: String?
-    let title: String
-    let subtitle: String
+    let title: LocalizedStringResource
+    let subtitle: LocalizedStringResource
     @ViewBuilder var actions: Actions
 
     var body: some View {
         ContentUnavailableView {
             if let symbol {
-                Label(title, systemImage: symbol)
+                Label {
+                    Text(title)
+                } icon: {
+                    Image(systemName: symbol)
+                }
             } else {
                 VStack(spacing: 12) {
                     PulseDot(size: 16)
@@ -128,25 +108,35 @@ struct CenterCard<Actions: View>: View {
         } actions: {
             // Buttons side by side keep their whole labels; the system view
             // would otherwise squeeze them to "Open System S…".
-            actions.fixedSize()
+            actions.fixedSize(horizontal: false, vertical: true)
         }
     }
 }
 
 /// A captioned metric in a card.
 struct StatTile<Content: View>: View {
-    let caption: String
+    let caption: LocalizedStringResource
+    /// The tile opens a pane: its caption ends in the arrow the tool tiles have.
+    var linked = false
+    /// The card's padding, when tighter than a card's own.
+    var padding: CGFloat?
     @ViewBuilder var content: Content
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(caption)
-                .font(.subheadline.weight(.medium))
-                .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: DS.Space.sm) {
+            HStack(spacing: DS.Space.xs) {
+                Text(caption)
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(.secondary)
+                if linked {
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.right").font(.caption).foregroundStyle(.tertiary)
+                }
+            }
             content
         }
         .frame(maxHeight: .infinity, alignment: .topLeading)
-        .card()
+        .card(padding: padding)
     }
 }
 
@@ -158,9 +148,9 @@ struct Metric: View {
 
     var body: some View {
         Text(text)
-            .font(.system(size: 28, weight: .semibold, design: .rounded))
+            .font(DS.MetricRole.tile.font)
             .monospacedDigit()
-            .contentTransition(.numericText())
+            .dsNumericTransition()
     }
 }
 

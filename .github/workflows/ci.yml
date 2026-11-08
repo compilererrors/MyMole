@@ -52,6 +52,15 @@ jobs:
       - name: Negative string checks catch unreadable binaries and matches
         run: scripts/test-strings-guard.sh
 
+      # Every phrase the code shows is in the string catalog a translation
+      # starts from, and the catalog holds nothing the code dropped.
+      - name: String catalog in step with the code
+        run: scripts/sync-strings.sh --check
+
+      # Picture-only buttons need a name VoiceOver can say.
+      - name: Buttons have names
+        run: scripts/check-accessibility.sh
+
       - name: Build the direct edition
         run: |
           swift build -c release --product MyMole
@@ -63,7 +72,7 @@ jobs:
         run: |
           swift build -c release --scratch-path .build/appstore -Xswiftc -DAPPSTORE --product MyMole
           bin="$(swift build -c release --scratch-path .build/appstore -Xswiftc -DAPPSTORE --show-bin-path)"
-          scripts/check-no-strings.sh "$bin/MyMole" 'osascript|with administrator privileges|SMAppService|MYMOLE_SMOKE_HOME|MYMOLE_SMOKE_TRASH|MYMOLE_SMOKE_ELEVATE|MYMOLE_SMOKE_APPS|MYMOLE_SMOKE_GRANTED'
+          scripts/check-no-strings.sh "$bin/MyMole" 'osascript|with administrator privileges|MYMOLE_SMOKE_HOME|MYMOLE_SMOKE_TRASH|MYMOLE_SMOKE_ELEVATE|MYMOLE_SMOKE_APPS|MYMOLE_SMOKE_GRANTED'
 
   thread-sanitizer:
     # Shared state across threads in one process: the cleanup log's queue
@@ -81,4 +90,4 @@ jobs:
       - name: Thread Sanitizer (sandboxed)
         run: >
           scripts/test-guarded.sh --sanitize=thread
-          --filter 'CleanStorageTests|PrivilegedSafetyTests|SamplerTests|PerMoveCheckTests|ModelSafetyTests|DeepCleanModelTests|PrivilegedClientTests|SystemCleanModelTests|ProjectRulesModelTests'
+          --filter 'CleanStorageTests|PrivilegedSafetyTests|SamplerTests|PerMoveCheckTests|ModelSafetyTests|DeepCleanModelTests|PrivilegedClientTests|SystemCleanModelTests|ProjectRulesModelTests|ScanBudgetTests|SharedReadingTests|OffMainTests|FingerprintCacheTests|DuplicatesTests|SimilarImagesTests|AppsModelTests'

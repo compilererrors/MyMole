@@ -41,6 +41,10 @@ import Testing
         fake.chosen = URL(fileURLWithPath: FolderAccess.Place.applications.path)
         access.request(.applications)
         #expect(access.has(.applications) && access.lastProblem == nil)
+        let granted = access.generation
+        access.revoke(.applications)
+        #expect(!access.has(.applications) && access.generation > granted && granted > 0)
+        access.request(.applications)
         // Next launch: the saved bookmark opens it again.
         #expect(FolderAccess(defaults: defaults, bookmarks: fake.bookmarks).has(.applications))
     }
@@ -88,3 +92,59 @@ import Testing
     }
 }
 #endif
+
+@MainActor
+@Suite struct TakeBackTests {
+    @Test func aChainStopsBetweenStepsOnceAccessChanges() async {
+        var generation = 0
+        var ran: [Int] = []
+        let started = generation
+        await AppModel.run([
+            { ran.append(1) },
+            { ran.append(2); generation += 1 },
+            { ran.append(3) },
+        ], while: { generation == started })
+        #expect(ran == [1, 2])
+    }
+
+    @Test func aScanStartedDuringTheWaitIsStoppedBeforeTheFolderCloses() async {
+        var scanning = true
+        var stops = 0
+        var waits = 0
+        await AppModel.settle(
+            stop: { stops += 1 },
+            wait: {
+                waits += 1
+                // The first wait ends with a scan the user started
+                // meanwhile; the second finds it stopped.
+                if waits == 2 { scanning = false }
+            },
+            while: { scanning })
+        #expect(stops == 2 && waits == 2 && !scanning)
+    }
+
+    @Test func aScanThatReportsItsEndLateIsWaitedFor() async {
+        var scanning = true
+        let report = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(80))
+            scanning = false
+        }
+        await AppModel.settle(stop: {}, wait: {}, while: { scanning })
+        #expect(!scanning)
+        await report.value
+    }
+
+    @Test func aChainWaitsForAScanTheUserStarted() async {
+        var userScanning = true
+        var ran: [Int] = []
+        let chain = Task { @MainActor in
+            await AppModel.run([{ ran.append(1) }, { ran.append(2) }], while: { true }, waitingWhile: { userScanning })
+        }
+        try? await Task.sleep(for: .milliseconds(300))
+        #expect(ran.isEmpty)
+        userScanning = false
+        await chain.value
+        #expect(ran == [1, 2])
+    }
+}
+

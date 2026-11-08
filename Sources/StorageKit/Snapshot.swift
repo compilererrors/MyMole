@@ -19,6 +19,9 @@ public struct Snapshot: Codable, Sendable {
     public let tracksFiles: Bool
     /// Part of the place couldn't be read, so its sizes are a lower bound.
     public let incomplete: Bool
+    /// Folders the user had MyMole skip, relative to the root: not
+    /// measured, so never compared.
+    public var excluded: [String] = []
 
     public static let depth = 6
     public static let minimumSize: Int64 = 10 * 1_048_576
@@ -37,7 +40,7 @@ public struct Snapshot: Codable, Sendable {
         self.incomplete = incomplete
     }
 
-    public init(of root: Folder, date: Date = .now, incomplete: Bool = false) {
+    public init(of root: Folder, date: Date = .now, incomplete: Bool = false, excluded: [String] = []) {
         var sizes: [String: Int64] = ["": root.size]
         var files: [String: Int64] = [:]
         func addFiles(_ f: Folder, _ rel: String) {
@@ -58,10 +61,11 @@ public struct Snapshot: Codable, Sendable {
         self.init(
             rootPath: root.path, date: date, sizes: sizes, files: files, folderDepth: Self.depth, tracksFiles: true,
             incomplete: incomplete)
+        self.excluded = excluded.sorted()
     }
 
     // The first snapshot format had folders 4 levels deep and no files.
-    enum CodingKeys: String, CodingKey { case rootPath, date, sizes, files, folderDepth, tracksFiles, incomplete }
+    enum CodingKeys: String, CodingKey { case rootPath, date, sizes, files, folderDepth, tracksFiles, incomplete, excluded }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -72,6 +76,7 @@ public struct Snapshot: Codable, Sendable {
         folderDepth = try c.decodeIfPresent(Int.self, forKey: .folderDepth) ?? 4
         tracksFiles = try c.decodeIfPresent(Bool.self, forKey: .tracksFiles) ?? false
         incomplete = try c.decodeIfPresent(Bool.self, forKey: .incomplete) ?? false
+        excluded = try c.decodeIfPresent([String].self, forKey: .excluded) ?? []
     }
 
     public var totalSize: Int64 { sizes[""] ?? 0 }
@@ -103,8 +108,17 @@ extension Snapshot {
     public func changes(to newer: Snapshot, threshold: Int64 = 50 * 1_048_576) -> [Change] {
         let depth = min(folderDepth, newer.folderDepth)
         var all: [Change] = []
+        // What either scan skipped wasn't measured by it: neither gone nor
+        // new. A folder holding a place only one of them skipped changed by
+        // that alone, so it isn't compared either.
+        let skipped = Set(excluded).union(newer.excluded)
+        let newlySkipped = Set(excluded).symmetricDifference(newer.excluded)
+        func isSkipped(_ p: String) -> Bool {
+            skipped.contains { p == $0 || p.hasPrefix($0 + "/") } || newlySkipped.contains { $0.hasPrefix(p + "/") }
+        }
         func counts(_ c: Change) -> Bool {
             guard abs(c.delta) >= threshold else { return false }
+            if !skipped.isEmpty, isSkipped(c.path) { return false }
             if newer.incomplete && c.delta < 0 { return false }
             if incomplete && c.delta > 0 { return false }
             return true
@@ -147,7 +161,8 @@ public struct SnapshotRef: Sendable, Hashable, Identifiable {
 /// Scan history per folder: one directory per scanned path, one file per
 /// scan, newest `keep` kept.
 public enum SnapshotStore {
-    public static let keep = 30
+    /// Set in Settings; 30 unless changed.
+    public static var keep: Int { LoadingSettings.history() }
 
     public static var defaultBase: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -225,18 +240,46 @@ public enum SnapshotStore {
     }
 
     @discardableResult
-    public static func save(_ s: Snapshot, base: URL = defaultBase) -> SnapshotRef? {
-        let dir = folder(for: s.rootPath, base: base)
+    /// Saves `s` under `key`: its path, or the path with its volume for a
+    /// disk other than the startup disk (`Volumes.historyKey`).
+    public static func save(_ s: Snapshot, key: String? = nil, base: URL = defaultBase) -> SnapshotRef? {
+        let key = key ?? s.rootPath
+        let dir = folder(for: key, base: base)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let e = JSONEncoder()
         e.dateEncodingStrategy = .iso8601
         let name = stamp.string(from: s.date) + "_" + UUID().uuidString.prefix(8).lowercased() + ".json"
         let url = dir.appending(path: name)
         guard (try? e.encode(s).write(to: url, options: .atomic)) != nil else { return nil }
-        for old in history(for: s.rootPath, base: base).dropFirst(keep) {
+        for old in history(for: key, base: base).dropFirst(keep) {
             try? FileManager.default.removeItem(at: old.url)
         }
+        keepWithin(totalLimit, base: base)
         return SnapshotRef(date: date(fromName: name) ?? s.date, url: url)
+    }
+
+    /// All saved scans together take at most this much, whatever the number
+    /// of folders mapped.
+    public static let totalLimit: Int64 = 200 * 1_048_576
+
+    /// Removes the oldest saved scans, of any folder, until all of them fit
+    /// in `limit`; the newest scan of each folder always stays.
+    static func keepWithin(_ limit: Int64, base: URL) {
+        let fm = FileManager.default
+        var all: [(url: URL, date: Date, bytes: Int64, newest: Bool)] = []
+        for dir in (try? fm.contentsOfDirectory(at: base, includingPropertiesForKeys: nil)) ?? [] {
+            let names = ((try? fm.contentsOfDirectory(atPath: dir.path)) ?? []).compactMap { n in date(fromName: n).map { (n, $0) } }
+            let newest = names.max { $0.1 < $1.1 }?.0
+            for (name, d) in names {
+                let u = dir.appending(path: name)
+                let bytes = Int64((try? u.resourceValues(forKeys: [.totalFileAllocatedSizeKey]).totalFileAllocatedSize) ?? 0)
+                all.append((u, d, bytes, name == newest))
+            }
+        }
+        var total = all.reduce(0) { $0 + $1.bytes }
+        for f in all.filter({ !$0.newest }).sorted(by: { $0.date < $1.date }) where total > limit {
+            if (try? fm.removeItem(at: f.url)) != nil { total -= f.bytes }
+        }
     }
 
     /// Moves scans saved under the old, collision-prone key into this
@@ -267,5 +310,104 @@ public enum SnapshotStore {
             try? fm.moveItem(at: url, to: dir.appending(path: name))
         }
         if (try? fm.contentsOfDirectory(atPath: oldDir.path))?.isEmpty == true { try? fm.removeItem(at: oldDir) }
+    }
+}
+
+/// The results MyMole saves so a pane shows something at once after a
+/// launch: each pane's last scan and the disk map's history. Only these
+/// files: keep lists, project rules and the cleanup history stay.
+public enum SavedResults {
+    public static func files(
+        deepClean: URL = CleanStore.defaultBase, installers: URL = InstallerStore.defaultBase,
+        apps: URL = AppStore.defaultBase, projects: URL = ProjectStore.defaultBase
+    ) -> [URL] {
+        [deepClean, installers, apps, projects].map { $0.appending(path: "last.json") }
+            + [projects.appending(path: "history.json")]
+    }
+
+    /// Bytes the saved results take on disk.
+    public static func bytes(files: [URL] = files(), snapshots: URL = SnapshotStore.defaultBase) -> Int64 {
+        var total: Int64 = 0
+        for var f in files {
+            // A URL keeps values it read once; this one reads the disk now.
+            f.removeAllCachedResourceValues()
+            total += Int64((try? f.resourceValues(forKeys: [.totalFileAllocatedSizeKey]).totalFileAllocatedSize) ?? 0)
+        }
+        if let walk = FileManager.default.enumerator(at: snapshots, includingPropertiesForKeys: [.totalFileAllocatedSizeKey]) {
+            for case let u as URL in walk {
+                total += Int64((try? u.resourceValues(forKeys: [.totalFileAllocatedSizeKey]).totalFileAllocatedSize) ?? 0)
+            }
+        }
+        return total
+    }
+
+    /// Removes the saved results; the next launch scans afresh. Pending
+    /// writes go first, so none lands after.
+    public static func clear(files: [URL] = files(), snapshots: URL = SnapshotStore.defaultBase) {
+        StoreWrites.flush()
+        for f in files { try? FileManager.default.removeItem(at: f) }
+        try? FileManager.default.removeItem(at: snapshots)
+    }
+}
+
+extension SavedResults {
+    /// One kind of saved result, for Settings to show and clear on its own.
+    public struct Part: Sendable, Identifiable {
+        public let id: String
+        public let title: String
+        public let urls: [URL]
+        public let bytes: Int64
+        public let modified: Date?
+    }
+
+    public static func parts(
+        deepClean: URL = CleanStore.defaultBase, installers: URL = InstallerStore.defaultBase,
+        apps: URL = AppStore.defaultBase, projects: URL = ProjectStore.defaultBase,
+        snapshots: URL = SnapshotStore.defaultBase, fingerprints: URL = FingerprintCache.defaultURL
+    ) -> [Part] {
+        let list: [(String, String, [URL])] = [
+            ("deepClean", "Deep Clean's last scan", [deepClean.appending(path: "last.json")]),
+            ("installers", "Installers' last scan", [installers.appending(path: "last.json")]),
+            ("apps", "The app list", [apps.appending(path: "last.json")]),
+            ("projects", "Projects' last scan and growth", [projects.appending(path: "last.json"), projects.appending(path: "history.json")]),
+            ("snapshots", "Disk Map's saved scans", [snapshots]),
+            ("fingerprints", "Similar Photos' fingerprints", [fingerprints]),
+        ]
+        return list.map { id, title, urls in
+            var bytes: Int64 = 0
+            var latest: Date?
+            for u in urls {
+                let (b, d) = measure(u)
+                bytes += b
+                if let d { latest = max(latest ?? d, d) }
+            }
+            return Part(id: id, title: title, urls: urls, bytes: bytes, modified: latest)
+        }
+    }
+
+    private static func measure(_ url: URL) -> (Int64, Date?) {
+        var u = url
+        u.removeAllCachedResourceValues()
+        let keys: Set<URLResourceKey> = [.totalFileAllocatedSizeKey, .contentModificationDateKey, .isDirectoryKey]
+        guard let v = try? u.resourceValues(forKeys: keys) else { return (0, nil) }
+        guard v.isDirectory == true else { return (Int64(v.totalFileAllocatedSize ?? 0), v.contentModificationDate) }
+        var total: Int64 = 0
+        var latest = v.contentModificationDate
+        for case let f as URL in FileManager.default.enumerator(at: url, includingPropertiesForKeys: Array(keys)) ?? FileManager.DirectoryEnumerator() {
+            let fv = try? f.resourceValues(forKeys: keys)
+            total += Int64(fv?.totalFileAllocatedSize ?? 0)
+            if let d = fv?.contentModificationDate { latest = max(latest ?? d, d) }
+        }
+        return (total, latest)
+    }
+
+    /// Removes one kind of saved result; what couldn't be removed, if anything.
+    public static func clear(_ part: Part) -> [String] {
+        StoreWrites.flush()
+        var failed: [String] = []
+        for u in part.urls where FileManager.default.fileExists(atPath: u.path) {
+            do { try FileManager.default.removeItem(at: u) } catch { failed.append(u.lastPathComponent) }
+        }
+        return failed
     }
 }

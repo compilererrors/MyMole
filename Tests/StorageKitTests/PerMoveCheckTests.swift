@@ -18,7 +18,7 @@ import Testing
                 FileManager.default.createFile(atPath: b, contents: Data("other".utf8))
             }
             return true
-        })
+        }, protections: TrashGate.keepsNothing)
         let out = Trasher.moveToTrash([a, b], through: gate, backend: try testBin(box))
         #expect(out.moved.map(\.original.path) == [a])
         #expect(out.failed.first { $0.path == b }?.reason == "Changed since it was checked")

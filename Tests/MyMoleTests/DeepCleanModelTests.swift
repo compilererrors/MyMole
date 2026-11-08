@@ -36,6 +36,9 @@ private final class ToolNames: @unchecked Sendable {
 
         func exists(_ rel: String) -> Bool { FileManager.default.fileExists(atPath: path + "/" + rel) }
 
+        /// Project rules of the test's own.
+        var projectRules: URL { url.appending(path: "projects") }
+
         /// Bundle IDs of running apps and names of running tools; tests
         /// change them between steps.
         var running: Set<String> = []
@@ -50,9 +53,46 @@ private final class ToolNames: @unchecked Sendable {
             return DeepCleanModel(
                 home: path, base: url.appending(path: "store"), keepURL: url.appending(path: "keep.json"),
                 logURL: url.appending(path: "history.json"), runningApps: { self.running },
-                runningTools: { [toolNames] in toolNames.value }, trash: testBin(url))
+                runningTools: { [toolNames] in toolNames.value }, trash: testBin(url), projectRules: projectRules, quietFor: 0)
         }
 
+    }
+
+    /// While the first scan runs its finds are shown, but nothing is
+    /// offered for choosing until the list is complete; then the preview
+    /// gives way to the list and the progress is gone.
+    @Test func theFirstScanShowsWhatItFoundBeforeItsDone() async throws {
+        let home = try Home()
+        let model = home.model()
+        await model.restoreJob?.value
+        model.scan()
+        #expect(model.scanning && model.scanFraction == 0 && model.candidates.isEmpty)
+        await model.scanJob?.value
+        #expect(!model.scanning && model.scanFraction == nil && model.preview.isEmpty)
+        #expect(!model.candidates.isEmpty)
+    }
+
+    @Test func aCacheWrittenJustNowIsLeftUnticked() async throws {
+        let home = try Home()
+        // Everything but the editor's cache was last written an hour ago.
+        let hourAgo = Date().addingTimeInterval(-3_600)
+        let all = FileManager.default.enumerator(atPath: home.path)?.allObjects as? [String] ?? []
+        for rel in all where !rel.contains("com.vendor.Editor") {
+            try FileManager.default.setAttributes([.modificationDate: hourAgo], ofItemAtPath: home.path + "/" + rel)
+        }
+        let model = DeepCleanModel(
+            home: home.path, base: home.url.appending(path: "store"), keepURL: home.url.appending(path: "keep.json"),
+            logURL: home.url.appending(path: "history.json"), runningApps: { [] }, runningTools: { [] },
+            trash: testBin(home.url), projectRules: home.projectRules)
+        model.scan()
+        await model.scanJob?.value
+        let editor = try #require(model.candidates.first { $0.path.hasSuffix("com.vendor.Editor") })
+        let player = try #require(model.candidates.first { $0.path.hasSuffix("com.vendor.Player") })
+        #expect(model.isJustWritten(editor) && !model.chosen.contains(editor.path))
+        #expect(!model.isJustWritten(player) && model.chosen.contains(player.path))
+        // Still the user's to choose.
+        model.choose([editor.path])
+        #expect(model.chosen.contains(editor.path))
     }
 
     @Test func choosesSafeItemsOfAppsThatArentRunning() async throws {
@@ -90,6 +130,29 @@ private final class ToolNames: @unchecked Sendable {
         #expect(home.exists("Library/Caches/com.vendor.Editor/blob"))
         #expect(home.exists(".npm/_cacache/content/a"))
         #expect(model.isStale)
+    }
+
+    @Test func aMoveWaitsForAnotherPanesJobAndIsStoppedByAQuit() async throws {
+        let home = try Home()
+        let model = home.model()
+        let jobs = TrashJobs()
+        model.jobs = jobs
+        model.scan()
+        await model.scanJob?.value
+        model.chosen = [home.path + "/Library/Caches/com.vendor.Editor", home.path + "/.npm/_cacache"]
+        // Another pane's job holds the turn: nothing moves until it ends.
+        let other = await jobs.begin(.moveToTrash)
+        model.trashChosen()
+        try await Task.sleep(for: .milliseconds(150))
+        #expect(model.trashing)
+        #expect(home.exists("Library/Caches/com.vendor.Editor/blob") && home.exists(".npm/_cacache/content/a"))
+        // A quit stops the waiting move before its first item.
+        jobs.stop()
+        jobs.end(other)
+        while model.trashing { try await Task.sleep(for: .milliseconds(10)) }
+        #expect(home.exists("Library/Caches/com.vendor.Editor/blob") && home.exists(".npm/_cacache/content/a"))
+        #expect(model.notice?.canUndo == false)
+        #expect(!jobs.isBusy)
     }
 
     @Test func onlyWhatReallyMovedIsCountedAndUndoneAtItsSize() async throws {
@@ -130,7 +193,7 @@ private final class ToolNames: @unchecked Sendable {
                 // The player starts as the editor's cache goes.
                 if path.hasSuffix("com.vendor.Editor") { _ = apps.withLock { $0.insert("com.vendor.Player") } }
                 return folder.moveOne(path)
-            })
+            }, projectRules: home.projectRules, quietFor: 0)
         model.scan()
         await model.scanJob?.value
         model.chosen = [home.path + "/Library/Caches/com.vendor.Editor", home.path + "/Library/Caches/com.vendor.Player"]
@@ -151,6 +214,9 @@ private final class ToolNames: @unchecked Sendable {
         model.trashChosen()
         #expect(!model.trashing)
         #expect(model.keepError != nil)
+        // The code names the keep list and the error, never the file.
+        let code = try #require(model.keepError?.code).description
+        #expect(code.hasPrefix("MM-KEEP-") && !code.contains(home.path) && !code.contains("keep.json"))
         #expect(home.exists("Library/Caches/com.vendor.Editor/blob"))
     }
 
@@ -198,6 +264,90 @@ private final class ToolNames: @unchecked Sendable {
         await model.scanJob?.value
         #expect(!model.chosen.contains(home.path + "/.npm/_cacache"))
         #expect(model.chosen.contains(home.path + "/Library/Caches/com.vendor.Editor"))
+    }
+
+    @Test func aCacheOfFilesIsCountedAtTheirSize() async throws {
+        let home = try Home()
+        // Yarn keeps its cache as files right inside the folder, which is
+        // emptied item by item.
+        try home.file(".yarn/berry/cache/a.zip", bytes: 40_000)
+        try home.file(".yarn/berry/cache/b.zip", bytes: 24_000)
+        let model = home.model()
+        model.scan()
+        await model.scanJob?.value
+        let yarn = home.path + "/.yarn/berry/cache"
+        #expect(model.chosen.contains(yarn))
+        model.chosen = [yarn]
+        model.trashChosen()
+        while model.trashing { try await Task.sleep(for: .milliseconds(10)) }
+        #expect(home.exists(".yarn/berry/cache") && !home.exists(".yarn/berry/cache/a.zip"))
+        let inBin = StorageScanner.scan(path: home.url.appending(path: "Bin").path, workers: 1).root.size
+        CleanupLog.flush()
+        let record = try #require(CleanupLog.load(from: home.url.appending(path: "history.json")).first)
+        #expect(inBin > 0 && record.bytes == inBin)
+        #expect(model.notice?.text.contains("Moved Zero") == false)
+    }
+
+    @Test func aPathKeptInProjectsStaysAndIsNeverChosen() async throws {
+        let home = try Home()
+        let editor = home.path + "/Library/Caches/com.vendor.Editor"
+        var rules = ProjectRules()
+        rules.keepPaths = [editor, home.path + "/.npm/_cacache/index"]
+        try ProjectStore.saveRules(rules, base: home.projectRules)
+        let model = home.model()
+        model.scan()
+        await model.scanJob?.value
+        // Shown as kept: not chosen by the scan, and can't be ticked.
+        #expect(model.isKept(editor) && !model.chosen.contains(editor))
+        model.toggle(editor)
+        #expect(!model.chosen.contains(editor))
+        // Chosen anyway, as an older choice would be: the move leaves it,
+        // and goes around what's kept inside a cache.
+        model.chosen = [editor, home.path + "/.npm/_cacache"]
+        model.trashChosen()
+        while model.trashing { try await Task.sleep(for: .milliseconds(10)) }
+        #expect(home.exists("Library/Caches/com.vendor.Editor/blob"))
+        #expect(home.exists(".npm/_cacache/index/b") && !home.exists(".npm/_cacache/content"))
+    }
+
+    @Test func projectRulesThatCantBeReadStopTheRun() async throws {
+        let home = try Home()
+        let model = home.model()
+        model.scan()
+        await model.scanJob?.value
+        try FileManager.default.createDirectory(at: home.projectRules, withIntermediateDirectories: true)
+        try Data("broken".utf8).write(to: home.projectRules.appending(path: "rules.json"))
+        model.chosen = [home.path + "/Library/Caches/com.vendor.Editor"]
+        model.trashChosen()
+        #expect(!model.trashing)
+        #expect(model.notice?.text == "Nothing was moved: your project rules couldn't be read.")
+        #expect(home.exists("Library/Caches/com.vendor.Editor/blob"))
+    }
+
+    @Test func aScanAskedForDuringAMoveRunsWhenTheMoveEnds() async throws {
+        let home = try Home()
+        let model = home.model()
+        let jobs = TrashJobs()
+        model.jobs = jobs
+        model.scan()
+        await model.scanJob?.value
+        // Another pane's move holds the turn, so this one stays under way.
+        let other = await jobs.begin(.moveToTrash)
+        let editor = home.path + "/Library/Caches/com.vendor.Editor"
+        model.chosen = [editor]
+        model.trashChosen()
+        #expect(model.trashing)
+        // Something new turns up, and a scan is asked for meanwhile: the
+        // list stays as it is under the move.
+        try home.file("Library/Caches/com.vendor.Viewer/blob")
+        model.scan()
+        #expect(!model.scanning)
+        jobs.end(other)
+        while model.trashing { try await Task.sleep(for: .milliseconds(10)) }
+        await model.scanJob?.value
+        #expect(!model.scanning)
+        let found = Set(model.candidates.map(\.path))
+        #expect(found.contains(home.path + "/Library/Caches/com.vendor.Viewer") && !found.contains(editor))
     }
 
     @Test func keptItemsCantBeChosen() async throws {

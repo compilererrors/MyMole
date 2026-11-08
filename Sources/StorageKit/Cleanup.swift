@@ -10,7 +10,7 @@ import Synchronization
 
 /// What a cleanup candidate is.
 public enum CleanCategory: String, Sendable, Codable, CaseIterable, Comparable {
-    case appCaches, containerCaches, logs, developerCaches, downloads
+    case appCaches, containerCaches, logs, developerCaches, downloads, devices
 
     public static func < (a: Self, b: Self) -> Bool {
         allCases.firstIndex(of: a)! < allCases.firstIndex(of: b)!
@@ -23,6 +23,7 @@ public enum CleanCategory: String, Sendable, Codable, CaseIterable, Comparable {
         case .logs: "Logs & Crash Reports"
         case .developerCaches: "Developer Caches"
         case .downloads: "Downloaded Attachments"
+        case .devices: "Simulators & Device Backups"
         }
     }
 
@@ -33,6 +34,28 @@ public enum CleanCategory: String, Sendable, Codable, CaseIterable, Comparable {
         case .logs: "Diagnostic logs and crash reports. Nothing reads them back."
         case .developerCaches: "Package managers' download caches and simulator caches. The next install is slower once."
         case .downloads: "Mail attachments you opened. The messages keep them."
+        case .devices: "Simulators with what's installed in them, and iPhone and iPad backups. They hold data, so none is ever chosen for you."
+        }
+    }
+}
+
+extension CleanCandidate {
+    /// What going costs, said the same way in the list, the check before a
+    /// move and its result.
+    public var consequence: String {
+        switch (category, safety) {
+        case (.appCaches, .safe), (.containerCaches, .safe):
+            "The app builds it again as it needs it; it may start a little slower once."
+        case (.appCaches, .review), (.containerCaches, .review):
+            "May hold things the app downloads again, or a sign-in it asks for again."
+        case (.logs, _):
+            "Nothing builds old logs again; they're only read to look into a problem."
+        case (.developerCaches, _):
+            "The tool downloads it again when a project needs it; the next install or build is slower once."
+        case (.downloads, _):
+            "The messages keep their attachments; Mail fetches one again when it's opened."
+        case (.devices, _):
+            "Holds data: a simulator's apps and content, or a device backup. It's gone for good once the Trash is emptied."
         }
     }
 }
@@ -63,6 +86,9 @@ public struct CleanCandidate: Sendable, Hashable, Codable, Identifiable {
     public let contentsOnly: Bool
     /// Part of it couldn't be read, so its size is a lower bound.
     public var incomplete: Bool = false
+    /// What it's called when its folder is named by an ID: a simulator's
+    /// or a backed-up device's own name.
+    public var title: String?
 
     public init(
         path: String, bytes: Int64, modified: Date, category: CleanCategory, safety: CleanSafety, owner: String?,
@@ -79,7 +105,7 @@ public struct CleanCandidate: Sendable, Hashable, Codable, Identifiable {
     }
 
     public var id: String { path }
-    public var name: String { (path as NSString).lastPathComponent }
+    public var name: String { title ?? (path as NSString).lastPathComponent }
 }
 
 /// The places Deep Clean looks, as MyMole's own rules.
@@ -100,6 +126,18 @@ public enum CleanRules {
         /// Tools here keep sign-in tokens beside their caches, so an item
         /// holding one is never offered.
         public var screensSecrets = false
+        /// What the items are, when each says so in a file of its own.
+        public var holds = Holds.plain
+        /// What a whole target is called, when its own name says little ("Cache").
+        public var title: String? = nil
+    }
+
+    public enum Holds: Sendable {
+        case plain
+        /// Simulator devices: a folder per device with its `device.plist`.
+        case simulators
+        /// iPhone and iPad backups: a folder per device with its `Info.plist`.
+        case backups
     }
 
     /// Caches macOS uses for iCloud and accounts: rebuilt, but at the cost
@@ -128,6 +166,14 @@ public enum CleanRules {
                    reason: "Go's module downloads. Offline builds need them."),
             Target(path: home + "/.pnpm-store", mode: .whole, category: .developerCaches, safety: .review,
                    reason: "pnpm's package store. Projects relink from it on the next install."),
+            Target(path: home + "/.bun/install/cache", mode: .whole, category: .developerCaches, safety: .safe,
+                   reason: "Bun's download cache."),
+            Target(path: home + "/.m2/repository", mode: .whole, category: .developerCaches, safety: .review,
+                   reason: "Maven's downloaded libraries. Fetched again on the next build, which needs the network."),
+            Target(path: home + "/.nuget/packages", mode: .whole, category: .developerCaches, safety: .review,
+                   reason: "NuGet's package cache. Fetched again on the next restore, which needs the network."),
+            Target(path: lib + "/Developer/Xcode/UserData/Previews", mode: .whole, category: .developerCaches, safety: .safe,
+                   reason: "Xcode's builds of SwiftUI previews. Rebuilt when a preview opens."),
             Target(path: home + "/.cache", mode: .children, category: .developerCaches, safety: .review,
                    reason: "A tool's cache. Some hold large downloads such as models.", screensSecrets: true),
             Target(path: lib + "/Developer/CoreSimulator/Caches", mode: .whole, category: .developerCaches, safety: .safe,
@@ -136,7 +182,123 @@ public enum CleanRules {
                    safety: .review, reason: "Debug symbols for one device's OS version. Copied again when that device connects."),
             Target(path: lib + "/Containers/com.apple.mail/Data/Library/Mail Downloads", mode: .whole, category: .downloads,
                    safety: .review, reason: "Attachments Mail saved when you opened them."),
-        ]
+            Target(path: lib + "/Developer/CoreSimulator/Devices", mode: .children, category: .devices, safety: .review,
+                   reason: "A simulator that is shut down, with the apps and data in it. Xcode makes a new, empty one when you add it again.",
+                   holds: .simulators),
+            Target(path: lib + "/Application Support/MobileSync/Backup", mode: .children, category: .devices, safety: .review,
+                   reason: "A backup of an iPhone or iPad. It's gone for good unless the device is backed up again.",
+                   holds: .backups),
+        ] + condaCaches(home: home) + appDataCaches(home: home)
+    }
+
+    /// Where the Conda family keeps the packages it downloads, in the
+    /// installs it makes in the home folder. Only `pkgs`: environments,
+    /// which hold what's installed, stay. Environments link their files
+    /// from here, so emptying the Trash frees only what no environment uses.
+    static let condaRoots = ["miniconda3", "anaconda3", "miniforge3", "mambaforge", "micromamba", ".conda", ".mamba"]
+
+    static func condaCaches(home: String) -> [Target] {
+        condaRoots.map {
+            Target(path: home + "/" + $0 + "/pkgs", mode: .whole, category: .developerCaches, safety: .review,
+                   reason: "Conda's downloaded packages. Fetched again when an environment needs one, which needs the network; environments keep what they use.")
+        }
+    }
+
+    /// The folders apps built on Electron and browsers built on Chromium
+    /// keep caches in, inside their own data rather than in Caches. Only
+    /// these names, never the profile or data around them.
+    static let appDataCacheNames = [
+        "Cache", "Code Cache", "GPUCache", "CachedData", "DawnCache", "DawnGraphiteCache", "DawnWebGPUCache",
+        "Service Worker/CacheStorage", "Service Worker/ScriptCache",
+    ]
+
+    /// Browsers built on Chromium: where their profiles are, and the name
+    /// their process runs under.
+    static let chromium: [(folder: String, process: String)] = [
+        ("Google/Chrome", "Google Chrome"), ("BraveSoftware/Brave-Browser", "Brave Browser"),
+        ("Microsoft Edge", "Microsoft Edge"), ("Arc/User Data", "Arc"), ("Vivaldi", "Vivaldi"),
+    ]
+
+    /// Every such cache that's there: in an app's folder in Application
+    /// Support, and in each Chromium profile ("Default", "Profile 1"). Never
+    /// ticked for the user: the app should be quit first.
+    static func appDataCaches(home: String) -> [Target] {
+        let support = home + "/Library/Application Support"
+        var roots = (DirectoryListing.names(support) ?? [])
+            .filter { !$0.hasPrefix(".") && !$0.hasPrefix("com.apple") && !CleanRules.neverNames.contains($0) }
+            .map { support + "/" + $0 }
+        for browser in chromium {
+            let base = support + "/" + browser.folder
+            for profile in DirectoryListing.names(base) ?? [] where profile == "Default" || profile.hasPrefix("Profile ") {
+                roots.append(base + "/" + profile)
+            }
+        }
+        return roots.flatMap { root in
+            appDataCacheNames.map { root + "/" + $0 }.filter(CleanScanner.isRealFolder).map {
+                Target(path: $0, mode: .whole, category: .appCaches, safety: .review,
+                       reason: "Cache kept in the app's own data folder. The app rebuilds it; quit the app first.",
+                       title: appDataTitle($0, home: home))
+            }
+        }
+    }
+
+    /// The process using a cache in an app's data folder: the browser, or
+    /// the app the folder is named after.
+    static func appDataTools(_ path: String, home: String) -> [String]? {
+        let support = home + "/Library/Application Support/"
+        guard path.hasPrefix(support), appDataCacheNames.contains(where: { path.hasSuffix("/" + $0) }) else { return nil }
+        let rel = String(path.dropFirst(support.count))
+        if let b = chromium.first(where: { rel.hasPrefix($0.folder + "/") }) { return [b.process] }
+        return rel.split(separator: "/").first.map { [String($0)] }
+    }
+
+    /// "Slack · Code Cache", "Google Chrome Default · GPUCache".
+    static func appDataTitle(_ path: String, home: String) -> String? {
+        let support = home + "/Library/Application Support/"
+        guard path.hasPrefix(support), let cache = appDataCacheNames.first(where: { path.hasSuffix("/" + $0) }) else { return nil }
+        let owner = String(path.dropFirst(support.count).dropLast(cache.count + 1))
+        if let b = chromium.first(where: { owner.hasPrefix($0.folder + "/") }) {
+            return b.process + " " + owner.dropFirst(b.folder.count + 1) + " · " + cache
+        }
+        return owner + " · " + cache
+    }
+
+
+    /// A property list no bigger than a backup's own description gets.
+    private static func plist(_ path: String) -> [String: Any]? {
+        var st = stat()
+        guard lstat(path, &st) == 0, st.st_mode & S_IFMT == S_IFREG, st.st_size <= 32 << 20,
+            let data = FileManager.default.contents(atPath: path)
+        else { return nil }
+        return (try? PropertyListSerialization.propertyList(from: data, format: nil)) as? [String: Any]
+    }
+
+    /// A simulator's own description: its name and system, and whether it's shut down.
+    static func simulator(_ path: String) -> (title: String, shutDown: Bool)? {
+        guard let d = plist(path + "/device.plist"), let name = d["name"] as? String else { return nil }
+        // "com.apple.CoreSimulator.SimRuntime.iOS-18-2" is iOS 18.2.
+        let runtime = (d["runtime"] as? String)?.split(separator: ".").last.map { s -> String in
+            let parts = s.split(separator: "-")
+            return parts.count > 1 ? parts[0] + " " + parts.dropFirst().joined(separator: ".") : String(s)
+        }
+        // 1 is shut down; a device that's booting, booted or shutting down is in use.
+        return (runtime.map { name + " · " + $0 } ?? name, (d["state"] as? Int) == 1)
+    }
+
+    /// The device a backup is of: "Device Name · iPhone 16".
+    static func backup(_ path: String) -> String? {
+        guard let d = plist(path + "/Info.plist") else { return nil }
+        let parts = [d["Device Name"] as? String, d["Product Name"] as? String ?? d["Product Type"] as? String].compactMap { $0 }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    /// What an item is called when its folder's name is an ID.
+    static func title(of path: String, in t: Target) -> String? {
+        switch t.holds {
+        case .plain: nil
+        case .simulators: simulator(path)?.title
+        case .backups: backup(path).map { "Backup of " + $0 }
+        }
     }
 
     /// Safety for one item of a target, raised for caches that resync.
@@ -156,10 +318,19 @@ public enum CleanRules {
         case home + "/.gradle/caches": return ["gradle", "GradleDaemon", "GradleWrapperMain"]
         case home + "/.cargo/registry/cache": return ["cargo"]
         case home + "/go/pkg/mod/cache/download": return ["go"]
+        case home + "/.bun/install/cache": return ["bun"]
+        case home + "/.m2/repository": return ["mvn", "mvnd"]
+        case home + "/.nuget/packages": return ["dotnet"]
+        case lib + "/Developer/Xcode/UserData/Previews": return ["Xcode"]
         case lib + "/Developer/CoreSimulator/Caches": return ["Simulator", "simctl"]
         case lib + "/Containers/com.apple.mail/Data/Library/Mail Downloads": return ["Mail"]
+        case _ where condaRoots.contains(where: { path == home + "/" + $0 + "/pkgs" }): return ["conda", "mamba", "micromamba"]
         default:
-            return (path as NSString).deletingLastPathComponent == lib + "/Developer/Xcode/iOS DeviceSupport" ? ["Xcode"] : []
+            switch (path as NSString).deletingLastPathComponent {
+            case lib + "/Developer/Xcode/iOS DeviceSupport": return ["Xcode"]
+            case lib + "/Developer/CoreSimulator/Devices": return ["Simulator", "simctl"]
+            default: return appDataTools(path, home: home) ?? []
+            }
         }
     }
 
@@ -204,7 +375,19 @@ public enum CleanRules {
 
     /// Whether an item of `t` may be offered at all.
     static func offers(_ path: String, in t: Target) -> Bool {
-        !neverNames.contains((path as NSString).lastPathComponent) && !(t.screensSecrets && holdsSecrets(path))
+        guard !neverNames.contains((path as NSString).lastPathComponent), !(t.screensSecrets && holdsSecrets(path)) else { return false }
+        switch t.holds {
+        case .plain: return true
+        // Only a device that says it's shut down: the set's own index file
+        // and a device that's running are never offered.
+        case .simulators: return simulator(path)?.shutDown == true
+        case .backups: return isFolder(path)
+        }
+    }
+
+    private static func isFolder(_ path: String) -> Bool {
+        var st = stat()
+        return lstat(path, &st) == 0 && st.st_mode & S_IFMT == S_IFDIR
     }
 
     /// A bundle ID-looking folder name ("com.vendor.App"), as the owner.
@@ -253,12 +436,14 @@ public struct CleanKeepList: Sendable, Codable, Equatable {
     /// returns what was saved. A list that can't be read is never written
     /// over, and nothing counts as changed unless it was saved.
     public static func update(at url: URL, _ change: (inout CleanKeepList) -> Void) throws -> CleanKeepList {
-        try FileLock.around(url) {
+        let saved = try FileLock.around(url) {
             var list = try load(from: url)
             change(&list)
             try list.save(to: url)
             return list
         }
+        KeepChanges.post(url)
+        return saved
     }
 }
 
@@ -286,6 +471,16 @@ public struct CleanListing: Sendable {
     public var isComplete: Bool { unreadable.isEmpty && !candidates.contains(where: \.incomplete) }
 }
 
+/// How far a Deep Clean scan has come: places measured of all it will
+/// measure, and every candidate found so far, largest first.
+public struct CleanScanStep: Sendable {
+    public let done: Int
+    public let total: Int
+    public let found: [CleanCandidate]
+
+    public var fraction: Double { Double(done) / Double(max(total, 1)) }
+}
+
 public enum CleanScanner {
     /// Every candidate under `home`, largest first. Caches of sandboxed apps
     /// are measured one container at a time, as walking every container
@@ -302,16 +497,58 @@ public enum CleanScanner {
     /// they're there, so a result without them isn't taken as complete.
     public static func list(
         home: String = Home.path, progress: ScanProgress = ScanProgress(),
-        workers: Int = StorageScanner.defaultWorkers
+        workers: Int = StorageScanner.defaultWorkers, onStep: (@Sendable (CleanScanStep) -> Void)? = nil
     ) -> CleanListing {
-        var out: [CleanCandidate] = []
+        let targets = CleanRules.targets(home: home)
+        let containers = containerIDs(home: home)
+        let steps = StepCounter(total: targets.count + max(containers?.count ?? 0, 1), onStep: onStep)
         var unreadable: [String] = []
-        for t in CleanRules.targets(home: home) where !progress.isCancelled {
-            out += candidates(in: t, progress: progress, workers: workers, unreadable: &unreadable)
+        for t in targets where !progress.isCancelled {
+            steps.add(candidates(in: t, progress: progress, workers: workers, unreadable: &unreadable))
         }
-        if !progress.isCancelled { out += containerCaches(home: home, progress: progress, workers: workers, unreadable: &unreadable) }
-        let sorted = out.sorted { $0.bytes != $1.bytes ? $0.bytes > $1.bytes : $0.path < $1.path }
-        return CleanListing(candidates: sorted, unreadable: unreadable.sorted())
+        if !progress.isCancelled {
+            if let containers {
+                containerCaches(home: home, ids: containers, progress: progress, workers: workers, unreadable: &unreadable, steps: steps)
+            } else {
+                unreadable.append(home + "/Library/Containers")
+                steps.add([])
+            }
+        }
+        return CleanListing(candidates: steps.found, unreadable: unreadable.sorted())
+    }
+
+    /// Largest first, then by path.
+    static func ordered(_ c: [CleanCandidate]) -> [CleanCandidate] {
+        c.sorted { $0.bytes != $1.bytes ? $0.bytes > $1.bytes : $0.path < $1.path }
+    }
+
+    /// Counts the places measured and hands what's found so far to `onStep`,
+    /// from whichever thread finished a place.
+    final class StepCounter: Sendable {
+        private struct State {
+            var done = 0
+            var found: [CleanCandidate] = []
+        }
+
+        let total: Int
+        private let onStep: (@Sendable (CleanScanStep) -> Void)?
+        private let state = Mutex(State())
+
+        init(total: Int, onStep: (@Sendable (CleanScanStep) -> Void)?) {
+            self.total = max(total, 1)
+            self.onStep = onStep
+        }
+
+        func add(_ c: [CleanCandidate]) {
+            let step = state.withLock { s -> CleanScanStep? in
+                s.done += 1
+                s.found += c
+                return onStep == nil ? nil : CleanScanStep(done: min(s.done, total), total: total, found: CleanScanner.ordered(s.found))
+            }
+            if let step { onStep?(step) }
+        }
+
+        var found: [CleanCandidate] { CleanScanner.ordered(state.withLock { $0.found }) }
     }
 
     static func candidates(in t: CleanRules.Target, progress: ScanProgress, workers: Int) -> [CleanCandidate] {
@@ -332,6 +569,7 @@ public enum CleanScanner {
                 path: t.path, bytes: r.root.size, modified: r.root.latestChange, category: t.category, safety: t.safety,
                 owner: nil, reason: t.reason, contentsOnly: true)
             c.incomplete = !r.deniedPaths.isEmpty || r.root.unreadable
+            c.title = t.title
             return [c]
         case .children:
             // Every entry, small files included: the tree only lists big
@@ -359,21 +597,34 @@ public enum CleanScanner {
                     path: path, bytes: bytes, modified: modified, category: t.category,
                     safety: CleanRules.safety(of: name, in: t), owner: CleanRules.owner(of: name), reason: t.reason)
                 c.incomplete = subfolders[name]?.unreadable == true || r.deniedPaths.contains { $0 == path || $0.hasPrefix(path + "/") }
+                c.title = CleanRules.title(of: path, in: t)
                 return c
             }
         }
     }
 
     static func containerCaches(home: String, progress: ScanProgress, workers: Int, unreadable: inout [String]) -> [CleanCandidate] {
-        let base = home + "/Library/Containers"
-        guard let names = DirectoryListing.names(base) else {
-            unreadable.append(base)
+        guard let ids = containerIDs(home: home) else {
+            unreadable.append(home + "/Library/Containers")
             return []
         }
-        let ids = names
+        let steps = StepCounter(total: ids.count, onStep: nil)
+        containerCaches(home: home, ids: ids, progress: progress, workers: workers, unreadable: &unreadable, steps: steps)
+        return steps.found
+    }
+
+    /// The app containers whose caches are looked at, nil when the folder
+    /// holding them can't be read.
+    static func containerIDs(home: String) -> [String]? {
+        DirectoryListing.names(home + "/Library/Containers")?
             .filter { !$0.hasPrefix(".") && !CleanRules.neverNames.contains($0) }
             .sorted()
-        let found = Mutex<[CleanCandidate]>([])
+    }
+
+    static func containerCaches(
+        home: String, ids: [String], progress: ScanProgress, workers: Int, unreadable: inout [String], steps: StepCounter
+    ) {
+        let base = home + "/Library/Containers"
         let denied = Mutex<[String]>([])
         // Most are tiny; a few run at once, each with one walker.
         let next = Atomic<Int>(0)
@@ -382,6 +633,8 @@ public enum CleanScanner {
                 let i = next.add(1, ordering: .relaxed).oldValue
                 guard i < ids.count else { return }
                 let path = base + "/" + ids[i] + "/Data/Library/Caches"
+                var c: CleanCandidate?
+                defer { steps.add(c.map { [$0] } ?? []) }
                 var st = stat()
                 guard lstat(path, &st) == 0 else {
                     // Not there is fine; there but closed (another app's data) isn't seen.
@@ -394,19 +647,18 @@ public enum CleanScanner {
                     if r.root.unreadable || !r.deniedPaths.isEmpty { denied.withLock { $0.append(path) } }
                     continue
                 }
-                var c = CleanCandidate(
+                var one = CleanCandidate(
                     path: path, bytes: r.root.size, modified: r.root.latestChange, category: .containerCaches,
                     safety: ids[i].hasPrefix("com.apple.") ? .review : .safe, owner: ids[i],
                     reason: ids[i].hasPrefix("com.apple.")
                         ? "Cache of one of Apple's apps. Rebuilt, though some resync first."
                         : "Cache inside the app's sandbox. Rebuilt the next time the app needs it.",
                     contentsOnly: true)
-                c.incomplete = !r.deniedPaths.isEmpty || r.root.unreadable
-                found.withLock { $0.append(c) }
+                one.incomplete = !r.deniedPaths.isEmpty || r.root.unreadable
+                c = one
             }
         }
         unreadable += denied.withLock { $0 }
-        return found.withLock { $0 }
     }
 
     /// What actually goes to the Trash for a candidate: the item itself, or

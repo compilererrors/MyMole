@@ -31,7 +31,8 @@ final class MaintenanceModel {
 
     init(
         privileged: PrivilegedClient, engine: MaintenanceEngine = MaintenanceEngine(
-            role: .user, running: { Set(NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier)) }), defaults: UserDefaults = .standard,
+            role: .user, running: { Set(NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier)) },
+            protections: { try UserProtections.live.read() }), defaults: UserDefaults = .standard,
         logURL: URL = CleanupLog.defaultURL
     ) {
         self.privileged = privileged
@@ -86,10 +87,22 @@ final class MaintenanceModel {
         let user = all.filter { !$0.needsRoot }
         let root = all.filter(\.needsRoot)
         let engine = engine
-        for t in user {
-            current = t
-            let r = await Task.detached(priority: .userInitiated) { dryRun ? engine.check(t) : engine.run(t) }.value
-            reports[t] = r
+        if dryRun {
+            // A check only reads, so they all run at once; each report shows
+            // as soon as it's in.
+            current = user.first
+            await withTaskGroup(of: TaskReport.self) { group in
+                for t in user {
+                    group.addTask(priority: .userInitiated) { await Task.detached { engine.check(t) }.value }
+                }
+                for await r in group { reports[r.task] = r }
+            }
+        } else {
+            for t in user {
+                current = t
+                let r = await Task.detached(priority: .userInitiated) { engine.run(t) }.value
+                reports[t] = r
+            }
         }
         if !root.isEmpty {
             current = root.first
@@ -101,7 +114,7 @@ final class MaintenanceModel {
                 do {
                     for r in try await privileged.runMaintenance(root) { reports[r.task] = r }
                 } catch {
-                    for t in root { reports[t] = TaskReport(t, .failed, error.localizedDescription) }
+                    for t in root { reports[t] = TaskReport(t, .failed, Problem(.maintenance, error).description) }
                 }
             }
         }
