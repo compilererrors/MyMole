@@ -19,10 +19,13 @@ enum Pulse {
 /// "busy, amount unknown": the bar is full and a light sweeps along it.
 struct PulseBar: View {
     var value: Double?
-    var tint: Color = Theme.accent
+    /// Nil: the theme's accent.
+    var tint: Color?
     var active = true
+    @Environment(\.palette) private var palette
 
     var body: some View {
+        let tint = tint ?? palette.accentText.color
         GeometryReader { g in
             let fraction = min(max(value ?? 1, 0), 1)
             let filled = max(6, g.size.width * fraction)
@@ -42,45 +45,58 @@ struct PulseBar: View {
         .frame(height: 6)
         .animation(.easeOut(duration: 0.3), value: value)
         .accessibilityElement()
-        .accessibilityLabel(value.map { "\(Int($0 * 100)) percent" } ?? "In progress")
+        .accessibilityLabel(value.map { String(localized: "\(Int($0 * 100)) percent") } ?? String(localized: "In progress"))
     }
 }
 
 /// A small breathing dot: "this is working", for sidebars, badges, rows.
 struct PulseDot: View {
-    var tint: Color = Theme.accent
+    /// Nil: the theme's accent.
+    var tint: Color?
     var size: CGFloat = 8
+    @Environment(\.palette) private var palette
 
     var body: some View {
-        LayerAnimation(kind: .dot, tint: NSColor(tint))
+        LayerAnimation(kind: .dot, tint: tint.map { NSColor($0) } ?? palette.accentText.ns)
             .frame(width: size, height: size)
             .accessibilityLabel("Working")
+    }
+}
+
+/// The glow of `pulsing`, in the theme's accent unless told otherwise.
+private struct PulseGlow: View {
+    let tint: Color?
+    let cornerRadius: CGFloat
+    @Environment(\.palette) private var palette
+
+    var body: some View {
+        LayerAnimation(kind: .glow(cornerRadius), tint: tint.map { NSColor($0) } ?? palette.accentText.ns)
+            .allowsHitTesting(false)
     }
 }
 
 extension View {
     /// A soft light breathing over the view while `active`, in the colour of
     /// what's working: for a card or row whose content is being refreshed.
-    func pulsing(_ active: Bool, tint: Color = Theme.accent, cornerRadius: CGFloat = DS.Radius.card) -> some View {
+    func pulsing(_ active: Bool, tint: Color? = nil, cornerRadius: CGFloat = DS.Radius.card) -> some View {
         overlay {
-            if active {
-                LayerAnimation(kind: .glow(cornerRadius), tint: NSColor(tint))
-                    .allowsHitTesting(false)
-            }
+            if active { PulseGlow(tint: tint, cornerRadius: cornerRadius) }
         }
     }
 }
 
 /// A whole area that's loading: the pulse with a line saying what.
 struct DSLoading: View {
-    var text = "Loading…"
+    var text: Phrase
 
-    init(_ text: String = "Loading…") { self.text = text }
+    init(_ text: LocalizedStringResource = "Loading…") { self.text = Phrase(text) }
+    @_disfavoredOverload
+    init(_ text: String) { self.text = Phrase(verbatim: text) }
 
     var body: some View {
         VStack(spacing: DS.Space.md) {
             PulseDot(size: 14)
-            DSText(text, .lead)
+            DSText(phrase: text, .lead)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }

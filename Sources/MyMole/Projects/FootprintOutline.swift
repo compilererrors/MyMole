@@ -32,23 +32,26 @@ struct FootprintOutline: NSViewRepresentable {
         outline.style = DS.Table.style
         // Sections and spacing carry the structure; stripes on rows this
         // tall would turn every group into a block.
-        outline.usesAlternatingRowBackgroundColors = false
+        outline.apply(context.environment.palette, lines: context.environment.tableLines, stripes: false)
         outline.allowsMultipleSelection = true
-        outline.columnAutoresizingStyle = .firstColumnOnlyAutoresizingStyle
-        outline.intercellSpacing = NSSize(width: DS.Table.columnGap, height: 0)
-        outline.indentationPerLevel = Density.pick(14, 16)
+        outline.columnAutoresizingStyle = .noColumnAutoresizing
+        outline.indentationPerLevel = DS.Table.indent
         outline.autoresizesOutlineColumn = false
-        for (id, title, width) in [("name", "Name", (100.0, 260.0, 2000.0)), ("modified", "Modified", (84, 100, 200)), ("size", "Size", (68, 76, 140))] {
+        // The same widths as the file tables', so the columns line up from pane to pane.
+        for c in [FileColumn.name, .modified, .size] {
+            let id = c.rawValue
             let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id))
-            col.title = title
-            col.minWidth = width.0
-            col.width = width.1
-            col.maxWidth = width.2
-            col.resizingMask = id == "name" ? [.autoresizingMask, .userResizingMask] : .userResizingMask
-            if id == "size" { col.headerCell.alignment = .right }
+            col.title = c.title
+            col.minWidth = c == .name ? 100 : c.width.min
+            col.width = c == .name ? 260 : c.width.ideal
+            col.maxWidth = c.width.max
+            col.resizingMask = .userResizingMask
+            col.sortDescriptorPrototype = NSSortDescriptor(key: id, ascending: c.ascendingFirst)
+            if c.isNumber { col.headerCell.alignment = .right }
             outline.addTableColumn(col)
-            if id == "name" { outline.outlineTableColumn = col }
+            if c == .name { outline.outlineTableColumn = col }
         }
+        outline.sortDescriptors = [NSSortDescriptor(key: FileColumn.size.rawValue, ascending: false)]
         outline.autosaveName = "projects.detail"
         outline.autosaveTableColumns = true
         outline.dataSource = context.coordinator
@@ -58,11 +61,17 @@ struct FootprintOutline: NSViewRepresentable {
         let rowMenu = NSMenu()
         rowMenu.delegate = context.coordinator
         outline.menu = rowMenu
+        let headerMenu = NSMenu()
+        headerMenu.delegate = context.coordinator
+        outline.headerView?.menu = headerMenu
+        context.coordinator.headerMenu = headerMenu
         context.coordinator.outline = outline
 
         let scroll = NSScrollView()
         scroll.documentView = outline
         scroll.hasVerticalScroller = true
+        scroll.hasHorizontalScroller = true
+        outline.configureUserColumns()
         scroll.autohidesScrollers = true
         scroll.drawsBackground = false
         context.coordinator.rebuild()
@@ -70,8 +79,13 @@ struct FootprintOutline: NSViewRepresentable {
         return scroll
     }
 
+    static func dismantleNSView(_ scroll: NSScrollView, coordinator: Coordinator) {
+        NSTableView.stopFitting(&coordinator.fitting)
+    }
+
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         let c = context.coordinator
+        c.outline?.apply(context.environment.palette, lines: context.environment.tableLines, stripes: false)
         let old = c.parent
         c.parent = self
         if old.footprint != footprint {
@@ -133,10 +147,13 @@ struct FootprintOutline: NSViewRepresentable {
     final class Coordinator: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate, NSMenuDelegate {
         var parent: FootprintOutline
         weak var outline: FootprintOutlineView?
+        weak var headerMenu: NSMenu?
         var fitting: [NSObjectProtocol] = []
         private var roots: [Node] = []
         /// Rows waiting for an entry's contents, by the entry's path.
         private var waiting: [String: [Node]] = [:]
+        /// The order of the rows at every level, from the clicked header.
+        private var sort = NSSortDescriptor(key: FileColumn.size.rawValue, ascending: false)
 
         init(_ parent: FootprintOutline) { self.parent = parent }
 
@@ -153,16 +170,16 @@ struct FootprintOutline: NSViewRepresentable {
             let outside = f.items.filter { $0.attribution != .inside }
             roots = []
             if !inside.isEmpty {
-                let s = Node(.section("In the project folder", help: nil), key: "s:inside")
-                s.children = inside.map(itemNode)
+                let s = Node(.section(String(localized: "In the project folder"), help: nil), key: "s:inside")
+                s.children = sorted(inside.map(itemNode))
                 roots.append(s)
             }
             if !outside.isEmpty {
                 let s = Node(.section(
-                    "Elsewhere on your Mac",
-                    help: "Sessions and DerivedData are tied to the project by the path their tool recorded. Items in ~/Library are matched by name: their bundle ID contains “\(f.project.name)”. Check those before removing them."),
+                    String(localized: "Elsewhere on your Mac"),
+                    help: String(localized: "Sessions and DerivedData are tied to the project by the path their tool recorded. Items in ~/Library are matched by name: their bundle ID contains “\(f.project.name)”. Check those before removing them.")),
                     key: "s:outside")
-                s.children = outside.map(itemNode)
+                s.children = sorted(outside.map(itemNode))
                 roots.append(s)
             }
             outline.reloadData()
@@ -206,13 +223,13 @@ struct FootprintOutline: NSViewRepresentable {
             let made: [Node]
             switch n.kind {
             case .item(let item) where item.entries.count > 1:
-                made = item.entries.map { e in
+                made = sorted(item.entries.map { e in
                     Node(.entry(item, e), key: "e:" + e.path, opens: Self.isFolder(e.path) ? e.path : nil)
-                }
+                })
             case .item(let item), .entry(let item, _):
                 made = n.opens.map { contents(of: $0, item: item, waiter: n) } ?? []
             case .folder(let item, let folder):
-                made = Self.rows(in: folder, item: item)
+                made = rows(in: folder, item: item)
             default:
                 made = []
             }
@@ -223,30 +240,75 @@ struct FootprintOutline: NSViewRepresentable {
         /// An entry's contents once measured; until then a placeholder row,
         /// and the row is filled in when they arrive.
         private func contents(of path: String, item: FootprintItem, waiter: Node) -> [Node] {
-            if let tree = model.contents[path] { return Self.rows(in: tree, item: item) }
+            if let tree = model.contents[path] { return rows(in: tree, item: item) }
             waiting[path, default: []].append(waiter)
             model.loadContents(path)
             return [Node(.loading, key: "l:" + path)]
         }
 
-        private static func rows(in folder: Folder, item: FootprintItem) -> [Node] {
-            var out: [(Int64, Node)] = folder.subfolders.map { f in
+        private func rows(in folder: Folder, item: FootprintItem) -> [Node] {
+            var nodes: [Node] = folder.subfolders.map { f in
                 let opens = f.subfolders.isEmpty && f.listedFiles.isEmpty && f.smallFileCount == 0 ? nil : f.path
-                return (f.size, Node(.folder(item, f), key: "f:" + f.path, opens: opens))
+                return Node(.folder(item, f), key: "f:" + f.path, opens: opens)
             }
             let base = folder.path
-            out += folder.listedFiles.map { file in
+            nodes += folder.listedFiles.map { file in
                 let p = base + "/" + file.name
-                return (file.size, Node(.file(item, path: p, size: file.size, modified: file.modified), key: "f:" + p))
+                return Node(.file(item, path: p, size: file.size, modified: file.modified), key: "f:" + p)
             }
-            out.sort { $0.0 > $1.0 }
-            var nodes = out.map(\.1)
+            nodes = sorted(nodes)
+            // The small files counted together stay last, whatever the order.
             if folder.smallFileCount > 0 {
                 nodes.append(Node(
                     .smallFiles(item, folder: base, count: folder.smallFileCount, bytes: folder.smallFileBytes),
                     key: "m:" + base))
             }
             return nodes
+        }
+
+        /// Rows in the order of the clicked header; ties by name.
+        private func sorted(_ nodes: [Node]) -> [Node] {
+            let key = sort.key ?? FileColumn.size.rawValue
+            let ascending = sort.ascending
+            func name(_ n: Node) -> String {
+                switch n.kind {
+                case .item(let i): i.title
+                case .entry(_, let e): (e.path as NSString).lastPathComponent
+                case .folder(_, let f): f.name
+                case .file(_, let p, _, _): (p as NSString).lastPathComponent
+                default: ""
+                }
+            }
+            func value(_ n: Node) -> (bytes: Int64, date: Date) {
+                switch n.kind {
+                case .item(let i): (i.bytes, i.latest)
+                case .entry(_, let e): (e.bytes, e.modified)
+                case .folder(_, let f): (f.size, f.latestChange)
+                case .file(_, _, let s, let m): (s, m)
+                case .smallFiles(_, _, _, let b): (b, .distantPast)
+                default: (0, .distantPast)
+                }
+            }
+            return nodes.sorted { a, b in
+                let byName = name(a).localizedStandardCompare(name(b))
+                switch key {
+                case FileColumn.modified.rawValue:
+                    let (x, y) = (value(a).date, value(b).date)
+                    if x != y { return ascending ? x < y : x > y }
+                case FileColumn.name.rawValue:
+                    if byName != .orderedSame { return ascending ? byName == .orderedAscending : byName == .orderedDescending }
+                default:
+                    let (x, y) = (value(a).bytes, value(b).bytes)
+                    if x != y { return ascending ? x < y : x > y }
+                }
+                return byName == .orderedAscending
+            }
+        }
+
+        func outlineView(_ outlineView: NSOutlineView, sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]) {
+            guard let first = outlineView.sortDescriptors.first, first != sort else { return }
+            sort = first
+            rebuild()
         }
 
         /// Fills in the rows whose contents were measured meanwhile.
@@ -266,9 +328,11 @@ struct FootprintOutline: NSViewRepresentable {
         /// made again, so a click costs microseconds however big the folder.
         func refreshVisible() {
             guard let outline else { return }
+            let column = outline.column(withIdentifier: NSUserInterfaceItemIdentifier(FileColumn.name.rawValue))
+            guard column >= 0 else { return }
             outline.enumerateAvailableRowViews { rowView, row in
                 guard let n = outline.item(atRow: row) as? Node,
-                    let cell = rowView.view(atColumn: 0) as? TreeNameCell
+                    let cell = rowView.view(atColumn: column) as? TreeNameCell
                 else { return }
                 cell.update(look(n))
             }
@@ -326,6 +390,14 @@ struct FootprintOutline: NSViewRepresentable {
             }
         }
 
+        func outlineView(_ outlineView: NSOutlineView, rowViewForItem item: Any) -> NSTableRowView? {
+            LinedRowView.make(in: outlineView)
+        }
+
+        func outlineView(_ outlineView: NSOutlineView, sizeToFitWidthOfColumn column: Int) -> CGFloat {
+            outlineView.visibleContentWidth(of: column)
+        }
+
         func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
             guard let n = item as? Node else { return nil }
             // A group row has no column: its one view spans the row.
@@ -344,6 +416,8 @@ struct FootprintOutline: NSViewRepresentable {
         private func look(_ n: Node) -> (check: NSControl.StateValue?, locked: Bool) {
             guard let item = n.item else { return (nil, false) }
             guard item.removable else { return (nil, { if case .item = n.kind { true } else { false } }()) }
+            // Kept in Deep Clean: shown locked, never ticked.
+            if let p = n.path, model.isKeptElsewhere(p) { return (nil, true) }
             switch n.kind {
             case .item(let i):
                 return (state(model.check(i)), false)
@@ -374,12 +448,12 @@ struct FootprintOutline: NSViewRepresentable {
             if parent.chosen == model.chosen { refreshVisible() }
         }
 
-        /// Space ticks or unticks the selected rows.
+        /// Space ticks the selected rows, or unticks them when all are
+        /// ticked already, so a mixed selection ends up all one way.
         func toggleSelection() {
             guard let outline else { return }
-            for row in outline.selectedRowIndexes {
-                if let n = outline.item(atRow: row) as? Node { toggle(n) }
-            }
+            let rows = outline.selectedRowIndexes.compactMap { outline.item(atRow: $0) as? Node }.filter { tick($0) != nil }
+            setTicks(rows, on: rows.contains { tick($0) == false })
         }
 
         @objc func doubleClicked() {
@@ -394,6 +468,17 @@ struct FootprintOutline: NSViewRepresentable {
         // Menu
 
         func menuNeedsUpdate(_ menu: NSMenu) {
+            if menu === headerMenu, let outline {
+                menu.removeAllItems()
+                for column in outline.tableColumns {
+                    let item = ClosureMenuItem(column.title) { column.isHidden.toggle(); outline.fitFlexibleColumn("name") }
+                    item.state = column.isHidden ? .off : .on
+                    item.isEnabled = column !== outline.outlineTableColumn
+                    menu.addItem(item)
+                }
+                outline.addColumnWidthActions(to: menu)
+                return
+            }
             menu.removeAllItems()
             guard let outline, let n = outline.item(atRow: outline.clickedRow) as? Node, let item = n.item else { return }
             let target: Target
@@ -404,7 +489,50 @@ struct FootprintOutline: NSViewRepresentable {
             } else {
                 return
             }
-            menu.add(parent.menu(target))
+            menu.add(tickEntries(clicked: n) + [.divider] + parent.menu(target))
+        }
+
+        /// The rows a menu or key acts on: the selection, or the clicked row
+        /// when it's outside the selection, as in Finder.
+        private func targets(clicked n: Node) -> [Node] {
+            guard let outline else { return [n] }
+            let picked = outline.selectedRowIndexes.compactMap { outline.item(atRow: $0) as? Node }
+            return picked.contains(where: { $0 === n }) ? picked : [n]
+        }
+
+        /// Whether a row can be ticked, and whether it is.
+        private func tick(_ n: Node) -> Bool? {
+            let l = look(n)
+            guard let state = l.check, !l.locked else { return nil }
+            if case .smallFiles = n.kind { return nil }
+            return state == .on
+        }
+
+        /// Ticks or unticks rows so each ends as `on`; a folder ticked goes
+        /// whole, with everything inside it.
+        func setTicks(_ nodes: [Node], on: Bool) {
+            for n in nodes where tick(n) == !on { toggle(n) }
+            refreshVisible()
+        }
+
+        private func tickEntries(clicked n: Node) -> [TableMenuEntry] {
+            let rows = targets(clicked: n).filter { tick($0) != nil }
+            guard !rows.isEmpty else { return [] }
+            let off = rows.filter { tick($0) == false }
+            let on = rows.filter { tick($0) == true }
+            let opens = rows.count == 1 && outline?.isExpandable(n) == true
+            var out: [TableMenuEntry] = []
+            if !off.isEmpty {
+                let title = opens ? String(localized: "Tick Everything Inside")
+                    : off.count == 1 ? String(localized: "Tick") : String(localized: "Tick \(off.count) Selected")
+                out.append(.action(title) { [weak self] in self?.setTicks(off, on: true) })
+            }
+            if !on.isEmpty {
+                let title = opens ? String(localized: "Untick Everything Inside")
+                    : on.count == 1 ? String(localized: "Untick") : String(localized: "Untick \(on.count) Selected")
+                out.append(.action(title) { [weak self] in self?.setTicks(on, on: false) })
+            }
+            return out
         }
     }
 }
@@ -431,23 +559,39 @@ extension NSMenu {
 }
 
 /// The outline itself: Space ticks the selected rows.
-final class FootprintOutlineView: NSOutlineView {
+final class FootprintOutlineView: NSOutlineView, LinedTable {
     weak var coordinator: FootprintOutline.Coordinator?
+    var lines = TableLines.none
+    var lineColor = NSColor.separatorColor
 
-    // The section headings are group rows at the top level; what's under
-    // them starts at the left edge rather than one indent in.
+    /// Where a row's disclosure slot starts. The section headings are group
+    /// rows at the top level, so what's under them starts at the column's
+    /// left edge, and each level below steps in by one slot and its gap. A
+    /// row keeps the slot whether it opens or not, so the tick boxes of a
+    /// folder's rows line up. nil for a heading.
+    private func slot(atRow row: Int) -> CGFloat? {
+        let level = level(forRow: row)
+        let column = column(withIdentifier: NSUserInterfaceItemIdentifier(FileColumn.name.rawValue))
+        guard level > 0, column >= 0 else { return nil }
+        return rect(ofColumn: column).minX + intercellSpacing.width / 2 + CGFloat(level - 1) * indentationPerLevel
+    }
+
     override func frameOfCell(atColumn column: Int, row: Int) -> NSRect {
         var r = super.frameOfCell(atColumn: column, row: row)
-        if column == 0, level(forRow: row) > 0 {
-            r.origin.x -= indentationPerLevel
-            r.size.width += indentationPerLevel
+        if column >= 0, tableColumns[column] === outlineTableColumn, let slot = slot(atRow: row) {
+            let x = slot + DS.Table.indent
+            r.size.width = max(0, r.maxX - x)
+            r.origin.x = x
         }
         return r
     }
 
     override func frameOfOutlineCell(atRow row: Int) -> NSRect {
         var r = super.frameOfOutlineCell(atRow: row)
-        if level(forRow: row) > 0 { r.origin.x -= indentationPerLevel }
+        if !r.isEmpty, let slot = slot(atRow: row) {
+            r.origin.x = slot
+            r.size.width = DS.Table.disclosure
+        }
         return r
     }
 
@@ -462,7 +606,7 @@ final class FootprintOutlineView: NSOutlineView {
 
 // MARK: - Cells (laid out by hand, like the file table's)
 
-private final class TreeNameCell: NSTableCellView {
+private final class TreeNameCell: NSTableCellView, ColumnWidthProviding {
     private let check = NSButton(checkboxWithTitle: "", target: nil, action: nil)
     private let lock = NSImageView()
     private let icon = NSImageView()
@@ -479,7 +623,7 @@ private final class TreeNameCell: NSTableCellView {
         check.target = self
         check.action = #selector(toggled)
         check.allowsMixedState = true
-        lock.image = NSImage(systemSymbolName: "lock.fill", accessibilityDescription: "Never removed from here")
+        lock.image = NSImage(systemSymbolName: "lock.fill", accessibilityDescription: String(localized: "Never removed from here"))
         lock.contentTintColor = .tertiaryLabelColor
         icon.imageScaling = .scaleProportionallyDown
         dot.wantsLayer = true
@@ -529,10 +673,11 @@ private final class TreeNameCell: NSTableCellView {
             title.font = .systemFont(ofSize: 13, weight: .medium)
             detail.isHidden = false
             detail.stringValue = Self.summary(item)
-            toolTip = item.attribution == .inside ? item.category.note : "\(item.category.note)\n\(item.location)"
+            toolTip = item.attribution == .inside
+                ? item.category.note : "\(item.category.note)\n\(item.location)\n\(Self.tie(item.attribution))"
         case .entry(let item, let e):
             title.stringValue = e.path == item.location && item.attribution == .inside
-                ? "Files directly in the project folder"
+                ? String(localized: "Files directly in the project folder")
                 : item.attribution == .inside ? String(e.path.dropFirst(item.location.count + 1)) : Self.short(e.path)
             icon.image = Self.symbol(for: e.path, folder: n.opens != nil)
             toolTip = e.path
@@ -545,27 +690,51 @@ private final class TreeNameCell: NSTableCellView {
             icon.image = Self.symbol(for: p, folder: false)
             toolTip = p
         case .smallFiles(_, _, let count, _):
-            title.stringValue = "\(count.formatted()) smaller file\(count == 1 ? "" : "s")"
+            title.stringValue = String(localized: "\(count.formatted()) smaller file\(count == 1 ? "" : "s")")
             title.textColor = .secondaryLabelColor
             icon.image = NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: nil)
             check.isEnabled = false
-            toolTip = "Files under 1 MB, counted together; they go with their folder."
+            toolTip = String(localized: "Files under 1 MB, counted together; they go with their folder.")
         case .loading:
             check.isHidden = true
-            title.stringValue = "Measuring…"
+            title.stringValue = String(localized: "Measuring…")
             title.textColor = .tertiaryLabelColor
             icon.image = NSImage(systemSymbolName: "hourglass", accessibilityDescription: nil)
         }
+        title.toolTip = title.stringValue
+        detail.toolTip = detail.isHidden ? nil : detail.stringValue
+        toolTip = [title.stringValue, detail.isHidden ? nil : detail.stringValue, toolTip].compactMap { $0 }.joined(separator: "\n")
         icon.contentTintColor = .secondaryLabelColor
         needsLayout = true
+    }
+
+    var preferredColumnWidth: CGFloat {
+        let width = max((title.stringValue as NSString).size(withAttributes: [.font: title.font as Any]).width,
+                        detail.isHidden ? 0 : (detail.stringValue as NSString).size(withAttributes: [.font: detail.font as Any]).width)
+        return ceil(width + DS.Table.tickStep + DS.Table.iconStep + 24)
     }
 
     /// What the group is; when it changed is in its own column.
     private static func summary(_ item: FootprintItem) -> String {
         var s = item.category.title
-        if item.entries.count > 1 { s += " · \(item.entries.count.formatted()) items" }
-        if item.attribution == .nameMatch { s += " · matched by name" }
+        if item.entries.count > 1 { s += String(localized: " · \(item.entries.count.formatted()) items") }
+        switch item.attribution {
+        case .inside: break
+        case .recorded: s += String(localized: " · the tool noted this project")
+        case .nameMatch: s += String(localized: " · matched by name only")
+        case .user: s += String(localized: " · your rule")
+        }
         return s
+    }
+
+    /// How data outside the project is tied to it, and how sure that is.
+    static func tie(_ a: Attribution) -> String {
+        switch a {
+        case .inside: String(localized: "Inside the project folder.")
+        case .recorded: String(localized: "The tool that made it noted this project's path with it.")
+        case .nameMatch: String(localized: "Only the name matches, so it may be another project's or app's of the same name. Never chosen for you.")
+        case .user: String(localized: "Tied to the project by a rule you made.")
+        }
     }
 
     private static func short(_ p: String) -> String {
@@ -582,20 +751,20 @@ private final class TreeNameCell: NSTableCellView {
     override func layout() {
         super.layout()
         let h = bounds.height
-        var x: CGFloat = Density.pick(0, 2)
+        var x: CGFloat = 0
         if !check.isHidden {
             check.frame = NSRect(x: x, y: (h - 18) / 2, width: 18, height: 18)
-            x += 22
+            x += DS.Table.tickStep
         } else if !lock.isHidden {
             lock.frame = NSRect(x: x + 3, y: (h - 12) / 2, width: 12, height: 12)
-            x += 22
+            x += DS.Table.tickStep
         }
         if !dot.isHidden {
             dot.frame = NSRect(x: x + 1, y: isItem ? h / 2 + 6 : (h - 7) / 2, width: 7, height: 7)
-            x += 14
+            x += 16
         } else if !icon.isHidden {
             icon.frame = NSRect(x: x, y: (h - 16) / 2, width: 16, height: 16)
-            x += 22
+            x += DS.Table.iconStep
         }
         let width = max(10, bounds.width - x - 2)
         if isItem {
@@ -609,7 +778,7 @@ private final class TreeNameCell: NSTableCellView {
     }
 }
 
-private final class TreeValueCell: NSTableCellView {
+private final class TreeValueCell: NSTableCellView, ColumnWidthProviding {
     private let label = NSTextField(labelWithString: "")
 
     init(identifier: NSUserInterfaceItemIdentifier) {
@@ -642,7 +811,13 @@ private final class TreeValueCell: NSTableCellView {
         } else {
             label.stringValue = date.flatMap { $0 > .distantPast ? $0.listText : nil } ?? ""
         }
+        label.toolTip = label.stringValue.isEmpty ? nil : (size ? label.stringValue : date.map { $0.formatted(date: .complete, time: .shortened) })
+        toolTip = label.toolTip
         needsLayout = true
+    }
+
+    var preferredColumnWidth: CGFloat {
+        ceil((label.stringValue as NSString).size(withAttributes: [.font: label.font as Any]).width + 16)
     }
 
     override func layout() {

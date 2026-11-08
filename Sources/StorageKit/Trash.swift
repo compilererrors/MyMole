@@ -24,13 +24,20 @@ public struct TrashGate: Sendable {
     /// cover what's inside them and the folders holding them.
     public var protections: @Sendable () throws -> @Sendable (String) -> Bool
 
+    /// The protections are always given, so a flow that moves things can't
+    /// leave out the user's keep lists by omission; one that has none to
+    /// apply says so with `keepsNothing`.
     public init(
         still: @escaping @Sendable (String) -> Bool,
-        protections: @escaping @Sendable () throws -> @Sendable (String) -> Bool = { { _ in false } }
+        protections: @escaping @Sendable () throws -> @Sendable (String) -> Bool
     ) {
         self.still = still
         self.protections = protections
     }
+
+    /// For a flow the user's keep lists don't apply to, such as one only
+    /// tests use.
+    public static let keepsNothing: @Sendable () throws -> @Sendable (String) -> Bool = { { _ in false } }
 }
 
 /// Where moved items go: the system Trash in the app, and a folder of their
@@ -92,7 +99,8 @@ public enum Trasher {
     /// "/private" and so changes paths under /private/var, nothing is
     /// rewritten: a path is plain or it's refused.
     public static func isPlainPath(_ path: String) -> Bool {
-        guard path.hasPrefix("/") else { return false }
+        // POSIX stops at NUL; the checked string must name the same item.
+        guard path.hasPrefix("/"), !path.utf8.contains(0) else { return false }
         if path == "/" { return true }
         return path.dropFirst().split(separator: "/", omittingEmptySubsequences: false)
             .allSatisfy { !$0.isEmpty && $0 != "." && $0 != ".." }
@@ -132,7 +140,7 @@ public enum Trasher {
             "/", "/System", "/Library", "/Applications", "/Users", "/private", "/usr", "/bin", "/sbin",
             "/opt", "/Volumes", home, home + "/Library", home + "/Desktop", home + "/Documents",
             home + "/Downloads", home + "/Pictures", home + "/Movies", home + "/Music",
-            home + "/Library/Mobile Documents",
+            home + "/Library/Mobile Documents", home + "/Library/CloudStorage",
         ]
         if fixed.contains(p) { return true }
         // Nothing under the read-only system volume.
@@ -199,7 +207,7 @@ public enum Trasher {
         do {
             keeps = try gate.protections()
         } catch {
-            return ([], paths.map { ($0, "Your protections couldn't be read, so nothing was moved.") })
+            return ([], paths.map { ($0, protectionsUnreadable) })
         }
         var allowed: [String] = []
         var refused: [(path: String, reason: String)] = []
@@ -220,50 +228,21 @@ public enum Trasher {
     }
 
     /// Moves what the gate lets through to the Trash. Every flow moves
-    /// through here, so none can skip a check. The whole batch is cleared
-    /// first, and each item is checked again right before it moves: still
-    /// the same file as when it was cleared, still meeting the flow's rule,
-    /// and not kept by the protections, which are read again as the batch
-    /// goes on. Protections that stop reading stop the rest of the batch.
+    /// through here or through a `TrashJob`, which does the same as one step
+    /// of a job, so none can skip a check. The whole batch is cleared first
+    /// and planned (`Trasher.plan`), and each item is checked again right
+    /// before it moves (`Trasher.run`).
     public static func moveToTrash(_ paths: [String], through gate: TrashGate, backend: TrashBackend = .system) -> TrashOutcome {
-        let (allowed, refused) = clear(paths, through: gate)
-        var keeps: @Sendable (String) -> Bool
-        do {
-            keeps = try gate.protections()
-        } catch {
-            return TrashOutcome(moved: [], failed: refused + allowed.map { ($0, "Your protections couldn't be read, so nothing was moved.") })
-        }
-        let identities = Dictionary(uniqueKeysWithValues: allowed.map { ($0, identity(of: $0)) })
-        var readAt = Date()
-        var moved: [TrashRecord] = []
-        var failed = refused
-        for (i, path) in allowed.enumerated() {
-            if Date().timeIntervalSince(readAt) > refreshProtections {
-                do {
-                    keeps = try gate.protections()
-                    readAt = Date()
-                } catch {
-                    failed += allowed[i...].map { ($0, "Your protections couldn't be read, so it wasn't moved.") }
-                    break
-                }
-            }
-            if identities[path] == nil || identity(of: path) != identities[path] {
-                failed.append((path, "Changed since it was checked"))
-            } else if keeps(path) {
-                failed.append((path, "Kept"))
-            } else if !gate.still(path) {
-                failed.append((path, "Changed since it was checked"))
-            } else {
-                let out = move([path], backend: backend)
-                moved += out.moved
-                failed += out.failed
-            }
-        }
-        return TrashOutcome(moved: moved, failed: failed)
+        var plan = plan(paths, through: gate)
+        run(&plan, through: gate, backend: backend)
+        return plan.outcome
     }
 
     /// How often a long batch reads the protections again.
     static let refreshProtections: TimeInterval = 0.5
+
+    /// Why nothing moved when the user's protections didn't load.
+    public static let protectionsUnreadable = "Your protections couldn't be read, so nothing was moved."
 
     /// The entry at `path` as the file system names it: kind, volume and
     /// file number. Nil when there's nothing there.

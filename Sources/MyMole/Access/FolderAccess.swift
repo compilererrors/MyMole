@@ -29,9 +29,9 @@ final class FolderAccess {
 
         var title: String {
             switch self {
-            case .home: "Your home folder"
-            case .applications: "Applications"
-            case .startupDisk: "The startup disk"
+            case .home: String(localized: "Your home folder")
+            case .applications: String(localized: "Applications")
+            case .startupDisk: String(localized: "The startup disk")
             }
         }
 
@@ -42,9 +42,9 @@ final class FolderAccess {
 
         var why: String {
             switch self {
-            case .home: "Deep Clean, Projects, Installers, the disk map and app leftovers all work in it."
-            case .applications: "Needed to move apps you uninstall to the Trash."
-            case .startupDisk: "Lets the disk map look beyond your home folder."
+            case .home: String(localized: "Deep Clean, Projects, Installers, the disk map and app leftovers all work in it.")
+            case .applications: String(localized: "Needed to move apps you uninstall to the Trash.")
+            case .startupDisk: String(localized: "Lets the disk map look beyond your home folder.")
             }
         }
     }
@@ -75,8 +75,8 @@ final class FolderAccess {
                     panel.canChooseFiles = false
                     panel.allowsMultipleSelection = false
                     panel.directoryURL = URL(fileURLWithPath: place.path)
-                    panel.prompt = "Give Access"
-                    panel.message = "Choose \(place.inSentence) (\(place.path)) to let MyMole work there. \(place.why)"
+                    panel.prompt = String(localized: "Give Access")
+                    panel.message = String(localized: "Choose \(place.inSentence) (\(place.path)) to let MyMole work there. \(place.why)")
                     return panel.runModal() == .OK ? panel.url : nil
                 })
         }
@@ -84,6 +84,9 @@ final class FolderAccess {
 
     private(set) var granted: Set<Place>
     private(set) var lastProblem: String?
+    /// Bumped by every grant and every taking back, so work started under
+    /// one set of folders can tell the set has changed since.
+    private(set) var generation = 0
     private let defaults: UserDefaults
     private let bookmarks: Bookmarks
     private var opened: [Place: URL] = [:]
@@ -92,6 +95,14 @@ final class FolderAccess {
         self.defaults = defaults
         self.bookmarks = bookmarks ?? .live
         granted = Edition.current.isSandboxed ? [] : Set(Place.allCases)
+        #if SMOKE
+        // The screenshot run's own build shows the App Store edition with
+        // its folders already chosen; shipping builds have no such switch.
+        if ProcessInfo.processInfo.environment["MYMOLE_SMOKE_GRANTED"] == "1" {
+            granted = Set(Place.allCases)
+            return
+        }
+        #endif
         guard Edition.current.isSandboxed else { return }
         for place in Place.allCases { resolve(place) }
     }
@@ -123,7 +134,7 @@ final class FolderAccess {
     func request(_ place: Place) {
         guard let url = bookmarks.choose(place) else { return }
         guard url.standardizedFileURL.path == place.path else {
-            lastProblem = "That was \(url.path), not \(place.path). Choose \(place.inSentence) itself."
+            lastProblem = String(localized: "That was \(url.path), not \(place.path). Choose \(place.inSentence) itself.")
             return
         }
         do {
@@ -131,12 +142,16 @@ final class FolderAccess {
             defaults.set(data, forKey: Self.key(place))
             lastProblem = nil
             resolve(place)
+            generation += 1
         } catch {
-            lastProblem = "Access couldn't be saved: \(error.localizedDescription)"
+            lastProblem = String(localized: "Access couldn't be saved: \(Problem(.folderAccess, error).description)")
         }
     }
 
+    /// Closes the folder. Call through `AppModel.takeBack`, which first
+    /// stops and waits for the scans that may be reading it.
     func revoke(_ place: Place) {
+        generation += 1
         if let url = opened.removeValue(forKey: place) { bookmarks.stopAccessing(url) }
         defaults.removeObject(forKey: Self.key(place))
         granted.remove(place)

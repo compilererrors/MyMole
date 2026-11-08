@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 import Testing
 
 @testable import PrivilegedKit
@@ -73,12 +74,66 @@ import StorageKit
         #expect(!box.exists("Library/LaunchDaemons/.mymole-removing"))
     }
 
+    @Test func aDaemonWhoseJobIsntNamedAfterTheAppStays() throws {
+        let box = try system()
+        let daemons = "Library/LaunchDaemons/"
+        func plist(_ content: [String: String]) throws -> Data {
+            try PropertyListSerialization.data(fromPropertyList: content, format: .xml, options: 0)
+        }
+        // Files named after the app whose jobs answer to other names, and
+        // one with no label: it was never loaded as a job.
+        try box.file(daemons + "com.vendor.Editor.Updater.plist", try plist(["Label": "com.other.Daemon"]))
+        try box.file(daemons + "com.vendor.Editor.Agent.plist", try plist(["Label": "Editor Agent"]))
+        try box.file(daemons + "com.vendor.Editor.Old.plist", try plist(["Program": "/usr/bin/true"]))
+        let (other, loose, bare) = (
+            box.path + "/" + daemons + "com.vendor.Editor.Updater.plist", box.path + "/" + daemons + "com.vendor.Editor.Agent.plist",
+            box.path + "/" + daemons + "com.vendor.Editor.Old.plist")
+        let fake = FakeRunner()
+        let report = SystemLeftovers.remove([other, loose, bare], appID: "com.vendor.Editor", ids: ids, base: box.path, runner: fake.runner)
+        #expect(report.removed == [bare])
+        #expect(report.failed == [other: "Its job isn't named after the app, so it stays.", loose: "Its job isn't named after the app, so it stays."])
+        // Nothing was stopped by a name that isn't the app's.
+        #expect(fake.calls.withLock { $0 }.isEmpty)
+        #expect(box.exists(daemons + "com.vendor.Editor.Updater.plist") && box.exists(daemons + "com.vendor.Editor.Agent.plist"))
+        #expect(!box.exists(daemons + "com.vendor.Editor.Old.plist"))
+    }
+
     @Test func nothingGoesWhenInstalledAppsCantBeRead() throws {
         let box = try system()
         try FileManager.default.removeItem(atPath: box.path + "/Applications")
         let paths = SystemLeftovers.find(ids: ids, base: box.path).map(\.path)
         let report = SystemLeftovers.remove(paths, appID: "com.vendor.Editor", ids: ids, base: box.path, runner: FakeRunner().runner)
         #expect(report.removed.isEmpty && Set(report.refused) == Set(paths))
+    }
+
+    @Test func nothingGoesWhenPartOfTheInstalledAppsCantBeRead() throws {
+        // A vendor folder in Applications that can't be read.
+        let box = try system()
+        try box.folder("Applications/Vendor")
+        #expect(chmod(box.path + "/Applications/Vendor", 0) == 0)
+        defer { _ = chmod(box.path + "/Applications/Vendor", 0o755) }
+        let paths = SystemLeftovers.find(ids: ids, base: box.path).map(\.path)
+        #expect(SystemLeftovers.installedOwners(base: box.path) == nil)
+        let report = SystemLeftovers.remove(paths, appID: "com.vendor.Editor", ids: ids, base: box.path, runner: FakeRunner().runner)
+        #expect(report.removed.isEmpty && Set(report.refused) == Set(paths))
+
+        // An app whose identity can't be read.
+        let broken = try system()
+        try broken.file("Applications/Editor.app/Contents/Info.plist", Data("not a plist".utf8))
+        #expect(SystemLeftovers.installedOwners(base: broken.path) == nil)
+
+        // A user's Applications folder that can't be read.
+        let user = try system()
+        try user.folder("Users/synthetic/Applications")
+        #expect(chmod(user.path + "/Users/synthetic/Applications", 0) == 0)
+        defer { _ = chmod(user.path + "/Users/synthetic/Applications", 0o755) }
+        #expect(SystemLeftovers.installedOwners(base: user.path) == nil)
+
+        // Folders that simply aren't there, and a folder that isn't a bundle, leave it complete.
+        let plain = try system()
+        try plain.folder("Users/synthetic")
+        try plain.folder("Applications/Notes.app")
+        #expect(SystemLeftovers.installedOwners(base: plain.path) == [])
     }
 
     @Test func idsOutsideTheVendorAreIgnoredAndStuckJobsStay() throws {
@@ -104,6 +159,60 @@ import StorageKit
         #expect(fake.calls.withLock { $0 }.isEmpty)
         #expect(box.exists("Library/PrivilegedHelperTools/com.vendor.Editor.Helper"))
     }
+    @Test func anUnreadableEmbeddedIdentityRefusesAllSystemRemoval() throws {
+        let box = try system()
+        try box.file("Applications/Other.app/Contents/Info.plist", try PropertyListSerialization.data(
+            fromPropertyList: ["CFBundleIdentifier": "org.other.Tool"], format: .xml, options: 0))
+        try box.folder("Applications/Other.app/Contents/Helpers")
+        let helpers = box.path + "/Applications/Other.app/Contents/Helpers"
+        #expect(chmod(helpers, 0) == 0)
+        defer { _ = chmod(helpers, 0o755) }
+        let wanted = SystemLeftovers.find(ids: ids, base: box.path).map(\.path)
+        let fake = FakeRunner()
+        #expect(SystemLeftovers.installedOwners(base: box.path) == nil)
+        let report = SystemLeftovers.remove(wanted, appID: "com.vendor.Editor", ids: ids, base: box.path, runner: fake.runner)
+        #expect(report.removed.isEmpty && Set(report.refused) == Set(wanted))
+        #expect(fake.calls.withLock { $0 }.isEmpty)
+        #expect(box.exists("Library/PrivilegedHelperTools/com.vendor.Editor.Helper"))
+    }
+
+    @Test func brokenEmbeddedMetadataCannotHideAnotherOwner() throws {
+        let box = try system()
+        try box.file("Applications/Other.app/Contents/Info.plist", try PropertyListSerialization.data(
+            fromPropertyList: ["CFBundleIdentifier": "org.other.Tool"], format: .xml, options: 0))
+        try box.file("Applications/Other.app/Contents/XPCServices/Shared.xpc/Contents/Info.plist", Data("broken".utf8))
+        #expect(SystemLeftovers.installedOwners(base: box.path) == nil)
+        let wanted = SystemLeftovers.find(ids: ids, base: box.path).map(\.path)
+        let report = SystemLeftovers.remove(wanted, appID: "com.vendor.Editor", ids: ids, base: box.path, runner: FakeRunner().runner)
+        #expect(report.removed.isEmpty && Set(report.refused) == Set(wanted))
+    }
+
+    @Test func anOwnerAppearingWhileTheDaemonStopsKeepsItsFiles() throws {
+        let box = try system()
+        let base = box.path
+        let failed = Mutex(false)
+        let runner = CommandRunner(run: { _, _ in
+            do {
+                for (relative, id) in [
+                    ("Applications/Other.app/Contents/Info.plist", "org.other.Tool"),
+                    ("Applications/Other.app/Contents/XPCServices/Shared.xpc/Contents/Info.plist", "com.vendor.Editor.Helper"),
+                ] {
+                    let path = base + "/" + relative
+                    try FileManager.default.createDirectory(atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+                    try PropertyListSerialization.data(fromPropertyList: ["CFBundleIdentifier": id], format: .xml, options: 0)
+                        .write(to: URL(fileURLWithPath: path))
+                }
+            } catch { failed.withLock { $0 = true } }
+            return (0, "")
+        }, exists: { _ in true })
+        let wanted = SystemLeftovers.find(ids: ids, base: box.path).filter { $0.kind == .appPart }.map(\.path)
+        let report = SystemLeftovers.remove(wanted, appID: "com.vendor.Editor", ids: ids, base: box.path, runner: runner)
+        #expect(!failed.withLock { $0 })
+        #expect(report.removed.isEmpty)
+        #expect(box.exists("Library/LaunchDaemons/com.vendor.Editor.Helper.plist"))
+        #expect(box.exists("Library/PrivilegedHelperTools/com.vendor.Editor.Helper"))
+    }
+
 }
 
 /// Removal that a link inside the tree can't send elsewhere.
@@ -130,5 +239,16 @@ import StorageKit
         #expect(SecureRemove.removeTree(f) && !box.exists("single"))
         #expect(SecureRemove.removeTree(box.path + "/missing"))
         #expect(!SecureRemove.removeTree(box.path + "/.."))
+    }
+}
+
+@Suite struct LeftStagingTests {
+    @Test func stagingAnEarlierRemovalLeftIsFoundAndNotTouched() throws {
+        let box = try Box()
+        try box.file("Library/Caches/.mymole-removing/JOB/item")
+        try box.folder("Library/Logs")
+        let found = SystemCleanRules.leftStaging(at: [box.path + "/Library/Caches", box.path + "/Library/Logs"])
+        #expect(found == [box.path + "/Library/Caches/.mymole-removing"])
+        #expect(box.exists("Library/Caches/.mymole-removing/JOB/item"))
     }
 }

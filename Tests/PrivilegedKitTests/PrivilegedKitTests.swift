@@ -185,6 +185,14 @@ final class FakeRunner: Sendable {
         return box
     }
 
+    @Test func aPlaceThatCantBeReadIsSaidAndAMissingOneIsNot() throws {
+        let box = try setUp()
+        #expect(chmod(box.path + "/Library/Caches", 0) == 0)
+        defer { _ = chmod(box.path + "/Library/Caches", 0o755) }
+        let listing = SystemCleanRules.list(roots: roots(box) + [SystemCleanRules.Root(path: box.path + "/missing", reason: "cache")])
+        #expect(listing.unreadable == [box.path + "/Library/Caches"])
+    }
+
     @Test func scanOffersOnlyWhatTheRulesAllow() throws {
         let box = try setUp()
         let found = SystemCleanRules.scan(roots: roots(box))

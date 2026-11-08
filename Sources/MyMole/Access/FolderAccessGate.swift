@@ -10,8 +10,7 @@ struct FolderAccessGate: View {
         CenterCard(
             symbol: "folder.badge.person.crop",
             title: "Give MyMole access to \(place.inSentence)",
-            subtitle: "\(place.why) macOS lets App Store apps into the folders you choose, so choose \(place.path) in the next window. MyMole remembers it; you can take it back in Settings."
-                + (app.access.lastProblem.map { "\n\n" + $0 } ?? "")
+            subtitle: "\(place.why) macOS lets App Store apps into the folders you choose, so choose \(place.path) in the next window. MyMole remembers it; you can take it back in Settings.\(app.access.lastProblem.map { "\n\n" + $0 } ?? "")"
         ) {
             Button("Choose \(place.inSentence)…") {
                 app.access.request(place)

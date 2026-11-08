@@ -47,6 +47,36 @@ func makeApp(_ box: Sandbox, _ rel: String, id: String?, name: String? = nil, by
         #expect(AppFinder.ownUninstaller(of: try app("Applications/Plain.app"), folders: [apps]) == nil)
     }
 
+    @Test func findsUninstallersByOtherNamesAndInApplicationSupport() throws {
+        let box = try Sandbox()
+        let apps = box.path + "/Applications"
+        let support = box.path + "/Library/Application Support"
+        try makeApp(box, "Applications/Editor.app", id: "com.vendor.Editor", name: "Editor")
+        try makeApp(box, "Applications/Viewer.app", id: "com.vendor.Viewer", name: "Viewer")
+        try makeApp(box, "Applications/Mixer.app", id: "com.sound.Mixer", name: "Mixer")
+        try makeApp(box, "Applications/Plain.app", id: "com.plain.Plain", name: "Plain")
+        try makeApp(box, "Applications/Kit Suite/Kit.app", id: "com.kit.Kit", name: "Kit")
+        try box.file("Applications/Kit Suite/Kit Remover.pkg", bytes: 10)
+        // The app's own folder: any uninstaller there is its own.
+        try box.file("Library/Application Support/Editor/Tools/uninstall.command", bytes: 10)
+        // The vendor's folder: only one naming the app.
+        try box.file("Library/Application Support/Vendor/Uninstall Other Product.app/Contents/Info.plist", bytes: 10)
+        try box.file("Library/Application Support/com.sound.Mixer/Deinstallieren.app/Contents/Info.plist", bytes: 10)
+        try box.file("Library/Application Support/Plain/notes.txt", bytes: 10)
+        try box.file("Library/Application Support/Plain/Background Remover.txt", bytes: 10)
+        func own(_ rel: String) throws -> String? {
+            AppFinder.ownUninstaller(of: try #require(AppFinder.read(box.path + "/" + rel)), folders: [apps], supportFolders: [support])
+        }
+
+        #expect(try own("Applications/Editor.app")?.hasSuffix("/Editor/Tools/uninstall.command") == true)
+        #expect(try own("Applications/Mixer.app")?.hasSuffix("/com.sound.Mixer/Deinstallieren.app") == true)
+        #expect(try own("Applications/Kit Suite/Kit.app")?.hasSuffix("/Kit Suite/Kit Remover.pkg") == true)
+        #expect(try own("Applications/Viewer.app") == nil)
+        #expect(try own("Applications/Plain.app") == nil)
+        try box.file("Library/Application Support/Vendor/Viewer Uninstaller.app/Contents/Info.plist", bytes: 10)
+        #expect(try own("Applications/Viewer.app")?.hasSuffix("/Vendor/Viewer Uninstaller.app") == true)
+    }
+
     @Test func onlyReverseDNSBundleIDsAreMatched() {
         #expect(AppLeftovers.isWellFormed("com.vendor.Editor") && AppLeftovers.isWellFormed("org.vendor-name.App_2"))
         for id in ["", "Editor", "com..Editor", ".com.vendor", "com.vendor.", "com.vendor/Editor", "com.vendor.Ed itor"] {
@@ -263,7 +293,7 @@ func makeApp(_ box: Sandbox, _ rel: String, id: String?, name: String? = nil, by
         try FileManager.default.createDirectory(at: jobs, withIntermediateDirectories: true)
         try (["Label": "com.vendor.editord"] as NSDictionary).write(to: jobs.appending(path: "com.vendor.editord.plist"))
 
-        let identity = AppIdentity.of(app(box))
+        let identity = try #require(AppIdentity.of(app(box), readers: .init(groups: { _ in [] })))
         #expect(identity.helperIDs == ["com.vendor.Editor.PrivilegedHelper", "com.vendor.Editor.Renderer", "com.vendor.EditorLauncher", "com.vendor.editord"])
         #expect(identity.groups.isEmpty)
     }

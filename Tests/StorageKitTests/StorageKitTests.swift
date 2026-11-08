@@ -383,6 +383,19 @@ func testBin(_ box: Sandbox) throws -> TrashBackend {
         #expect(PathRisk.of(home + "/Library/Caches/com.vendor.Tool") == nil)
     }
 
+    @Test func syncedFoldersAndPhotosLibrariesWarn() {
+        let home = "/Users/synthetic"
+        let synced = PathRisk.of(home + "/Library/CloudStorage/Dropbox/Taxes")
+        #expect(synced?.level == .caution && synced?.reason.contains("in the cloud") == true)
+        #expect(PathRisk.of(home + "/Library/Mobile Documents/com~apple~CloudDocs/Notes")?.reason.contains("other devices") == true)
+        // Named for what it is, not only as "your own files".
+        #expect(PathRisk.of(home + "/Pictures/Photos Library.photoslibrary")?.reason.hasPrefix("A Photos library") == true)
+        #expect(PathRisk.of(home + "/Pictures/Photos Library.photoslibrary/originals/0")?.level == .caution)
+        // The folder of every synced service is never moved itself.
+        #expect(Trasher.isProtected(home + "/Library/CloudStorage", home: home))
+        #expect(!Trasher.isProtected(home + "/Library/CloudStorage/Dropbox/Old", home: home))
+    }
+
     @Test func linkOnTheWayCantReachAProtectedLocation() throws {
         let box = try Sandbox()
         try FileManager.default.createSymbolicLink(atPath: box.path + "/sys", withDestinationPath: "/usr")
@@ -545,7 +558,7 @@ func testBin(_ box: Sandbox) throws -> TrashBackend {
 
     @Test func protectedPlacesStayEvenWhenTheFlowAllowsThem() {
         let home = NSHomeDirectory()
-        let cleared = Trasher.clear([home + "/.ssh", home + "/Library/Keychains", "/System"], through: TrashGate(still: { _ in true }))
+        let cleared = Trasher.clear([home + "/.ssh", home + "/Library/Keychains", "/System"], through: TrashGate(still: { _ in true }, protections: TrashGate.keepsNothing))
         #expect(cleared.allowed.isEmpty)
         #expect(cleared.refused.allSatisfy { $0.reason == "Protected location" })
     }
@@ -556,9 +569,27 @@ func testBin(_ box: Sandbox) throws -> TrashBackend {
         for p in ["/", "/private/var/log/system.log.0.gz", "/Users/synthetic/Library/Caches/x", "/a b/c"] {
             #expect(Trasher.isPlainPath(p), "\(p)")
         }
-        for p in ["", "relative", "/a//b", "/a/./b", "/a/../b", "/a/", "/..", "/a/.."] {
+        for p in ["", "relative", "/a//b", "/a/./b", "/a/../b", "/a/", "/..", "/a/..", "/a\0", "/a\0/b", "/\0a"] {
             #expect(!Trasher.isPlainPath(p), "\(p)")
         }
+    }
+
+    @Test func nulCannotHideTheItemPassedToTheBackend() throws {
+        let box = try Sandbox()
+        let path = try box.file("cache/keep", bytes: 10).path
+        // A C API would read just `path`, while a string-based keep rule
+        // sees the suffix. The common gate must refuse it before either.
+        let disguised = path + "\0.cache"
+        let calls = Mutex<[String]>([])
+        let backend = TrashBackend { p in
+            calls.withLock { $0.append(p) }
+            return (nil, "Synthetic backend")
+        }
+        let gate = TrashGate(still: { _ in true }, protections: { { $0 == path } })
+        let result = Trasher.moveToTrash([disguised], through: gate, backend: backend)
+        #expect(result.moved.isEmpty && result.failed.map(\.reason) == ["Not a plain full path"])
+        #expect(calls.withLock { $0.isEmpty })
+        #expect(FileManager.default.fileExists(atPath: path))
     }
 
     @Test func lexicalNeverDropsPrivateOrFollowsLinks() {
@@ -604,5 +635,32 @@ func testBin(_ box: Sandbox) throws -> TrashBackend {
         #expect(PerformanceLevel(saved: 5) == .full)
         #expect(PerformanceLevel(saved: 9) == .balanced)
         #expect(PerformanceLevel(saved: -1) == .balanced)
+    }
+}
+
+@Suite struct SizeOnDiskTests {
+    @Test func aFileIsMeasuredByItsBlocksAndAFolderByItsTree() throws {
+        let box = try Sandbox()
+        try box.file("cache/a.zip", bytes: 65_536)
+        try box.file("cache/deeper/b.zip", bytes: 20_000)
+        #expect(StorageScanner.sizeOnDisk(box.path + "/cache/a.zip") == box.allocated("cache/a.zip"))
+        #expect(StorageScanner.sizeOnDisk(box.path + "/cache") == box.allocated("cache/a.zip") + box.allocated("cache/deeper/b.zip"))
+        #expect(StorageScanner.sizeOnDisk(box.path + "/cache/gone") == nil)
+        // The walk alone reports nothing for a file, which is why the helper exists.
+        #expect(StorageScanner.scan(path: box.path + "/cache/a.zip", workers: 1).root.size == 0)
+    }
+}
+
+@Suite struct PathRiskWalkTests {
+    @Test func theWalkEndsAtTheNextFolderOnceAskedTo() throws {
+        let box = try Sandbox()
+        for i in 0..<12 { try box.file("app/d\(i)/x", bytes: 100) }
+        try box.file("app/d11/.aws/credentials", bytes: 100)
+        let app = try #require(StorageScanner.scan(path: box.path, workers: 1).root.subfolders.first { $0.name == "app" })
+        #expect(PathRisk.inside(app)?.level == .caution)
+        var asked = 0
+        let early = PathRisk.inside(app, stop: { asked += 1; return asked > 3 })
+        // Three folders looked at, then the walk ends with what it had.
+        #expect(asked == 4 && (early == nil || early?.level == .caution))
     }
 }

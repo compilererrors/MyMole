@@ -2,6 +2,7 @@ import Darwin
 import Foundation
 import IOKit
 import IOKit.ps
+import Synchronization
 
 // The live readers: kernel counters through sysctl and Mach, volumes through
 // Foundation, disks and the battery through IOKit, processes through ps.
@@ -16,7 +17,8 @@ extension SystemReaders {
             return SystemSnapshot.Hardware(
                 model: Kernel.productName() ?? Kernel.string("hw.model"),
                 chip: Kernel.string("machdep.cpu.brand_string"),
-                memoryBytes: Kernel.value("hw.memsize", as: UInt64.self).map { Int64($0) }, osVersion: os)
+                memoryBytes: Kernel.value("hw.memsize", as: UInt64.self).map { Int64($0) }, osVersion: os,
+                diskHealth: ProcessList.sandboxed ? nil : DiskHealth.startup())
         },
         uptime: {
             guard let boot = Kernel.value("kern.boottime", as: timeval.self) else { return nil }
@@ -251,18 +253,39 @@ public enum ProcessList {
     /// The busiest processes of every user, through `ps`: reading another
     /// user's process counters directly needs root.
     static func top(limit: Int = 8) -> [SystemSnapshot.Process] {
+        guard let out = output("/bin/ps", ["-Aceo", "pid=,pcpu=,rss=,comm="], timeLimit: 5) else { return [] }
+        return parse(out, limit: limit)
+    }
+
+    /// What a program prints, or nil when it can't start or runs past
+    /// `timeLimit` seconds; a stuck one is stopped, so a reading never
+    /// hangs the pane.
+    static func output(_ executable: String, _ arguments: [String], timeLimit: TimeInterval) -> String? {
         let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/bin/ps")
-        p.arguments = ["-Aceo", "pid=,pcpu=,rss=,comm="]
+        p.executableURL = URL(fileURLWithPath: executable)
+        p.arguments = arguments
         // Decimal points, whatever the user's region.
         p.environment = ["LC_ALL": "C"]
         let out = Pipe()
         p.standardOutput = out
         p.standardError = FileHandle.nullDevice
-        do { try p.run() } catch { return [] }
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        return parse(String(decoding: data, as: UTF8.self), limit: limit)
+        let exited = DispatchSemaphore(value: 0)
+        p.terminationHandler = { _ in exited.signal() }
+        do { try p.run() } catch { return nil }
+        // Read while it runs, so a full pipe can't stall it.
+        let data = Mutex(Data())
+        let read = DispatchGroup()
+        DispatchQueue.global(qos: .utility).async(group: read) {
+            let d = out.fileHandleForReading.readDataToEndOfFile()
+            data.withLock { $0 = d }
+        }
+        guard exited.wait(timeout: .now() + timeLimit) == .success else {
+            p.terminate()
+            if exited.wait(timeout: .now() + 1) != .success { kill(p.processIdentifier, SIGKILL) }
+            return nil
+        }
+        _ = read.wait(timeout: .now() + 1)
+        return String(decoding: data.withLock { $0 }, as: UTF8.self)
     }
 
     /// `pid pcpu rss(KB) name` per line, busiest first. Names may hold spaces.
@@ -274,6 +297,27 @@ public enum ProcessList {
             }
             return SystemSnapshot.Process(pid: pid, name: String(parts[3]), cpu: cpu, memoryBytes: rss * 1024)
         }
-        return Array(procs.sorted { $0.cpu != $1.cpu ? $0.cpu > $1.cpu : $0.memoryBytes > $1.memoryBytes }.prefix(limit))
+        // The busiest, then the biggest not among them, so either order can be shown.
+        let byCPU = procs.sorted { $0.cpu != $1.cpu ? $0.cpu > $1.cpu : $0.memoryBytes > $1.memoryBytes }.prefix(limit)
+        let shown = Set(byCPU.map(\.pid))
+        let byMemory = procs.filter { !shown.contains($0.pid) }.sorted { $0.memoryBytes > $1.memoryBytes }.prefix(limit)
+        return Array(byCPU) + Array(byMemory)
+    }
+}
+
+/// The startup disk's SMART status, as `diskutil` reports it. Outside the
+/// App Sandbox only: the sandbox doesn't let a program ask the disk service.
+enum DiskHealth {
+    static func startup() -> String? {
+        guard let out = ProcessList.output("/usr/sbin/diskutil", ["info", "-plist", "/"], timeLimit: 5) else { return nil }
+        return parse(out)
+    }
+
+    /// "Verified", "Failing" and the like; nil for a disk that doesn't say.
+    static func parse(_ plist: String) -> String? {
+        guard let d = (try? PropertyListSerialization.propertyList(from: Data(plist.utf8), format: nil)) as? [String: Any],
+            let status = d["SMARTStatus"] as? String, !status.isEmpty, status != "Not Supported"
+        else { return nil }
+        return status
     }
 }

@@ -15,17 +15,19 @@ struct LargeFile: Identifiable, Hashable, Sendable {
 }
 
 /// The Browse list's filter: name, kind and when things last changed.
-struct BrowseFilter: Hashable {
+struct BrowseFilter: Hashable, Codable {
     var query = ""
     var kind: FileKind?
     var date = DateFilter()
+    /// Look through the whole scan, not only the open folder.
+    var wholeScan = false
 
     var isActive: Bool { !query.isEmpty || kind != nil || date.isActive }
 
     func matches(_ e: DiskEntry) -> Bool {
         guard isActive else { return true }
         guard !e.pending else { return false }
-        return (query.isEmpty || e.name.localizedCaseInsensitiveContains(query))
+        return (query.isEmpty || DSFilterField.matches(query, e.name))
             && (kind == nil || e.kind == kind)
             && date.matches(e.modified)
     }
@@ -37,6 +39,17 @@ struct Marked: Hashable {
     let name: String
     let size: Int64
     let isFolder: Bool
+
+    static func parent(of path: String, in paths: Set<String>) -> String? {
+        var parent = (path as NSString).deletingLastPathComponent
+        while !parent.isEmpty {
+            if paths.contains(parent) { return parent }
+            let next = (parent as NSString).deletingLastPathComponent
+            if next == parent { break }
+            parent = next
+        }
+        return nil
+    }
 }
 
 /// State of the disk map: the scanned tree, where the user is in it, what's
@@ -51,23 +64,23 @@ final class StorageModel {
 
         var title: String {
             switch self {
-            case .rings: "Rings"
-            case .wheel: "Wheel"
-            case .pie: "Pie"
-            case .boxes: "Boxes"
-            case .columns: "Columns"
-            case .bars: "Bars"
+            case .rings: String(localized: "Rings")
+            case .wheel: String(localized: "Wheel")
+            case .pie: String(localized: "Pie")
+            case .boxes: String(localized: "Boxes")
+            case .columns: String(localized: "Columns")
+            case .bars: String(localized: "Bars")
             }
         }
 
         var detail: String {
             switch self {
-            case .rings: "Sunburst, four levels deep"
-            case .wheel: "One ring, total in the middle"
-            case .pie: "Classic pie with labels"
-            case .boxes: "Treemap, two levels"
-            case .columns: "Icicle, levels left to right"
-            case .bars: "Ranked bars"
+            case .rings: String(localized: "Sunburst, four levels deep")
+            case .wheel: String(localized: "One ring, total in the middle")
+            case .pie: String(localized: "Classic pie with labels")
+            case .boxes: String(localized: "Treemap, two levels")
+            case .columns: String(localized: "Icicle, levels left to right")
+            case .bars: String(localized: "Ranked bars")
             }
         }
 
@@ -84,10 +97,115 @@ final class StorageModel {
     }
     enum Tab: Hashable { case browse, largeFiles, changes, skipped }
 
+    /// Folders inside the mapped one the user had skipped, for this scan.
+    private(set) var skipped: [String] = []
+
+    /// A scan opened from a file, only to look at: where it came from and
+    /// when it was made. Nothing can be chosen or moved while it's shown.
+    private(set) var opened: (file: String, date: Date)?
+    private(set) var exportProblem: String?
+
+    /// Writes the finished scan to a file the user picks.
+    func exportScan() {
+        guard let root, !scanning, opened == nil else { return }
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "\(root.name) \(Date.now.formatted(date: .numeric, time: .omitted)).mymolescan"
+            .replacingOccurrences(of: "/", with: "-")
+        panel.message = String(localized: "Save this scan to look at later, on this Mac or another")
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let export = ScanExport(of: root)
+        Task {
+            let failed = await Task.detached(priority: .userInitiated) { () -> String? in
+                do {
+                    try export.data().write(to: url, options: .atomic)
+                    return nil
+                } catch {
+                    return error.localizedDescription
+                }
+            }.value
+            exportProblem = failed.map { String(localized: "The scan couldn't be saved: \($0)") }
+            showNotice(Notice(text: failed == nil ? String(localized: "Saved the scan to \(url.lastPathComponent)") : exportProblem ?? "", canUndo: false))
+        }
+    }
+
+    /// Opens a saved scan to look at.
+    func openExportedScan() {
+        guard !scanning, !trashing else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.message = String(localized: "Open a scan saved from MyMole, to look at")
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        Task { await open(exported: url) }
+    }
+
+    func open(exported url: URL) async {
+        let read = await Task.detached(priority: .userInitiated) { () -> Result<(ScanExport, Folder, ScanIndex, [LargeFile]), ScanExport.Failure> in
+            guard let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize, size <= ScanExport.byteLimit,
+                let data = try? Data(contentsOf: url)
+            else { return .failure(.tooLarge) }
+            do {
+                let export = try ScanExport.read(data)
+                let tree = export.tree()
+                return .success((export, tree, ScanIndex(tree), Self.collectLargeFiles(tree)))
+            } catch let f as ScanExport.Failure {
+                return .failure(f)
+            } catch {
+                return .failure(.damaged)
+            }
+        }.value
+        switch read {
+        case .failure(let f):
+            let why: String = switch f {
+            case .tooLarge: String(localized: "It's larger than a saved scan can be.")
+            case .notAScan: String(localized: "It isn't a scan saved from MyMole.")
+            case .newerVersion: String(localized: "It was saved by a newer MyMole.")
+            case .damaged: String(localized: "It's damaged.")
+            }
+            showNotice(Notice(text: String(localized: "\(url.lastPathComponent) couldn't be opened: \(why)"), canUndo: false))
+        case .success(let (export, tree, index, large)):
+            progress?.cancel()
+            epoch += 1
+            refreshing = false
+            scanning = false
+            marked.removeAll()
+            denied = []
+            skipped = []
+            history = []
+            compare(from: nil, to: nil)
+            diskSpace = nil
+            rootPath = export.rootPath
+            root = tree
+            current = tree
+            self.index = index
+            largeFiles = large
+            liveFiles = tree.fileCount
+            liveBytes = tree.size
+            opened = (url.lastPathComponent, export.date)
+            revision += 1
+        }
+    }
+
+    /// Leaves `path` out of every scan from now on, and maps again without it.
+    func skipFromNowOn(_ path: String) {
+        DiskMapSkips.add(path)
+        rescan()
+    }
+
+    /// Every folder and listed file of the finished scan, for searching it whole.
+    private(set) var index: ScanIndex?
+    /// Where saved scans are kept; tests use a folder of their own.
+    var snapshotBase: URL = SnapshotStore.defaultBase
     private(set) var root: Folder?
     private(set) var current: Folder?
     private(set) var rootPath = Home.path
     private(set) var scanning = false
+    /// A scan of the folder already mapped is running: the earlier map
+    /// stays on screen, with its folder and selection, until the new one is
+    /// complete, and stays if the scan is stopped.
+    private(set) var refreshing = false
+    /// The tree on screen is the one a running scan is still writing.
+    var showingLive: Bool { scanning && !refreshing }
     private(set) var liveFiles = 0
     private(set) var liveBytes: Int64 = 0
     private(set) var denied: [String] = []
@@ -97,8 +215,11 @@ final class StorageModel {
     private(set) var compareFrom: SnapshotRef?
     private(set) var compareTo: SnapshotRef?
     private(set) var changes: [Change] = []
-    /// Net change of the whole folder between the two scans.
-    private(set) var overallDelta: Int64 = 0
+    /// Net change of the whole folder between the two scans; nil when a scan
+    /// was incomplete or couldn't be read, so the total isn't known.
+    private(set) var overallDelta: Int64? = 0
+    /// Why the comparison is partial or failed, or nil.
+    private(set) var compareProblem: String?
     private(set) var comparing = false
     private(set) var largeFiles: [LargeFile] = []
     private(set) var lastDuration: TimeInterval?
@@ -114,13 +235,12 @@ final class StorageModel {
     var colorByKind = false
     var tab: Tab = .browse
     var hovered: Segment?
-    /// Rows selected in the Browse list (paths of the open folder's items);
+    /// Rows selected in Browse (including opened descendants in the tree);
     /// selected folders light up in the chart too.
-    var selection = Set<String>() {
-        didSet { selectedFolders = Set((current?.subfolders ?? []).filter { selection.contains($0.path) }.map(\.id)) }
-    }
-    private(set) var selectedFolders = Set<ObjectIdentifier>()
+    var selection = Set<String>()
     var browseFilter = BrowseFilter()
+    /// Open branches survive pane changes and replacement of a completed map.
+    var treeExpanded = Set<String>()
     var marked: [String: Marked] = [:]
     var showReview = false
     private(set) var notice: Notice?
@@ -140,12 +260,32 @@ final class StorageModel {
     private var epoch = 0
     /// The running scan was started ahead of need, not by the user.
     private var scanInBackground = false
-    private var undoRecords: [TrashRecord] = []
+    /// A move that can still be put back, and where in the tree its
+    /// entries were taken from.
+    private struct Run: UndoableRun {
+        let id: UUID
+        var records: [TrashRecord]
+        var pruned: [Pruned]
+    }
+
+    private var shelf = UndoShelf<Run>()
+    /// The move an Undo works on: one History asked for, or else the latest.
+    private var target: UUID?
+    private var undone: Run? { target.flatMap(shelf.run) ?? shelf.latest }
+    private var undoRecords: [TrashRecord] {
+        get { undone?.records ?? [] }
+        set { if let id = undone?.id { shelf.update(id) { $0.records = newValue } } }
+    }
+    private var undoPruned: [Pruned] {
+        get { undone?.pruned ?? [] }
+        set { if let id = undone?.id { shelf.update(id) { $0.pruned = newValue } } }
+    }
     /// The history record of the move Undo would put back.
-    private(set) var undoLogID: UUID?
+    var undoLogID: UUID? { undone?.id }
     /// Something from the last move can still be put back, and nothing else runs.
     var canUndo: Bool { !undoRecords.isEmpty && !trashing }
-    private var undoPruned: [Pruned] = []
+    /// Whether the move of this history record can still be put back.
+    func canUndo(run id: UUID) -> Bool { !(shelf.run(id)?.records.isEmpty ?? true) && !trashing }
 
     // MARK: Scanning
 
@@ -157,10 +297,15 @@ final class StorageModel {
     /// recent scan is saved or the map is already loaded.
     func prewarm(path: String) {
         guard root == nil, !scanning else { return }
-        if let last = SnapshotStore.history(for: path).first, Date().timeIntervalSince(last.date) < Self.freshFor {
-            return
+        // The saved scans are read off the main actor; reading may also
+        // migrate an older format.
+        let base = snapshotBase
+        Task { [weak self] in
+            let last = await Task.detached(priority: .utility) { SnapshotStore.history(for: Volumes.historyKey(for: path), base: base).first }.value
+            guard let self, root == nil, !scanning else { return }
+            if let last, Date().timeIntervalSince(last.date) < Self.freshFor { return }
+            scan(path: path, background: true)
         }
-        scan(path: path, background: true)
     }
 
     func scan(path: String, background: Bool = false) {
@@ -174,22 +319,41 @@ final class StorageModel {
         epoch += 1
         let run = epoch
         scanInBackground = background
-        let p = ScanProgress()
+        let p = ScanProgress(collectsFound: true)
         progress = p
+        // The same folder again, with a complete map in place: that map stays.
+        let keepsMap = path == rootPath && root != nil && (!scanning || refreshing)
+        refreshing = keepsMap && opened == nil
+        opened = nil
         rootPath = path
-        root = nil
-        current = nil
-        hovered = nil
-        marked.removeAll()
-        denied = []
-        largeFiles = []
+        if !keepsMap {
+            index = nil
+            root = nil
+            current = nil
+            hovered = nil
+            marked.removeAll()
+            denied = []
+            largeFiles = []
+        }
         completed = []
         scanning = true
+        scanStarted = .now
+        stopAsked = nil
         liveFiles = 0
         liveBytes = 0
-        // Earlier scans of this folder can be compared while the new one runs.
-        history = SnapshotStore.history(for: path)
-        compare(from: history.dropFirst().first, to: history.first)
+        // Earlier scans of this folder can be compared while the new one
+        // runs, once they're read off the main actor.
+        if !keepsMap {
+            history = []
+            compare(from: nil, to: nil)
+        }
+        let base = snapshotBase
+        Task { [weak self] in
+            let found = await Task.detached(priority: .userInitiated) { SnapshotStore.history(for: Volumes.historyKey(for: path), base: base) }.value
+            // A scan that already finished has read the newer history itself.
+            guard let self, run == epoch, scanning else { return }
+            showHistory(found)
+        }
 
         poller?.cancel()
         poller = Task { [weak self] in
@@ -206,40 +370,79 @@ final class StorageModel {
 
         let level = PerformanceLevel.current()
         let workers = level.workers(background: background)
-        Task.detached(priority: level.priority(background: background)) { [weak self] in
-            let result = StorageScanner.scan(
-                path: path, progress: p, workers: workers,
-                onRoot: { r in Task { @MainActor in self?.installRoot(r, run: run) } },
-                onSubtree: { f in Task { @MainActor in self?.subtreeDone(f, run: run) } })
+        let skips = DiskMapSkips.under(path)
+        skipped = skips.full.sorted()
+        scanJob = Task.detached(priority: level.priority(background: background)) { [weak self] in
+            let result = await ScanBudget.shared.run(background: background, progress: p) {
+                StorageScanner.scan(
+                    path: path, progress: p, workers: workers,
+                    onRoot: { r in Task { @MainActor in self?.installRoot(r, run: run) } },
+                    onSubtree: { f in Task { @MainActor in self?.subtreeDone(f, run: run) } },
+                    skip: skips.full)
+            }
+            guard let result else {
+                await self?.finish(nil, large: [], snapshot: nil, index: nil, run: run)
+                return
+            }
             // The root was on screen all along, so its totals are summed on
             // the main actor, where it's read; the walk never writes it.
             await MainActor.run { result.root.finish() }
             let large = Self.collectLargeFiles(result.root)
+            // For searching the whole scan; the tree doesn't change until it's handed over.
+            let index = result.cancelled ? nil : ScanIndex(result.root)
             // Kept for comparing even when part couldn't be read, marked so
             // what was missed never shows as having shrunk or vanished.
             let snapshot = result.cancelled
-                ? nil : Snapshot(of: result.root, incomplete: !result.deniedPaths.isEmpty || result.root.unreadable)
-            await self?.finish(result, large: large, snapshot: snapshot, run: run)
+                ? nil
+                : Snapshot(
+                    of: result.root, incomplete: !result.deniedPaths.isEmpty || result.root.unreadable, excluded: skips.relative)
+            await self?.finish(result, large: large, snapshot: snapshot, index: index, run: run)
         }
     }
 
     func rescan() { scan(path: rootPath) }
 
-    func cancelScan() { progress?.cancel() }
+    func cancelScan() {
+        if scanning, stopAsked == nil { stopAsked = .now }
+        progress?.cancel()
+    }
+
+    /// When the running scan started, and when it was asked to stop.
+    @ObservationIgnored private var scanStarted: ContinuousClock.Instant?
+    @ObservationIgnored private var stopAsked: ContinuousClock.Instant?
+
+    /// The running walk, so a caller can wait for it to end.
+    private(set) var scanJob: Task<Void, Never>?
+
+    /// Maps `path`. In the App Sandbox a place outside the home folder is
+    /// opened through the folder panel, which is what gives access to it.
+    func map(place path: String) {
+        if Edition.current.isSandboxed, !path.hasPrefix(Home.path + "/"), path != Home.path {
+            let panel = NSOpenPanel()
+            panel.canChooseDirectories = true
+            panel.canChooseFiles = false
+            panel.directoryURL = URL(fileURLWithPath: path)
+            panel.message = String(localized: "Choose the folder or disk to map, so MyMole may read it")
+            if panel.runModal() == .OK, let url = panel.url { scan(path: url.path) }
+            return
+        }
+        scan(path: path)
+    }
 
     func chooseFolder() {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.directoryURL = URL(fileURLWithPath: rootPath)
-        panel.message = "Choose a folder or disk to map"
+        panel.message = String(localized: "Choose a folder or disk to map")
         if panel.runModal() == .OK, let url = panel.url { scan(path: url.path) }
     }
 
     /// Merges large files found mid-scan into the list, keeping the biggest.
     /// The finished scan replaces the list with the complete one.
     private func addFound(_ found: [FoundFile], run: Int) {
-        guard run == epoch, scanning, !found.isEmpty else { return }
+        // While the earlier map stays, so does its list.
+        guard run == epoch, scanning, !refreshing, !found.isEmpty else { return }
         var all = largeFiles
         all.reserveCapacity(all.count + found.count)
         for f in found {
@@ -254,8 +457,16 @@ final class StorageModel {
 
     nonisolated static let largeFileLimit = 5000
 
+    /// Whether `folder` has a folder or a listed file at `path`.
+    static func holds(_ folder: Folder, _ path: String) -> Bool {
+        if folder.find(path: path) != nil { return true }
+        let name = (path as NSString).lastPathComponent
+        return folder.find(path: (path as NSString).deletingLastPathComponent)?.listedFiles.contains { $0.name == name } ?? false
+    }
+
     private func installRoot(_ r: Folder, run: Int) {
-        guard run == epoch, root == nil else { return }
+        guard run == epoch, root == nil, !refreshing else { return }
+        if let scanStarted { Timings.record(.firstMap, since: scanStarted) }
         root = r
         current = r
         revision += 1
@@ -267,13 +478,40 @@ final class StorageModel {
         revision += 1
     }
 
-    private func finish(_ r: ScanResult, large: [LargeFile], snapshot: Snapshot?, run: Int) {
+    private func finish(_ r: ScanResult?, large: [LargeFile], snapshot: Snapshot?, index: ScanIndex?, run: Int) {
         guard run == epoch else { return }
         poller?.cancel()
-        // Keep the folder the user drilled into while the scan ran.
+        if let stopAsked, r?.cancelled != false { Timings.record(.stop, since: stopAsked) }
+        stopAsked = nil
+        guard let r else {
+            refreshing = false
+            scanning = false
+            liveFiles = root?.fileCount ?? 0
+            liveBytes = root?.size ?? 0
+            revision += 1
+            return
+        }
+        // A stopped rescan leaves the earlier, complete map as it was.
+        if refreshing && r.cancelled {
+            refreshing = false
+            scanning = false
+            liveFiles = root?.fileCount ?? 0
+            liveBytes = root?.size ?? 0
+            revision += 1
+            return
+        }
+        refreshing = false
+        self.index = index
+        // Keep the folder the user drilled into, and what's selected there
+        // as far as the new map still has it. Marks were made against the
+        // earlier sizes, so they start over.
         let keep = current.map(\.path)
+        let selected = selection
         root = r.root
         current = keep.flatMap { r.root.find(path: $0) } ?? r.root
+        hovered = nil
+        marked.removeAll()
+        if let current { selection = selected.filter { Self.holds(current, $0) } }
         denied = r.deniedPaths
         largeFiles = large
         lastDuration = r.duration
@@ -282,13 +520,43 @@ final class StorageModel {
         if let snapshot {
             // A scan started ahead of need adds to the history only every
             // few hours, so relaunches don't push older scans out of it.
-            if !scanInBackground || SnapshotStore.isDue(for: snapshot.rootPath) { SnapshotStore.save(snapshot) }
-            history = SnapshotStore.history(for: r.root.path)
-            // Default: this scan against the one before it.
-            compare(from: history.dropFirst().first, to: history.first)
+            // Saved and read back off the main actor, in order with the
+            // other saved results.
+            let background = scanInBackground
+            let base = snapshotBase
+            StoreWrites.submit { [weak self] in
+                // On another disk, the history is that disk's own.
+                let key = Volumes.historyKey(for: snapshot.rootPath)
+                if !background || SnapshotStore.isDue(for: key, base: base) { SnapshotStore.save(snapshot, key: key, base: base) }
+                let found = SnapshotStore.history(for: key, base: base)
+                Task { @MainActor in
+                    guard let self, run == self.epoch else { return }
+                    self.showHistory(found)
+                }
+            }
         }
         scanning = false
         revision += 1
+        readDiskSpace(of: r.root.path, run: run)
+    }
+
+    /// How the disk the map was made of is used beyond the map, read off the
+    /// main thread once a scan is in.
+    private(set) var diskSpace: DiskSpace?
+
+    private func readDiskSpace(of path: String, run: Int) {
+        Task { [weak self] in
+            let space = await Task.detached(priority: .utility) { DiskSpace.read(volumeOf: path) }.value
+            guard let self, run == self.epoch else { return }
+            self.diskSpace = space
+        }
+    }
+
+    /// The saved scans of the folder, newest first, and by default the newest
+    /// against the one before it.
+    private func showHistory(_ found: [SnapshotRef]) {
+        history = found
+        compare(from: found.dropFirst().first, to: found.first)
     }
 
     /// Compares two saved scans. Loading and diffing run off the main actor;
@@ -302,27 +570,60 @@ final class StorageModel {
             // A comparison still running is superseded by this one.
             changes = []
             overallDelta = 0
+            compareProblem = nil
             comparing = false
             return
         }
         // Always diff older → newer, whichever order they were picked in.
         let (a, b) = from.date <= to.date ? (from, to) : (to, from)
         comparing = true
+        let threshold = Self.changeThreshold
         Task.detached(priority: .userInitiated) { [weak self] in
-            let old = SnapshotStore.load(a)
-            let new = SnapshotStore.load(b)
-            let diff = (old != nil && new != nil) ? old!.changes(to: new!) : []
-            let delta = (new?.totalSize ?? 0) - (old?.totalSize ?? 0)
-            await self?.applyComparison(diff, delta: delta, run: run)
+            let result = StorageModel.comparison(SnapshotStore.load(a), SnapshotStore.load(b), threshold: threshold)
+            await self?.applyComparison(result, run: run)
         }
+    }
+
+    struct Comparison: Equatable {
+        var changes: [Change]
+        var delta: Int64?
+        var problem: String?
+    }
+
+    /// The changes from `old` to `new`. The total is only known when both
+    /// scans were read and complete; the changes listed are only those an
+    /// incomplete scan can't fake (see `Snapshot.changes`).
+    /// The smallest change Changes lists, as chosen there.
+    nonisolated static let thresholdKey = "diskMap.changeThreshold"
+    nonisolated static let thresholds: [Int64] = [10 * 1_048_576, 50 * 1_048_576, 200 * 1_048_576]
+    nonisolated static var changeThreshold: Int64 {
+        let v = Int64(UserDefaults.standard.integer(forKey: thresholdKey))
+        return thresholds.contains(v) ? v : 50 * 1_048_576
+    }
+
+    nonisolated static func comparison(_ old: Snapshot?, _ new: Snapshot?, threshold: Int64 = 50 * 1_048_576) -> Comparison {
+        guard let old, let new else {
+            return Comparison(changes: [], delta: nil, problem: String(localized: "One of these scans couldn't be read, so they can't be compared."))
+        }
+        let diff = old.changes(to: new, threshold: threshold)
+        guard !old.incomplete && !new.incomplete else {
+            let problem = old.incomplete && new.incomplete
+                ? String(localized: "Part of both scans couldn't be read, so the overall change isn't known. Only changes the readable parts show are listed.")
+                : old.incomplete
+                    ? String(localized: "Part of the older scan couldn't be read, so the overall change isn't known. Only changes the readable parts show are listed.")
+                    : String(localized: "Part of the newer scan couldn't be read, so the overall change isn't known. Only changes the readable parts show are listed.")
+            return Comparison(changes: diff, delta: nil, problem: problem)
+        }
+        return Comparison(changes: diff, delta: new.totalSize - old.totalSize, problem: nil)
     }
 
     private var compareEpoch = 0
 
-    private func applyComparison(_ diff: [Change], delta: Int64, run: Int) {
+    private func applyComparison(_ result: Comparison, run: Int) {
         guard run == compareEpoch else { return }
-        changes = diff
-        overallDelta = delta
+        changes = result.changes
+        overallDelta = result.delta
+        compareProblem = result.problem
         comparing = false
     }
 
@@ -346,7 +647,7 @@ final class StorageModel {
     /// While scanning, only top-level subtrees that have finished are shown;
     /// the rest are still being written by the scanner.
     var isReady: (Folder) -> Bool {
-        let live = scanning
+        let live = showingLive
         let done = completed
         let r = root
         return { f in !live || f.parent !== r || done.contains(f.id) }
@@ -357,7 +658,7 @@ final class StorageModel {
     /// A folder's size as far as it's known: its own total once finished,
     /// else the sum of the parts that are (the root, mid-scan).
     func chartedSize(_ f: Folder) -> Int64 {
-        guard scanning, f.parent == nil else { return f.size }
+        guard showingLive, f.parent == nil else { return f.size }
         return chartParts(of: f, include: isReady).reduce(0) { $0 + $1.size }
     }
 
@@ -374,7 +675,7 @@ final class StorageModel {
     /// Hovered, or selected in the list.
     func isHighlighted(_ s: Segment) -> Bool {
         if hovered == s { return true }
-        if !selectedFolders.isEmpty, case .folder(let f) = s { return selectedFolders.contains(f.id) }
+        if case .folder(let f) = s { return selection.contains(f.path) }
         return false
     }
 
@@ -402,11 +703,17 @@ final class StorageModel {
     func isMarked(_ path: String) -> Bool { marked[path] != nil }
 
     func toggle(_ m: Marked) {
-        if marked[m.path] != nil { marked[m.path] = nil } else { marked[m.path] = m }
+        guard opened == nil else { return }
+        if marked[m.path] != nil { marked[m.path] = nil }
+        else { mark([m]) }
     }
 
     func mark(_ items: [Marked]) {
-        for m in items { marked[m.path] = m }
+        guard opened == nil else { return }
+        var chosen = marked
+        for m in items { chosen[m.path] = m }
+        let outer = Set(Trasher.outermost(chosen.keys))
+        marked = chosen.filter { outer.contains($0.key) }
     }
 
     func unmark(_ paths: some Sequence<String>) {
@@ -426,6 +733,7 @@ final class StorageModel {
 
     /// Marks every rebuildable folder directly inside the current one.
     func markRebuildable() {
+        guard opened == nil else { return }
         for f in current?.subfolders ?? [] where f.rebuildable != nil {
             marked[f.path] = Marked(path: f.path, name: f.name, size: f.size, isFolder: true)
         }
@@ -434,15 +742,37 @@ final class StorageModel {
     // MARK: Trash
 
     /// Trashing prunes the tree, which a running scan is still reading.
-    var canTrash: Bool { !scanning && !trashing && !marked.isEmpty }
+    var canTrash: Bool { !scanning && !trashing && !marked.isEmpty && opened == nil }
     private(set) var trashing = false
     /// Where moved items go; tests use a folder of their own.
     var trashBackend: TrashBackend = .live
+    /// Where its moves and Undos wait their turn among every pane's.
+    var jobs: TrashJobs = .shared
+    /// What the user keeps in other panes: Deep Clean's keep list and the
+    /// paths kept in Projects. Tests use lists of their own.
+    var protections: UserProtections = .live
+    /// Where its moves and Undos are written to the history.
+    var logURL: URL = CleanupLog.defaultURL
+
+    /// The checks a move from the disk map passes: each item is still the
+    /// kind of item that was marked, and nothing the user keeps in another
+    /// pane is it, is inside it or holds it. The lists are read again as the
+    /// move runs; one that can't be read stops it.
+    nonisolated static func gate(folders: Set<String>, protections: UserProtections) -> TrashGate {
+        TrashGate(
+            still: { p in
+                var st = stat()
+                guard lstat(p, &st) == 0 else { return false }
+                return (st.st_mode & S_IFMT == S_IFDIR) == folders.contains(p)
+            },
+            protections: { try protections.read() })
+    }
 
     /// Moves the marked items to the Trash off the main thread, then prunes
     /// the tree here.
     func trashMarked() {
-        guard canTrash else { return }
+        // A scan opened from a file names paths it gives no right to.
+        guard canTrash, opened == nil else { return }
         // A folder and something inside it can both be marked; moving only
         // the outer one keeps sizes counted once and undo in a valid order.
         let top = Set(Trasher.outermost(marked.keys))
@@ -451,15 +781,12 @@ final class StorageModel {
         let folders = Set(items.filter(\.isFolder).map(\.path))
         let paths = items.map(\.path)
         let backend = trashBackend
+        let gate = Self.gate(folders: folders, protections: protections)
         trashing = true
         Task {
-            let outcome = await Task.detached(priority: .userInitiated) {
-                Trasher.moveToTrash(paths, through: TrashGate(still: { p in
-                    var st = stat()
-                    guard lstat(p, &st) == 0 else { return false }
-                    return (st.st_mode & S_IFMT == S_IFDIR) == folders.contains(p)
-                }), backend: backend)
-            }.value
+            let outcome = await jobs.perform(.moveToTrash) { job in
+                job.moveToTrash(paths, through: gate, backend: backend)
+            }
             trashing = false
             applyTrash(outcome, items: items)
             startScanAfterTrash()
@@ -496,11 +823,9 @@ final class StorageModel {
             marked[path] = nil
         }
         largeFiles.removeAll { lf in movedPaths.contains(lf.path) || movedPaths.contains { lf.path.hasPrefix($0 + "/") } }
-        undoRecords = outcome.moved
-        undoPruned = pruned
         let record = CleanupRecord(source: "Disk Map", items: outcome.moved.count, bytes: freed, failed: outcome.failed.count)
-        undoLogID = record.id
-        CleanupLog.submit(record)
+        if !outcome.moved.isEmpty { shelf.add(Run(id: record.id, records: outcome.moved, pruned: pruned)) }
+        CleanupLog.submit(record, to: logURL)
         // If the open folder went to the Trash, step out to its parent.
         if let c = current, movedPaths.contains(where: { c.path == $0 || c.path.hasPrefix($0 + "/") }) {
             current = root?.find(path: (c.path as NSString).deletingLastPathComponent) ?? root
@@ -508,20 +833,27 @@ final class StorageModel {
         revision += 1
         var text = outcome.moved.isEmpty && !outcome.failed.isEmpty
             ? nothingMoved(outcome.failed)
-            : "Moved \(outcome.moved.count) item\(outcome.moved.count == 1 ? "" : "s") (\(ByteCountFormatter.string(fromByteCount: freed, countStyle: .file))) to the Trash"
-        if !outcome.moved.isEmpty && !outcome.failed.isEmpty { text += " · \(outcome.failed.count) skipped" }
+            : String(localized: "Moved \(outcome.moved.count) item\(outcome.moved.count == 1 ? "" : "s") (\(ByteCountFormatter.string(fromByteCount: freed, countStyle: .file))) to the Trash")
+        if !outcome.moved.isEmpty && !outcome.failed.isEmpty { text += String(localized: " · \(outcome.failed.count) skipped") }
         showNotice(Notice(text: text, canUndo: !outcome.moved.isEmpty))
     }
 
-    /// Puts the last move back, off the main thread.
-    func undoTrash() {
-        guard !trashing, !undoRecords.isEmpty else { return }
+    /// Puts a move back, off the main thread: the one of history record
+    /// `id`, or the latest.
+    func undoTrash(run id: UUID? = nil) {
+        guard !trashing else { return }
+        target = id ?? shelf.latest?.id
+        guard target.flatMap(shelf.run) != nil, !undoRecords.isEmpty else {
+            target = nil
+            return
+        }
         let records = undoRecords
         trashing = true
         Task {
-            let failedRecords = await Task.detached(priority: .userInitiated) { Trasher.restore(records) }.value
+            let failedRecords = await jobs.perform(.putBack) { $0.putBack(records) }
             trashing = false
             applyUndo(failedRecords)
+            target = nil
             startScanAfterTrash()
         }
     }
@@ -543,14 +875,14 @@ final class StorageModel {
             }
         }
         let restored = undoRecords.count - failed.count
-        if let id = undoLogID { CleanupLog.submitRestore(id, restored: restored, bytes: bytes, failed: failed.count) }
+        if let id = undoLogID { CleanupLog.submitRestore(id, restored: restored, bytes: bytes, failed: failed.count, in: logURL) }
         // What couldn't come back stays ready for another try.
         undoRecords = failedRecords
         undoPruned = stillOut
-        if failed.isEmpty { undoLogID = nil }
+        if failed.isEmpty, let id = undone?.id { shelf.remove(id) }
         revision += 1
         showNotice(Notice(
-            text: failed.isEmpty ? "Restored \(restored) item\(restored == 1 ? "" : "s")" : "Restored \(restored); \(failed.count) couldn't be put back. Undo tries those again.",
+            text: failed.isEmpty ? String(localized: "Restored \(restored) item\(restored == 1 ? "" : "s")") : String(localized: "Restored \(restored); \(failed.count) couldn't be put back. Undo tries those again."),
             canUndo: !failed.isEmpty))
     }
 
@@ -561,7 +893,7 @@ final class StorageModel {
     /// A notice with Undo stays until it's used, closed or replaced; any
     /// other passes after a few seconds.
     private func showNotice(_ n: Notice) {
-        withAnimation(.snappy) { notice = n }
+        withAnimation(Motion.snappy) { notice = n }
         if n.canUndo {
             undoNotice = n
             return
@@ -569,9 +901,9 @@ final class StorageModel {
         Task {
             try? await Task.sleep(for: .seconds(4))
             guard notice == n else { return }
-            withAnimation(.snappy) { notice = undoRecords.isEmpty ? nil : undoNotice }
+            withAnimation(Motion.snappy) { notice = undoRecords.isEmpty ? nil : undoNotice }
         }
     }
 
-    func dismissNotice() { withAnimation(.snappy) { notice = nil } }
+    func dismissNotice() { withAnimation(Motion.snappy) { notice = nil } }
 }

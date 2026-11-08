@@ -6,6 +6,7 @@ import SwiftUI
 /// Optimize Now runs the tasks that are on. Tasks that need root run in the
 /// privileged tool, after macOS asks for an administrator's password.
 struct OptimizeView: View {
+    @Environment(\.palette) private var palette
     @Bindable var model: MaintenanceModel
     @State private var confirm = false
 
@@ -34,22 +35,12 @@ struct OptimizeView: View {
                     .disabled(model.phase != .idle || model.runnable.isEmpty)
             }
         }
-        .paneToolbar("Optimize", subtitle: "Refresh caches and databases macOS keeps") {
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    model.check()
-                } label: {
-                    Label("Check", systemImage: "checklist")
-                }
-                .help("See what a run would do; nothing is changed")
-                .disabled(model.phase != .idle)
-            }
-        }
-        .confirmationDialog("Run \(model.runnable.count) maintenance task\(model.runnable.count == 1 ? "" : "s")?", isPresented: $confirm) {
-            Button("Optimize Now") { model.run() }
-        } message: {
-            Text(model.runnable.map(\.title).joined(separator: ", "))
-        }
+        .paneToolbar("Optimize", subtitle: "Refresh caches and databases macOS keeps")
+        .actionConfirmation(
+            String(localized: "Run \(model.runnable.count) maintenance task\(model.runnable.count == 1 ? "" : "s")?"),
+            isPresented: $confirm, button: String(localized: "Optimize Now"),
+            message: model.runnable.map { $0.title + ": " + $0.effect }.joined(separator: "\n\n")
+        ) { model.run() }
         .onAppear {
             // A check only reads, so it runs each time the pane opens.
             model.check()
@@ -60,7 +51,12 @@ struct OptimizeView: View {
         DSPaneHeader {
             DSMetric("\(model.willChange)", "of the tasks that are on would change something")
         } actions: {
-            EmptyView()
+            DSControlField("Preview only") {
+                Button("Check Tasks") { model.check() }
+                    .help("See what a run would do; nothing is changed")
+                    .disabled(model.phase != .idle)
+                    .fixedSize()
+            }
         } strip: {
             switch model.phase {
             case .checking:
@@ -81,6 +77,9 @@ struct OptimizeView: View {
             }
             Spacer(minLength: 0)
         }
+        .contextualControls(
+            "Choose maintenance tasks",
+            detail: "Switch on the tasks you want. Check Tasks previews their effects; Optimize Now runs them after confirmation.")
     }
 
     private func row(_ t: MaintenanceTask) -> some View {
@@ -88,6 +87,7 @@ struct OptimizeView: View {
             DSIcon(symbol: t.symbol)
         } detail: {
             DSText(t.explanation, .metadata)
+            DSText(t.effect, .metadata)
             if let r = model.reports[t] {
                 Label(statusText(r), systemImage: statusSymbol(r.status))
                     .font(.caption)
@@ -100,6 +100,7 @@ struct OptimizeView: View {
                 Toggle("", isOn: Binding(get: { model.isOn(t) }, set: { model.setOn(t, $0) }))
                     .toggleStyle(.switch)
                     .labelsHidden()
+                    .accessibilityLabel(t.title)
                     .disabled(model.phase != .idle)
             }
         }
@@ -108,12 +109,12 @@ struct OptimizeView: View {
     private func statusText(_ r: TaskReport) -> String {
         let base: String =
             switch r.status {
-            case .willRun: "Would run"
-            case .nothingToDo: "Nothing to do"
-            case .done: "Done"
-            case .failed: "Failed"
-            case .unavailable: "Not available"
-            case .needsHelper: "Needs administrator rights"
+            case .willRun: String(localized: "Would run")
+            case .nothingToDo: String(localized: "Nothing to do")
+            case .done: String(localized: "Done")
+            case .failed: String(localized: "Failed")
+            case .unavailable: String(localized: "Not available")
+            case .needsHelper: String(localized: "Needs administrator rights")
             }
         return r.detail.isEmpty ? base : "\(base) · \(r.detail)"
     }
@@ -130,7 +131,7 @@ struct OptimizeView: View {
 
     private func statusColor(_ s: TaskReport.Status) -> Color {
         switch s {
-        case .willRun: Theme.accent
+        case .willRun: palette.accentText.color
         case .nothingToDo, .done: .green
         case .failed: .red
         case .unavailable, .needsHelper: .secondary

@@ -33,7 +33,12 @@ public struct PathRisk: Sendable, Hashable {
         ({ $0.contains("/MobileSync/Backup") },
          PathRisk(level: .caution, reason: "iPhone/iPad backup. Can't be recreated.")),
         ({ $0.contains("/Mobile Documents/") },
-         PathRisk(level: .caution, reason: "iCloud Drive files.")),
+         PathRisk(level: .caution, reason: "iCloud Drive files. Removing them here removes them on your other devices too.")),
+        // Dropbox, Google Drive, OneDrive, Box and other File Provider services.
+        ({ $0.contains("/Library/CloudStorage/") },
+         PathRisk(level: .caution, reason: "Synced with a cloud service. Removing it here removes it in the cloud and on your other devices too.")),
+        ({ within($0, [".photoslibrary"]) },
+         PathRisk(level: .caution, reason: "A Photos library: every photo, video and edit in it.")),
         ({ ["/Downloads/", "/Documents/", "/Desktop/", "/Pictures/", "/Movies/", "/Music/"].contains(where: $0.contains) },
          PathRisk(level: .caution, reason: "Your own files.")),
         ({ $0.contains("/Library/Mail/") || $0.contains("/Library/Messages/") },
@@ -56,12 +61,14 @@ public struct PathRisk: Sendable, Hashable {
     }
 
     /// The gravest risk of anything inside `folder` as scanned, so marking a
-    /// parent warns about what it holds. Looks at up to `limit` folders.
-    public static func inside(_ folder: Folder, limit: Int = 50_000) -> PathRisk? {
+    /// parent warns about what it holds. Looks at up to `limit` folders, and
+    /// ends at the next folder once `stop` says so, with what it found by
+    /// then. It reads the disk, so run it off the main thread for big folders.
+    public static func inside(_ folder: Folder, limit: Int = 50_000, stop: () -> Bool = { false }) -> PathRisk? {
         var found: PathRisk?
         var stack = [folder]
         var seen = 0
-        while let f = stack.popLast(), seen < limit, found?.level != .caution {
+        while let f = stack.popLast(), seen < limit, found?.level != .caution, !stop() {
             seen += 1
             // Every entry, small files included: the tree keeps only big
             // files by name, and a credential file is small.

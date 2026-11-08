@@ -11,13 +11,17 @@ struct ProjectsView: View {
     @Bindable var model: ProjectsModel
 
     @State private var confirming = false
+    /// Name, type or folder words, and last activity; kept between launches.
+    @AppStorage("projects.filter.query") private var query = ""
+    @AppStorage("projects.filter.active") private var active: ProjectActivity = .any
 
     var body: some View {
         VStack(spacing: 0) {
             summary
             if let error = model.rulesError {
-                DSNotice(.critical, "Your project rules couldn't be read (\(error)). Nothing is moved until they can be.") {
+                DSNotice(.critical, "Your project rules couldn't be read (\(error.description)). Nothing is moved until they can be.") {
                     Button("Try Again") { model.reloadRules() }
+                    CopyErrorCodeButton(error.code)
                 }
                 .padding(.horizontal, DS.Space.page)
                 .padding(.bottom, DS.Space.md)
@@ -28,20 +32,18 @@ struct ProjectsView: View {
                 list.frame(minWidth: 380, idealWidth: 560, maxWidth: .infinity)
                 detail.frame(minWidth: 340, idealWidth: 440, maxWidth: 520)
             }
-            if !model.chosen.isEmpty { actionBar }
         }
-        .overlay(alignment: .bottom) {
-            ProjectsNotice(model: model).padding(.bottom, model.chosen.isEmpty ? 16 : 70)
+        .dsBottom(showing: !model.chosen.isEmpty) {
+            actionBar
+        } toast: {
+            ProjectsNotice(model: model)
         }
-        .paneToolbar("Projects", subtitle: subtitle) { tools }
-        .confirmationDialog(
-            "Move \(model.chosenEntries.count.formatted()) item\(model.chosenEntries.count == 1 ? "" : "s") to the Trash?",
-            isPresented: $confirming
-        ) {
-            Button("Move to Trash", role: .destructive) { model.trashChosen() }
-        } message: {
-            Text("\(ByteCountFormatter.string(fromByteCount: model.chosenBytes, countStyle: .file)) from \(Set(model.chosenEntries.map(\.project)).count) project(s):\n\(reviewList)\n\nAnything holding a Git repository, key files, files Git tracks or uncommitted work stays. You can undo right after, or put things back from the Trash later.")
-        }
+        .paneToolbar("Projects", subtitle: "\(subtitle)") { tools }
+        .actionConfirmation(
+            String(localized: "Move \(model.chosenEntries.count.formatted()) item\(model.chosenEntries.count == 1 ? "" : "s") to the Trash?"),
+            isPresented: $confirming, action: .projects,
+            message: String(localized: "\(ByteCountFormatter.string(fromByteCount: model.chosenBytes, countStyle: .file)) from \(Set(model.chosenEntries.map(\.project)).count) project(s):\n\(reviewList)\n\nAnything holding a Git repository, key files, files Git tracks or uncommitted work stays. You can undo right after, or put things back from the Trash later.")
+        ) { model.trashChosen() }
         .onAppear { model.scanIfNeeded() }
     }
 
@@ -52,20 +54,24 @@ struct ProjectsView: View {
             $0.hasPrefix(home + "/") ? "~" + $0.dropFirst(home.count) : $0
         }
         let shown = paths.prefix(8).joined(separator: "\n")
-        let list = paths.count > 8 ? shown + "\n… and \(paths.count - 8) more" : shown
+        let list = paths.count > 8 ? shown + "\n" + String(localized: "… and \(paths.count - 8) more") : shown
         let left = model.excluded.count
-        return left == 0 ? list : list + "\n\(left == 1 ? "1 thing" : "\(left) things") you left out inside them stay\(left == 1 ? "s" : "")."
+        guard left > 0 else { return list }
+        return list + "\n"
+            + (left == 1
+                ? String(localized: "1 thing you left out inside them stays.")
+                : String(localized: "\(left) things you left out inside them stay."))
     }
 
     private var subtitle: String {
         if model.scanning {
             return model.footprints.isEmpty
-                ? "Looking for projects…"
-                : "Measuring \(model.measuredCount) of \(model.footprints.count) projects…"
+                ? String(localized: "Looking for projects…")
+                : String(localized: "Measuring \(model.measuredCount) of \(model.footprints.count) projects…")
         }
-        guard !model.footprints.isEmpty else { return "Every project and what it leaves on disk" }
-        let line = "\(model.footprints.count) projects · \(fmt(model.totalBytes)) · \(fmt(model.freeableBytes)) could go"
-        return model.incomplete ? line + " · some folders couldn't be read" : line
+        guard !model.footprints.isEmpty else { return String(localized: "Every project and what it leaves on disk") }
+        let line = String(localized: "\(model.footprints.count) projects · \(fmt(model.totalBytes)) · \(fmt(model.freeableBytes)) could go")
+        return model.incomplete ? line + String(localized: " · some folders couldn't be read") : line
     }
 
     @ToolbarContentBuilder private var tools: some ToolbarContent {
@@ -141,7 +147,9 @@ struct ProjectsView: View {
                 DSCountChip(n, h.title, h.color)
             }
             .buttonStyle(.plain)
-            .help("Select the projects \(h == .dormant ? "untouched for a month or more" : h.title.lowercased())")
+            .help(h == .dormant
+                ? String(localized: "Select the projects untouched for a month or more")
+                : String(localized: "Select the projects \(h.title.lowercased())"))
         }
     }
 
@@ -158,25 +166,68 @@ struct ProjectsView: View {
 
     // MARK: List
 
+    private var shownFootprints: [ProjectFootprint] {
+        let now = Date()
+        let search = TextQuery(query)
+        return model.footprints.filter { f in
+            active.matches(f.lastActivity, now: now)
+                && search.matches(f.project.name, f.project.kind, f.id)
+        }
+    }
+
     private var list: some View {
+        let shown = shownFootprints
+        return VStack(spacing: 0) {
+            DSControlBar("Find a project", detail: "Search by name, project type or folder, and narrow the list by recent activity.") {
+                DSControlField("Filter projects") {
+                    DSFilterField(String(localized: "Filter by name, type or folder"), text: $query)
+                        .frame(width: 180)
+                }
+                DSControlField("Last active") {
+                    Picker("Last Active", selection: $active) {
+                        ForEach(ProjectActivity.allCases) { Text($0.title).tag($0) }
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                    .help("Projects by when anything in them last changed")
+                }
+                if !query.isEmpty || active != .any {
+                    DSText(String(localized: "\(shown.count) of \(model.footprints.count)"), .metadata).keepWhole()
+                }
+            }
+            .padding(.horizontal, DS.Space.md)
+            .padding(.vertical, DS.Space.md)
+            Divider()
+            projectTable(shown)
+        }
+    }
+
+    private func projectTable(_ shown: [ProjectFootprint]) -> some View {
         FileTable(
-            rows: model.footprints.map(row),
+            rows: shown.map(row),
             columns: [.name, .size, .change, .freeable, .modified, .kind, .location],
             hiddenByDefault: [.change, .modified, .kind, .location],
-            titles: [.modified: "Last Active", .kind: "Type"],
+            titles: [.modified: String(localized: "Last Active"), .kind: String(localized: "Type")],
             autosave: "projects.list.5",
             selection: $model.selection,
             onOpen: { ids in FileActions.reveal(ids) },
             menu: menu)
         .overlay {
-            if model.footprints.isEmpty {
+            if !model.footprints.isEmpty, shown.isEmpty {
+                ContentUnavailableView.search(text: query)
+            } else if model.footprints.isEmpty {
                 if model.scanning {
                     DSLoading("Looking for projects…")
+                } else if !model.unreadablePlaces.isEmpty {
+                    DSIncompleteEmpty(what: String(localized: "Projects"), unreadable: model.unreadablePlaces) { model.scan() }
                 } else {
                     ContentUnavailableView {
                         Label("No Projects Found", systemImage: "folder.badge.questionmark")
                     } description: {
-                        Text("MyMole looks for folders with a project file (Package.swift, package.json, .git …) in \(model.roots.isEmpty ? "no folders yet" : model.roots.map(Breakable.path).joined(separator: ", ")).")
+                        Text(model.roots.isEmpty
+                            ? String(localized: "MyMole looks for folders with a project file (Package.swift, package.json, .git …) in no folders yet.")
+                            : String(localized: "MyMole looks for folders with a project file (Package.swift, package.json, .git …) in \(model.roots.map(Breakable.path).joined(separator: ", ")).")
+                        )
                     } actions: {
                         Button("Add Folder…") { model.addRoot() }
                     }
@@ -196,7 +247,7 @@ struct ProjectsView: View {
             .compactMap { $0 }.joined(separator: " · ")
         if case let (g, since)? = model.growth(f.id), abs(g) >= 1_048_576 {
             r.change = g
-            r.changeHelp = "\(g > 0 ? "Grew" : "Shrank") since \(since.listText)"
+            r.changeHelp = g > 0 ? String(localized: "Grew since \(since.listText)") : String(localized: "Shrank since \(since.listText)")
         }
         return r
     }
@@ -204,16 +255,16 @@ struct ProjectsView: View {
     private func menu(_ ids: [String]) -> [TableMenuEntry] {
         guard !ids.isEmpty else { return [] }
         var out: [TableMenuEntry] = [
-            .action(ids.count == 1 ? "Choose Rebuildable Data" : "Choose Rebuildable Data in \(ids.count) Projects") {
+            .action(ids.count == 1 ? String(localized: "Choose Rebuildable Data") : String(localized: "Choose Rebuildable Data in \(ids.count) Projects")) {
                 model.chooseRebuildable(in: ids)
             }
         ]
         if ids.contains(where: { id in model.footprint(id)?.items.contains { $0.entries.contains { model.chosen.contains($0.path) } } == true }) {
-            out.append(.action("Clear Choice") { model.clearChoice(in: ids) })
+            out.append(.action(String(localized: "Clear Choice")) { model.clearChoice(in: ids) })
         }
         if ids.count == 1 {
-            out.append(.action("Add Folder for Cleanup…") { model.addFolderForCleanup(to: ids[0]) })
-            out.append(.action("Show in Disk Map") { showInDiskMap(ids[0]) })
+            out.append(.action(String(localized: "Add Folder for Cleanup…")) { model.addFolderForCleanup(to: ids[0]) })
+            out.append(.action(String(localized: "Show in Disk Map")) { showInDiskMap(ids[0]) })
         }
         out.append(.divider)
         out += FileActions.menu(ids, canOpen: false)
@@ -248,12 +299,13 @@ struct ProjectsView: View {
             DSText("\(model.chosenEntries.count.formatted()) item\(model.chosenEntries.count == 1 ? "" : "s") chosen · \(fmt(model.chosenBytes))", .lead)
                 .keepWhole()
             Button("Clear") { model.chosen = [] }
+                .accessibilityLabel("Clear the choice")
                 .controlSize(.small)
         } trailing: {
             Button("Move to Trash…") { confirming = true }
                 .primaryAction()
-                .disabled(model.trashing || model.rulesError != nil)
-                .help(model.rulesError != nil ? "Your project rules couldn't be read" : model.trashing ? "Moving to the Trash…" : "")
+                .disabled(model.trashBlocker != nil)
+                .help(model.trashBlocker ?? "")
         }
     }
 }
@@ -275,8 +327,8 @@ struct ProjectsOverview: View {
                 DSSection(
                     "All projects",
                     footer: model.selection.count > 1
-                        ? "\(model.selection.count) projects selected. Right-click them to choose their rebuildable data."
-                        : "Select a project to see where its space goes and choose what to remove."
+                        ? String(localized: "\(model.selection.count) projects selected. Right-click them to choose their rebuildable data.")
+                        : String(localized: "Select a project to see where its space goes and choose what to remove.")
                 ) {
                     FootprintBar(parts: FootprintCategory.allCases.map { ($0, model.bytes($0)) })
                     ForEach(FootprintCategory.allCases.filter { model.bytes($0) > 0 }, id: \.self) { c in
@@ -286,7 +338,7 @@ struct ProjectsOverview: View {
                 if !model.ruleList.isEmpty {
                     DSSection(
                         "Your rules",
-                        footer: "Right-click anything in a project to add a rule. Rules apply on every scan."
+                        footer: String(localized: "Right-click anything in a project to add a rule. Rules apply on every scan.")
                     ) {
                         ForEach(model.ruleList) { rule in
                             DSRow(title: rule.title) {
@@ -397,8 +449,8 @@ struct ProjectDetail: View {
                 DSNotice(
                     model.scanning ? .working : .info,
                     model.scanning
-                        ? "Measuring the project folder. Sizes inside it are from the last scan until then."
-                        : "The project folder hasn't been measured yet. Rescan to see what's inside it.")
+                        ? String(localized: "Measuring the project folder. Sizes inside it are from the last scan until then.")
+                        : String(localized: "The project folder hasn't been measured yet. Rescan to see what's inside it."))
             }
 
             ViewThatFits(in: .horizontal) {
@@ -434,12 +486,14 @@ struct ProjectDetail: View {
     }
 
     private var agePicker: some View {
-        Picker("Choose", selection: $model.age) {
-            ForEach(ProjectsModel.Age.allCases) { Text($0.title).tag($0) }
+        DSControlField("Choose data last changed") {
+            Picker("Choose", selection: $model.age) {
+                ForEach(ProjectsModel.Age.allCases) { Text($0.title).tag($0) }
+            }
+            .labelsHidden()
+            .fixedSize()
+            .help("Only data last changed before this is chosen")
         }
-        .labelsHidden()
-        .fixedSize()
-        .help("Only data last changed before this is chosen")
     }
 
     private var chooseRebuildable: some View {
@@ -472,7 +526,7 @@ struct ProjectDetail: View {
         case .item(let item):
             var out: [TableMenuEntry] = []
             if item.removable {
-                out.append(.action(model.check(item) == .on ? "Unchoose" : "Choose") { model.toggle(item) })
+                out.append(.action(model.check(item) == .on ? String(localized: "Unchoose") : String(localized: "Choose")) { model.toggle(item) })
                 out.append(.divider)
             }
             out += Self.rules(model, item: item, paths: item.entries.map(\.path), name: item.attribution == .inside ? item.title : nil, project: project)
@@ -482,7 +536,7 @@ struct ProjectDetail: View {
         case .path(let item, let path):
             var out: [TableMenuEntry] = []
             if item.removable {
-                out.append(.action(model.state(of: path) == .on ? "Unchoose" : "Choose") { model.toggle(path: path) })
+                out.append(.action(model.state(of: path) == .on ? String(localized: "Unchoose") : String(localized: "Choose")) { model.toggle(path: path) })
                 out.append(.divider)
             }
             let name = item.attribution == .inside && path != project ? (path as NSString).lastPathComponent : nil
@@ -501,26 +555,26 @@ struct ProjectDetail: View {
             var out: [TableMenuEntry] = []
             let cleanable = paths.filter { ProjectRules.canClean($0, project: project) }
             if !cleanable.isEmpty {
-                out.append(.action(cleanable.count == 1 ? "Clean This Folder" : "Clean These \(cleanable.count) Folders") {
+                out.append(.action(cleanable.count == 1 ? String(localized: "Clean This Folder") : String(localized: "Clean These \(cleanable.count) Folders")) {
                     model.clean(cleanable, in: project)
                 })
             }
             if paths.count == 1, let name, ProjectRules.canCleanEverywhere(name: name) {
-                out.append(.action("Clean Folders Named “\(name)” in Every Project") { model.cleanEverywhere(named: name) })
+                out.append(.action(String(localized: "Clean Folders Named “\(name)” in Every Project")) { model.cleanEverywhere(named: name) })
             }
             return out
         case .kept:
-            return [.action("Allow Cleaning Again") { model.forget(paths, in: project) }]
+            return [.action(String(localized: "Allow Cleaning Again")) { model.forget(paths, in: project) }]
         case .marked:
-            return [.action("Stop Cleaning \(paths.count == 1 ? "This" : "These")") { model.forget(paths, in: project) }]
+            return [.action(paths.count == 1 ? String(localized: "Stop Cleaning This") : String(localized: "Stop Cleaning These")) { model.forget(paths, in: project) }]
         case .git:
             return []
         default:
             var out: [TableMenuEntry] = [
-                .action(paths.count == 1 ? "Never Clean This" : "Never Clean These \(paths.count)") { model.keep(paths, in: project) }
+                .action(paths.count == 1 ? String(localized: "Never Clean This") : String(localized: "Never Clean These \(paths.count)")) { model.keep(paths, in: project) }
             ]
             if let name, item.category != .worktrees {
-                out.append(.action("Never Clean “\(name)” in Any Project") { model.keepEverywhere(named: name) })
+                out.append(.action(String(localized: "Never Clean “\(name)” in Any Project")) { model.keepEverywhere(named: name) })
             }
             return out
         }
@@ -534,6 +588,34 @@ struct ProjectsNotice: View {
     var body: some View {
         if let n = model.notice {
             DSUndoToast(text: n.text, canUndo: n.canUndo, undo: { model.undoTrash() }, dismiss: { model.dismissNotice() })
+        }
+    }
+}
+
+/// When a project was last worked on, to filter a long list by.
+enum ProjectActivity: String, CaseIterable, Identifiable {
+    case any, week, month, olderQuarter, olderYear
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .any: String(localized: "Any Time")
+        case .week: String(localized: "Active This Week")
+        case .month: String(localized: "Active This Month")
+        case .olderQuarter: String(localized: "Untouched for 3 Months")
+        case .olderYear: String(localized: "Untouched for a Year")
+        }
+    }
+
+    func matches(_ last: Date, now: Date) -> Bool {
+        let age = now.timeIntervalSince(last)
+        let day: TimeInterval = 86_400
+        return switch self {
+        case .any: true
+        case .week: age <= 7 * day
+        case .month: age <= 30 * day
+        case .olderQuarter: age > 91 * day
+        case .olderYear: age > 365 * day
         }
     }
 }

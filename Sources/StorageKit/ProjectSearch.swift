@@ -49,10 +49,22 @@ public enum ProjectFinder {
     /// A root is a project itself only when nothing below it is (a stray
     /// Makefile in ~/Workspace mustn't swallow every project in it).
     public static func find(roots: [String], maxDepth: Int = 4) -> [DevProject] {
+        search(roots: roots, maxDepth: maxDepth).projects
+    }
+
+    /// The projects, and the folders that are there but couldn't be read: a
+    /// root or a folder inside one. Any of them may hold projects, so a
+    /// search that met one didn't see everything. A root that isn't there
+    /// is simply empty.
+    public static func search(roots: [String], maxDepth: Int = 4) -> (projects: [DevProject], unreadable: [String]) {
         var found: [DevProject] = []
+        var unreadable: [String] = []
         var seen = Set<String>()
         func walk(_ path: String, depth: Int) {
-            let names = contents(path)
+            guard let names = DirectoryListing.names(path) else {
+                unreadable.append(path)
+                return
+            }
             let m = markers(in: names)
             if !m.isEmpty && depth > 0 {
                 if seen.insert(path).inserted { found.append(DevProject(path: path, markers: m)) }
@@ -77,7 +89,7 @@ public enum ProjectFinder {
             }
         }
         for root in roots { walk((root as NSString).standardizingPath, depth: 0) }
-        return found
+        return (found, unreadable)
     }
 
     /// The project a path is in: the one with the longest matching path.
@@ -219,22 +231,54 @@ public enum ProjectArtifacts {
 
 // MARK: - The whole scan
 
+/// What a scan found, and the places that were there but couldn't be read:
+/// a searched folder or one inside it, which may hold projects, and a place
+/// outside the projects, which may hold their data. A scan that met any of
+/// them is never saved as the last complete result, however much it found.
+public struct ProjectListing: Sendable {
+    public var footprints: [ProjectFootprint]
+    public var unreadable: [String]
+
+    public init(footprints: [ProjectFootprint], unreadable: [String] = []) {
+        self.footprints = footprints
+        self.unreadable = unreadable
+    }
+
+    /// Every searched folder, every place outside and every project was read whole.
+    public var isComplete: Bool { unreadable.isEmpty && !footprints.contains(where: \.incomplete) }
+}
+
 public enum ProjectScanner {
-    /// Finds the projects under `roots`, attributes outside data to them,
-    /// then measures each project folder. `onFound` gets every project with
-    /// its outside data first, so a list can show before the slow part;
-    /// `onProject` gets each one complete as it's measured. Stops early,
-    /// leaving the rest unmeasured, when `progress` is cancelled.
+    /// The footprints of `list`, for callers that don't need to know what
+    /// couldn't be read.
     public static func scan(
         roots: [String], home: String = Home.path, rules: ProjectRules = ProjectRules(),
         progress: ScanProgress = ScanProgress(), workers: Int = StorageScanner.defaultWorkers,
         onFound: ([ProjectFootprint]) -> Void = { _ in }, onProject: (ProjectFootprint) -> Void = { _ in }
     ) -> [ProjectFootprint] {
-        let projects = ProjectFinder.find(roots: roots)
-        let outside = ProjectAttribution.find(for: projects, home: home, rules: rules)
-        // A place outside that couldn't be read may hold any project's data.
+        list(roots: roots, home: home, rules: rules, progress: progress, workers: workers, onFound: onFound, onProject: onProject)
+            .footprints
+    }
+
+    /// Finds the projects under `roots`, attributes outside data to them,
+    /// then measures each project folder. `onFound` gets every project with
+    /// its outside data first, so a list can show before the slow part;
+    /// `onProject` gets each one complete as it's measured. Stops early,
+    /// leaving the rest unmeasured, when `progress` is cancelled. The
+    /// listing names what couldn't be read, so an empty result from a
+    /// folder that refused to be read never reads as "no projects".
+    public static func list(
+        roots: [String], home: String = Home.path, rules: ProjectRules = ProjectRules(),
+        progress: ScanProgress = ScanProgress(), workers: Int = StorageScanner.defaultWorkers,
+        onFound: ([ProjectFootprint]) -> Void = { _ in }, onProject: (ProjectFootprint) -> Void = { _ in }
+    ) -> ProjectListing {
+        let search = ProjectFinder.search(roots: roots)
+        let outside = ProjectAttribution.find(for: search.projects, home: home, rules: rules)
+        // A place outside that couldn't be read may hold any project's data,
+        // so every project's total is a lower bound. A searched folder that
+        // couldn't be read may hold projects; the ones found are measured whole.
         let missed = !outside.unreadable.isEmpty
-        var results = projects.map {
+        var results = search.projects.map {
             ProjectFootprint(project: $0, items: outside.items[$0.path] ?? [], measured: false, incomplete: missed)
         }
         onFound(results)
@@ -244,7 +288,7 @@ public enum ProjectScanner {
             if missed { results[i].incomplete = true }
             onProject(results[i])
         }
-        return results
+        return ProjectListing(footprints: results, unreadable: search.unreadable + outside.unreadable)
     }
 
     /// One project again, after its rules changed. `among` is every known

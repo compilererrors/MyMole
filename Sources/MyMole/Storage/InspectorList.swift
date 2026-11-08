@@ -2,7 +2,7 @@ import StorageKit
 import SwiftUI
 
 /// One row of the Browse list: a subfolder or a listed file of the open folder.
-struct DiskEntry: Identifiable {
+struct DiskEntry: Identifiable, Sendable {
     let path: String
     let name: String
     let size: Int64
@@ -24,19 +24,34 @@ struct DiskEntry: Identifiable {
 /// ⇧-arrows or ⌘A, and act on the selection from the context menu. Selected
 /// folders light up in the chart; hover a row and its segment does too.
 struct InspectorList: View {
+    @Environment(\.palette) private var palette
+    @AppStorage("diskMap.folderView") private var folderView = DiskFolderView.tree
     @Bindable var model: StorageModel
+    /// The folder whose smaller files are being listed.
+    @State private var smallFilesOf: String?
+    @State private var treeState = DiskOutline.State()
+    @State private var filtersExpanded = false
 
     var body: some View {
         if let cur = model.current {
-            let all = entries(cur)
-            let rows = all.filter(model.browseFilter.matches)
             VStack(spacing: 0) {
                 header(cur)
                 filterBar
                 Divider()
-                table(rows)
-                Divider()
-                footer(cur, rows: rows, all: all)
+                if model.browseFilter.wholeScan, model.browseFilter.isActive, let index = model.index {
+                    WholeScanSearch(model: model, index: index)
+                } else if folderView == .tree, !model.browseFilter.isActive {
+                    tree(cur)
+                } else {
+                    let all = entries(cur)
+                    let rows = all.filter(model.browseFilter.matches)
+                    table(rows)
+                    Divider()
+                    footer(cur, rows: rows, all: all)
+                }
+            }
+            .sheet(item: Binding(get: { smallFilesOf.map(SmallFilesSheet.Target.init) }, set: { smallFilesOf = $0?.path })) { t in
+                SmallFilesSheet(folder: t.path, readOnly: model.opened != nil)
             }
         }
     }
@@ -48,7 +63,7 @@ struct InspectorList: View {
         var out: [DiskEntry] = []
         out.reserveCapacity(cur.subfolders.count + cur.listedFiles.count)
         for f in cur.subfolders {
-            let kindTitle = f.inheritedKind.map { "\($0.title) Folder" } ?? "Folder"
+            let kindTitle = f.inheritedKind.map { String(localized: "\($0.title) Folder") } ?? String(localized: "Folder")
             // A pending folder is still being written by the scanner: only
             // its immutable fields may be read.
             if model.isPending(f) {
@@ -81,7 +96,7 @@ struct InspectorList: View {
         return VStack(alignment: .leading, spacing: 6) {
             DSName(cur.name, .heading)
             DSText(
-                model.scanning && cur.parent == nil
+                model.showingLive && cur.parent == nil
                     ? "\(ByteCountFormatter.string(fromByteCount: model.chartedSize(cur), countStyle: .file)) so far"
                     : "\(ByteCountFormatter.string(fromByteCount: cur.size, countStyle: .file)) · \(cur.fileCount.formatted()) files",
                 .metadata)
@@ -90,12 +105,15 @@ struct InspectorList: View {
                     model.markRebuildable()
                 } label: {
                     Label(
-                        "Mark \(rebuildable.count) rebuildable (\(ByteCountFormatter.string(fromByteCount: rebuildable.reduce(0) { $0 + $1.size }, countStyle: .file)))",
+                        String(localized: "Choose \(rebuildable.count) rebuildable (\(ByteCountFormatter.string(fromByteCount: rebuildable.reduce(0) { $0 + $1.size }, countStyle: .file)))"),
                         systemImage: "arrow.triangle.2.circlepath")
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
-                .fixedSize()
+                // Wraps in a narrow list rather than running past its edge,
+                // as a longer translation would.
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -104,37 +122,112 @@ struct InspectorList: View {
         .padding(.bottom, DS.Space.sm)
     }
 
-    private var filterBar: some View {
-        VStack(alignment: .leading, spacing: DS.Space.sm) {
-            DSFilterField("Filter by name", text: $model.browseFilter.query)
-            HStack(spacing: DS.Space.sm) {
-                DateFilterControl(filter: $model.browseFilter.date)
-                Menu {
-                    Picker("Kind", selection: $model.browseFilter.kind) {
-                        Text("All Kinds").tag(FileKind?.none)
-                        Divider()
-                        ForEach(FileKind.allCases, id: \.self) { Text($0.title).tag(FileKind?.some($0)) }
-                    }
-                    .pickerStyle(.inline)
-                } label: {
-                    Label(model.browseFilter.kind?.title ?? "Kind", systemImage: "square.grid.2x2")
+    @ViewBuilder private var filterBar: some View {
+        DSControlBar("Browse options", detail: "Choose how folders are shown and which part of the map to filter.") {
+            DSControlField("Folder view", inline: true) {
+                Picker("Folder View", selection: $folderView) {
+                    Label("Tree", systemImage: "list.bullet.indent").tag(DiskFolderView.tree)
+                    Label("List", systemImage: "list.bullet").tag(DiskFolderView.list)
                 }
-                .fixedSize()
-                .help("Show only one kind of item; a folder counts as the kind most of its space is")
-                Spacer(minLength: 0)
-                if model.browseFilter.isActive {
-                    Button("Clear") { model.browseFilter = BrowseFilter() }
-                        .buttonStyle(.borderless)
-                        .fixedSize()
-                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 180, alignment: .leading)
+                .help("Tree opens several folder levels together. List shows one folder at a time. Your choice is remembered.")
             }
-            .controlSize(.small)
+            DSControlField("Name filter", inline: true) {
+                DSFilterField(String(localized: "Filter by name"), text: $model.browseFilter.query)
+                    .frame(width: 180, alignment: .leading)
+            }
+            DSControlField("Search in", inline: true) {
+                Picker("Look In", selection: $model.browseFilter.wholeScan) {
+                    Text("This Folder").tag(false)
+                    Text("Whole Scan").tag(true)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 180, alignment: .leading)
+                .disabled(model.index == nil)
+                .help(model.index == nil ? String(localized: "Available when the scan finishes") : String(localized: "Filter the open folder, or search every folder and every file of 1 MB or more in the scan"))
+            }
+            DisclosureGroup("Date, kind & saved filters", isExpanded: $filtersExpanded) {
+                VStack(alignment: .leading, spacing: DS.Space.md) {
+                    DSControlField("Last modified") {
+                        DateFilterControl(filter: $model.browseFilter.date, showsLabel: false)
+                    }
+                    DSFlow(spacing: DS.Space.md) {
+                        DSControlField("Kind") {
+                            Menu {
+                                Picker("Kind", selection: $model.browseFilter.kind) {
+                                    Text("All Kinds").tag(FileKind?.none)
+                                    Divider()
+                                    ForEach(FileKind.allCases, id: \.self) { Text($0.title).tag(FileKind?.some($0)) }
+                                }
+                                .pickerStyle(.inline)
+                            } label: {
+                                Label(model.browseFilter.kind?.title ?? String(localized: "All Kinds"), systemImage: "square.grid.2x2")
+                            }
+                            .fixedSize()
+                            .help("Show only one kind of item; a folder counts as the kind most of its space is")
+                        }
+                        DSControlField("Saved filters") {
+                            SavedFiltersMenu(filter: $model.browseFilter)
+                        }
+                    }
+                }
+                .padding(.top, DS.Space.sm)
+            }
+            .frame(width: 260, alignment: .leading)
+            if model.browseFilter.isActive {
+                Button("Clear Filters") { model.browseFilter = BrowseFilter() }
+                    .accessibilityLabel("Clear the filter")
+                    .fixedSize()
+            }
         }
         .padding(.horizontal, DS.Space.md)
         .padding(.bottom, DS.Space.sm)
+        .onChange(of: model.browseFilter, initial: true) { _, filter in
+            if filter.kind != nil || filter.date.isActive { filtersExpanded = true }
+        }
+        if folderView == .tree, model.browseFilter.isActive {
+            DSText("Filtered results use a list. Clear the filter to return to your open tree.", .metadata)
+                .padding(.horizontal, DS.Space.md)
+                .padding(.bottom, DS.Space.sm)
+        }
+        if !model.skipped.isEmpty {
+            Label("\(model.skipped.count) folder\(model.skipped.count == 1 ? "" : "s") you chose aren't scanned", systemImage: "eye.slash")
+                .font(.caption).foregroundStyle(.secondary)
+                .help(model.skipped.map { ($0 as NSString).abbreviatingWithTildeInPath }.joined(separator: "\n") + "\n" + String(localized: "Change this in Settings → Disk Map."))
+                .padding(.horizontal, DS.Space.md)
+                .padding(.bottom, DS.Space.sm)
+        }
     }
 
     // MARK: Table
+
+    private func tree(_ root: Folder) -> some View {
+        let current = treeState.rootID == root.id && treeState.revision == model.revision
+        let visible = current ? treeState.visible : []
+        let selected = current ? model.selection.compactMap { treeState.byPath[$0] } : []
+        let chosen = current ? model.marked.keys.filter { treeState.byPath[$0]?.pending == false }.count : 0
+        return VStack(spacing: 0) {
+            DiskOutline(
+                root: root, revision: model.revision, ready: model.isReady,
+                state: treeState, selection: $model.selection, expanded: $model.treeExpanded,
+                marks: model.opened == nil ? Set(model.marked.keys) : nil,
+                row: fileRow,
+                onToggle: { model.toggle($0.marked) },
+                onOpen: { entries in
+                    if entries.count == 1, let folder = entries[0].folder { model.open(folder) }
+                    else { FileActions.reveal(entries.map(\.path)) }
+                },
+                onMark: { model.mark($0.map(\.marked)) },
+                onHover: { entry in model.hovered = entry?.folder.map(Segment.folder) },
+                menu: menu, onSmallFiles: { smallFilesOf = $0 })
+            Divider()
+            footer(root, rows: visible, all: visible, treeSelection: selected,
+                   allChosen: !current || chosen >= treeState.readyCount)
+        }
+    }
 
     private func table(_ rows: [DiskEntry]) -> some View {
         let byID = Dictionary(rows.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
@@ -171,8 +264,8 @@ struct InspectorList: View {
             kind: e.kindTitle, items: e.pending ? nil : e.items,
             symbol: f == nil ? e.kind.symbol : (f?.inheritedKind?.symbol ?? "folder.fill"),
             subtitle: modified.map { f == nil ? $0.listText : "\($0.listText) · \(e.items.formatted()) files" },
-            tint: f == nil ? NSColor(ChartColors.kind(e.kind)) : NSColor(Theme.accent),
-            badge: f?.rebuildable == nil ? nil : "Rebuildable",
+            tint: f == nil ? NSColor(ChartColors.kind(e.kind)) : palette.accentText.ns,
+            badge: f?.rebuildable == nil ? nil : String(localized: "Rebuildable"),
             badgeHelp: f?.rebuildable.map { "\($0.label): \($0.reason)" },
             locked: !e.pending && f?.unreadable == true)
     }
@@ -181,27 +274,37 @@ struct InspectorList: View {
 
     private func menu(_ chosen: [DiskEntry], rows: [DiskEntry]) -> [TableMenuEntry] {
         guard !chosen.isEmpty else { return [] }
+        if model.opened != nil { return [.quickLook, .divider] + FileActions.menu(chosen.map(\.path)) }
         var out: [TableMenuEntry] = []
-        if chosen.count == 1, let f = chosen[0].folder { out.append(.action("Open") { model.open(f) }) }
+        if chosen.count == 1, let f = chosen[0].folder { out.append(.action(String(localized: "Open")) { model.open(f) }) }
+        if chosen.count == 1, chosen[0].folder != nil, !model.scanning {
+            let path = chosen[0].path
+            out.append(.action(String(localized: "Don't Scan This Folder")) { model.skipFromNowOn(path) })
+        }
         out.append(.quickLook)
         out.append(.divider)
-        let unmarked = chosen.filter { !model.isMarked($0.path) }
+        let marks = Set(model.marked.keys)
+        let parents = Set(chosen.compactMap { Marked.parent(of: $0.path, in: marks) })
+        let unmarked = chosen.filter { !model.isMarked($0.path) && Marked.parent(of: $0.path, in: marks) == nil }
         if !unmarked.isEmpty {
-            out.append(.action(unmarked.count == 1 ? "Mark for Removal" : "Mark \(unmarked.count) for Removal") {
+            out.append(.action(unmarked.count == 1 ? String(localized: "Choose for Removal") : String(localized: "Choose \(unmarked.count) for Removal")) {
                 model.mark(unmarked.map(\.marked))
             })
         }
-        if unmarked.count < chosen.count {
-            out.append(.action("Unmark") { model.unmark(chosen.map(\.path)) })
+        if chosen.contains(where: { model.isMarked($0.path) }) {
+            out.append(.action(String(localized: "Unchoose")) { model.unmark(chosen.map(\.path)) })
+        }
+        if !parents.isEmpty {
+            out.append(.action(String(localized: "Unchoose Containing Folder")) { model.unmark(parents) })
         }
         if chosen.count == 1, chosen[0].modified > .distantPast {
             let date = chosen[0].modified
             let ready = rows.filter { !$0.pending }
             out.append(.divider)
-            out.append(.submenu("Select by Date", [
-                .action("Changed On or Before \(date.listText)") { model.selection = Set(ready.filter { $0.modified <= date }.map(\.id)) },
-                .action("Changed On or After \(date.listText)") { model.selection = Set(ready.filter { $0.modified >= date }.map(\.id)) },
-                .action("Changed the Same Day") {
+            out.append(.submenu(String(localized: "Select by Date"), [
+                .action(String(localized: "Changed On or Before \(date.listText)")) { model.selection = Set(ready.filter { $0.modified <= date }.map(\.id)) },
+                .action(String(localized: "Changed On or After \(date.listText)")) { model.selection = Set(ready.filter { $0.modified >= date }.map(\.id)) },
+                .action(String(localized: "Changed the Same Day")) {
                     model.selection = Set(ready.filter { Calendar.current.isDate($0.modified, inSameDayAs: date) }.map(\.id))
                 },
             ]))
@@ -217,10 +320,13 @@ struct InspectorList: View {
 
     // MARK: Footer
 
-    private func footer(_ cur: Folder, rows: [DiskEntry], all: [DiskEntry]) -> some View {
-        let selected = rows.filter { model.selection.contains($0.id) }
-        let selectedBytes = selected.reduce(0) { $0 + $1.size }
-        return HStack(spacing: DS.Space.sm) {
+    private func footer(_ cur: Folder, rows: [DiskEntry], all: [DiskEntry], treeSelection: [DiskEntry]? = nil, allChosen: Bool? = nil)
+        -> some View
+    {
+        let selected = treeSelection ?? rows.filter { model.selection.contains($0.id) }
+        let outer = Set(Trasher.outermost(selected.map(\.path)))
+        let selectedBytes = selected.filter { outer.contains($0.path) }.reduce(0) { $0 + $1.size }
+        return VStack(alignment: .leading, spacing: DS.Space.sm) {
             VStack(alignment: .leading, spacing: 1) {
                 DSText(
                     selected.isEmpty
@@ -228,22 +334,36 @@ struct InspectorList: View {
                         : "\(selected.count) of \(rows.count) selected · \(ByteCountFormatter.string(fromByteCount: selectedBytes, countStyle: .file))",
                     .metadata)
                 if cur.smallFileCount > 0 {
-                    DSText(
-                        "+ \(cur.smallFileCount.formatted()) smaller files · \(ByteCountFormatter.string(fromByteCount: cur.smallFileBytes, countStyle: .file))",
-                        .metadata)
+                    HStack(spacing: DS.Space.xs) {
+                        DSText(
+                            "+ \(cur.smallFileCount.formatted()) smaller files · \(ByteCountFormatter.string(fromByteCount: cur.smallFileBytes, countStyle: .file))",
+                            .metadata)
+                        Button("List") { smallFilesOf = cur.path }
+                            .buttonStyle(.link)
+                            .controlSize(.small)
+                            .help("Read the files under 1 MB in this folder, a page at a time")
+                    }
                 }
             }
-            Spacer(minLength: DS.Space.sm)
-            Button("Select All") { model.selection = Set(rows.filter { !$0.pending }.map(\.id)) }
-                .disabled(rows.isEmpty)
-                .fixedSize()
-            Button("Mark") { markSelection(rows) }
+            DSFlow(spacing: DS.Space.sm) {
+                // Choosing ticks rows for the Trash; selecting (⌘A, ⇧-click) only highlights them.
+                Button(treeSelection == nil ? "Choose All" : "Choose Listed") { model.mark(rows.filter { !$0.pending }.map(\.marked)) }
+                    .disabled(model.opened != nil || (allChosen ?? rows.allSatisfy { $0.pending || model.isMarked($0.path) }))
+                    .help("Tick every item listed here for the Trash. Nothing moves until you review and confirm.")
+                    .fixedSize()
+                Button(selected.isEmpty ? "Choose Selected" : "Choose \(selected.count) Selected") {
+                    // ⌘⌫ in the filter field deletes the text, as everywhere else.
+                    if MyMoleApp.sendToTextField(#selector(NSResponder.deleteToBeginningOfLine(_:))) { return }
+                    model.mark(selected.filter { !$0.pending }.map(\.marked))
+                }
                 .keyboardShortcut(.delete, modifiers: .command)
-                .disabled(selected.isEmpty)
-                .help("Mark the selected items for removal (⌘⌫)")
+                .disabled(model.opened != nil || selected.allSatisfy(\.pending))
+                .help("Tick the highlighted rows for the Trash (⌘⌫). Select rows with a click, ⇧ or ⌘, or ⌘A for all.")
                 .fixedSize()
+            }
         }
         .controlSize(.small)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, DS.Space.md)
         .padding(.vertical, DS.Space.sm)
     }
@@ -255,22 +375,251 @@ extension Date {
         guard self > .distantPast else { return "—" }
         let cal = Calendar.current
         let time = formatted(date: .omitted, time: .shortened)
-        if cal.isDateInToday(self) { return "Today \(time)" }
-        if cal.isDateInYesterday(self) { return "Yesterday \(time)" }
+        if cal.isDateInToday(self) { return String(localized: "Today \(time)") }
+        if cal.isDateInYesterday(self) { return String(localized: "Yesterday \(time)") }
         return formatted(date: .abbreviated, time: .omitted)
     }
 }
 
 /// A thin proportional bar under a row.
 struct ShareBar: View {
+    @Environment(\.palette) private var palette
     let fraction: Double
 
     var body: some View {
         GeometryReader { g in
             Capsule()
-                .fill(Theme.accent.opacity(0.55))
+                .fill(palette.accentText.color.opacity(0.55))
                 .frame(width: max(2, g.size.width * min(max(fraction, 0), 1)))
         }
         .frame(height: 3)
+    }
+}
+
+/// One match of a search through the whole scan.
+struct ScanHit: Sendable, Identifiable {
+    let path: String
+    let name: String
+    let size: Int64
+    let modified: Date
+    let kind: FileKind
+    let isFolder: Bool
+    var id: String { path }
+    var marked: Marked { Marked(path: path, name: name, size: size, isFolder: isFolder) }
+}
+
+/// The Browse filter applied to every folder and listed file of the scan,
+/// worked out off the main thread from the scan's index.
+private struct WholeScanSearch: View {
+    @Bindable var model: StorageModel
+    let index: ScanIndex
+    @State private var result = OffMain<(hits: [ScanHit], more: Bool)>(([], false))
+
+    private struct Key: Equatable {
+        let filter: BrowseFilter
+        let revision: Int
+    }
+
+    var body: some View {
+        // What a move since took out of the map isn't offered.
+        let hits = result.value.hits.filter { h in model.root.map { StorageModel.holds($0, h.path) } ?? false }
+        let byID = Dictionary(hits.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        VStack(spacing: 0) {
+            FileTable(
+                rows: hits.map(row),
+                columns: [.name, .size, .modified, .kind, .location],
+                hiddenByDefault: [.modified, .kind],
+                autosave: "diskMap.search",
+                selection: $model.selection,
+                marks: Set(model.marked.keys),
+                onToggleMark: { id in byID[id].map { model.toggle($0.marked) } },
+                onOpen: { ids in
+                    let chosen = ids.compactMap { byID[$0] }
+                    if chosen.count == 1, chosen[0].isFolder {
+                        model.browseFilter = BrowseFilter()
+                        model.show(folder: chosen[0].path)
+                    } else if !chosen.isEmpty {
+                        FileActions.reveal(chosen.map(\.path))
+                    }
+                },
+                onMark: { ids in model.mark(ids.compactMap { byID[$0] }.map(\.marked)) },
+                menu: { ids in
+                    let chosen = ids.compactMap { byID[$0] }
+                    guard !chosen.isEmpty else { return [] }
+                    return [
+                        .quickLook,
+                        .action(String(localized: "Show in Map")) {
+                            let target = chosen[0]
+                            model.browseFilter = BrowseFilter()
+                            model.show(folder: target.isFolder ? target.path : (target.path as NSString).deletingLastPathComponent, select: target.isFolder ? nil : target.path)
+                        },
+                        .action(String(localized: "Show in Finder")) { FileActions.reveal(chosen.map(\.path)) },
+                        .divider,
+                        .action(String(localized: "Choose for Removal")) { model.mark(chosen.map(\.marked)) },
+                    ]
+                })
+            .overlay {
+                if hits.isEmpty, !result.working {
+                    ContentUnavailableView.search(text: model.browseFilter.query)
+                }
+            }
+            Divider()
+            VStack(alignment: .leading, spacing: 1) {
+                DSText(result.value.more
+                    ? String(localized: "The \(hits.count.formatted()) largest matches in the whole scan")
+                    : String(localized: "\(hits.count.formatted()) found in the whole scan"), .metadata)
+                DSText(index.truncated
+                    ? String(localized: "Files under 1 MB are counted per folder, not searched; this scan is so big that only its \(ScanIndex.standardLimit.formatted()) biggest folders and files are searched.")
+                    : String(localized: "Files under 1 MB are counted per folder, not searched."), .metadata)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, DS.Space.md)
+            .padding(.vertical, DS.Space.sm)
+        }
+        .task(id: Key(filter: model.browseFilter, revision: model.revision)) {
+            let (index, filter) = (index, model.browseFilter)
+            await result.update(count: index.entries.count) {
+                let r = index.search(filter.query) { e in
+                    (filter.kind == nil || e.kind == filter.kind) && filter.date.matches(e.modified)
+                }
+                return (r.found.map { i in
+                    let e = index.entries[i]
+                    return ScanHit(path: index.path(i), name: e.name, size: e.size, modified: e.modified, kind: e.kind, isFolder: e.isFolder)
+                }, r.more)
+            }
+        }
+    }
+
+    private func row(_ h: ScanHit) -> FileRow {
+        FileRow(
+            id: h.path, name: h.name, size: h.size, modified: h.modified == .distantPast ? nil : h.modified,
+            kind: h.isFolder ? String(localized: "Folder") : h.kind.title,
+            location: (h.path as NSString).deletingLastPathComponent,
+            symbol: h.isFolder ? "folder.fill" : h.kind.symbol)
+    }
+}
+
+/// The Browse filters the user saved: apply one, save the one in use, or
+/// forget one.
+private struct SavedFiltersMenu: View {
+    @Binding var filter: BrowseFilter
+    @State private var saved = SavedFilter.all()
+
+    var body: some View {
+        Menu {
+            ForEach(saved) { s in Button(s.name) { filter = s.filter } }
+            if !saved.isEmpty { Divider() }
+            Button("Save This Filter") {
+                let name = SavedFilter.name(for: filter)
+                saved = saved.filter { $0.name != name } + [SavedFilter(name: name, filter: filter)]
+                SavedFilter.save(saved)
+            }
+            .disabled(!filter.isActive)
+            if !saved.isEmpty {
+                Menu("Forget") {
+                    ForEach(saved) { s in
+                        Button(s.name) {
+                            saved.removeAll { $0.name == s.name }
+                            SavedFilter.save(saved)
+                        }
+                    }
+                }
+            }
+        } label: {
+            Label("Saved", systemImage: "bookmark")
+        }
+        .fixedSize()
+        .help("Filters you saved, and saving the one in use")
+    }
+}
+
+/// The files under 1 MB in one folder, which a scan only counts: read from
+/// the disk when asked, a page at a time, so a folder of a hundred
+/// thousand small files never makes one long list at once.
+struct SmallFilesSheet: View {
+    struct Target: Identifiable {
+        let path: String
+        var id: String { path }
+    }
+
+    let folder: String
+    /// A scan opened from a file: the folder may not be on this Mac.
+    let readOnly: Bool
+    @Environment(\.dismiss) private var dismiss
+    @State private var names: [String]?
+    @State private var shown = 0
+    @State private var rows: [FileRow] = []
+    @State private var selection = Set<String>()
+    @State private var problem: String?
+    static let page = 500
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: DS.Space.md) {
+            Text("Smaller Files").font(.title2.bold())
+            DSPath(folder, .mono)
+            DSText(
+                "Visible files using less than 1 MB on disk, read a page at a time. Use Quick Look to inspect them; this list is for browsing.", .metadata)
+            if let problem {
+                DSNotice(.warning, problem)
+            } else if names == nil {
+                DSLoading("Reading the folder…").frame(height: 320)
+            } else {
+                FileTable(
+                    rows: rows, columns: [.name, .size, .modified, .location], hiddenByDefault: [.location],
+                    autosave: "diskMap.smallFiles", selection: $selection, marks: nil,
+                    onOpen: { FileActions.reveal($0) },
+                    menu: { ids in [.quickLook, .action(String(localized: "Show in Finder")) { FileActions.reveal(ids) }] }
+                )
+                .frame(height: 320)
+            }
+            DSActionGroup {
+                if let names {
+                    DSText(String(localized: "\(min(shown, names.count).formatted()) of \(names.count.formatted()) names read"), .metadata)
+                }
+            } trailing: {
+                if let names, shown < names.count {
+                    Button("Read \(min(Self.page, names.count - shown)) More") { Task { await readPage() } }
+                }
+                Button("Done") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+            }
+        }
+        .padding(DS.Space.xl)
+        .frame(width: DS.Size.reviewWidth)
+        .task { await start() }
+    }
+
+    private func start() async {
+        let folder = folder
+        let listed = await Task.detached(priority: .userInitiated) { DirectoryListing.names(folder) }.value
+        guard let listed else {
+            problem = readOnly
+                ? String(localized: "This folder isn't on this Mac, or can't be read: a saved scan only knows how many small files it had.")
+                : String(localized: "The folder couldn't be read.")
+            return
+        }
+        names = listed.filter { !$0.hasPrefix(".") }.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+        await readPage()
+    }
+
+    /// The next page of names, measured; only plain files under 1 MB.
+    private func readPage() async {
+        guard let names else { return }
+        let slice = Array(names[shown..<min(names.count, shown + Self.page)])
+        let folder = folder
+        let more = await Task.detached(priority: .userInitiated) { () -> [FileRow] in
+            slice.compactMap { name in
+                let path = folder + "/" + name
+                var st = stat()
+                guard lstat(path, &st) == 0, st.st_mode & S_IFMT == S_IFREG else { return nil }
+                let bytes = Int64(st.st_blocks) * 512
+                guard bytes < Folder.listedFileSize else { return nil }
+                return FileRow(
+                    id: path, name: name, size: bytes, modified: Date(timeIntervalSince1970: TimeInterval(st.st_mtimespec.tv_sec)),
+                    location: folder, symbol: Classifier.kind(ofFile: name).symbol)
+            }
+        }.value
+        shown += slice.count
+        rows += more
     }
 }

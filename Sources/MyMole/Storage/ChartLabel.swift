@@ -20,8 +20,9 @@ enum ChartLabel {
         ctx: GraphicsContext
     ) -> Bool {
         guard rect.width > 8, rect.height > 8 else { return false }
-        let dark = prefersDarkInk(on: fill, ctx.environment)
-        let ink: Color = dark ? .black.opacity(0.82) : .white
+        let under = luminance(of: fill, ctx.environment)
+        let (dark, titleOpacity, detailOpacity) = ink(on: under)
+        let ink: Color = (dark ? Color.black : .white).opacity(titleOpacity)
         let font: Font = (large ? Font.subheadline : .caption).weight(emphasis ? .semibold : .medium)
 
         // Every unbreakable piece of the name must fit the width on its own,
@@ -39,7 +40,7 @@ enum ChartLabel {
         var sub: GraphicsContext.ResolvedText?
         var subSize = CGSize.zero
         if let detail {
-            let r = ctx.resolve(Text(detail).font(large ? .caption : .caption2).monospacedDigit().foregroundStyle(ink.opacity(0.8)))
+            let r = ctx.resolve(Text(detail).font(large ? .caption : .caption2).monospacedDigit().foregroundStyle((dark ? Color.black : .white).opacity(detailOpacity)))
             let s = r.measure(in: CGSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude))
             if s.width <= rect.width, titleSize.height + s.height <= rect.height {
                 sub = r
@@ -71,15 +72,25 @@ enum ChartLabel {
         return true
     }
 
-    /// Black text when the fill (laid over the window background, for
-    /// translucent fills) is lighter than the point where black and white
-    /// have equal contrast.
-    static func prefersDarkInk(on fill: Color, _ env: EnvironmentValues) -> Bool {
+    /// The relative luminance of the fill as drawn: laid over the theme's
+    /// workspace when it's translucent.
+    static func luminance(of fill: Color, _ env: EnvironmentValues) -> Double {
         let f = fill.resolve(in: env)
-        let bg = Color(nsColor: .windowBackgroundColor).resolve(in: env)
-        let a = f.opacity
-        func lum(_ c: Color.Resolved) -> Float { 0.2126 * c.linearRed + 0.7152 * c.linearGreen + 0.0722 * c.linearBlue }
-        let l = lum(f) * a + lum(bg) * (1 - a)
-        return l > 0.18
+        let bg = env.palette.workspace.color.resolve(in: env)
+        let a = Double(f.opacity)
+        func lum(_ c: Color.Resolved) -> Double { Double(0.2126 * c.linearRed + 0.7152 * c.linearGreen + 0.0722 * c.linearBlue) }
+        return lum(f) * a + lum(bg) * (1 - a)
+    }
+
+    /// Black or white, whichever reads better on a fill of luminance `l`, and
+    /// how opaque the name and its detail are: softened only while they
+    /// still reach 4.5:1, or as close to it as black or white can get.
+    static func ink(on l: Double) -> (dark: Bool, title: Double, detail: Double) {
+        func contrast(_ a: Double, _ b: Double) -> Double { (max(a, b) + 0.05) / (min(a, b) + 0.05) }
+        let dark = contrast(0, l) >= contrast(1, l)
+        func opacity(_ soft: Double) -> Double {
+            contrast((dark ? 0 : 1) * soft + l * (1 - soft), l) >= 4.5 ? soft : 1
+        }
+        return (dark, opacity(0.82), opacity(0.8))
     }
 }

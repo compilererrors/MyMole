@@ -78,9 +78,19 @@ public enum SystemCleanRules {
 
     /// Everything removable under `roots`, largest first.
     public static func scan(roots: [Root] = roots, progress: ScanProgress = ScanProgress()) -> [SystemCandidate] {
+        list(roots: roots, progress: progress).candidates
+    }
+
+    /// What `scan` finds, and the roots that are there but couldn't be read.
+    public static func list(roots: [Root] = roots, progress: ScanProgress = ScanProgress()) -> SystemCleanListing {
         var out: [SystemCandidate] = []
+        var unreadable: [String] = []
         for root in roots where !progress.isCancelled {
-            for name in ((try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? []).sorted() {
+            guard let names = DirectoryListing.names(root.path) else {
+                unreadable.append(root.path)
+                continue
+            }
+            for name in names.sorted() {
                 let path = root.path + "/" + name
                 guard allowed(path, roots: roots) else { continue }
                 var st = stat()
@@ -103,7 +113,8 @@ public enum SystemCleanRules {
                 out.append(c)
             }
         }
-        return out.sorted { $0.bytes != $1.bytes ? $0.bytes > $1.bytes : $0.path < $1.path }
+        return SystemCleanListing(
+            candidates: out.sorted { $0.bytes != $1.bytes ? $0.bytes > $1.bytes : $0.path < $1.path }, unreadable: unreadable)
     }
 
     /// A direct entry of a root, not a link, not on the never list, and a
@@ -154,5 +165,36 @@ public enum SystemCleanRules {
         guard lstat(path, &st) == 0 else { return 0 }
         if st.st_mode & S_IFMT == S_IFDIR { return StorageScanner.scan(path: path, workers: 2).root.size }
         return Int64(st.st_blocks) * 512
+    }
+}
+
+/// What a look through the system caches and logs found.
+public struct SystemCleanListing: Sendable {
+    public var candidates: [SystemCandidate]
+    /// Places that are there but couldn't be read: what's in them isn't listed.
+    public var unreadable: [String]
+
+    public init(candidates: [SystemCandidate], unreadable: [String] = []) {
+        self.candidates = candidates
+        self.unreadable = unreadable
+    }
+}
+
+extension SystemCleanRules {
+    /// Staging folders an earlier removal left in `roots`: it stopped
+    /// part-way (a lost connection, a restart), and what it moved aside is
+    /// still there with notes of where each came from. Nothing deletes them
+    /// on its own; a new removal only ever deletes what it staged itself.
+    public static func leftStaging() -> [String] {
+        leftStaging(at: roots.map(\.path) + SystemLeftovers.places.map(\.folder))
+    }
+
+    static func leftStaging(at roots: [String]) -> [String] {
+        roots.compactMap { root in
+            let container = root + "/" + Staging.containerName
+            var st = stat()
+            return lstat(container, &st) == 0 && st.st_mode & S_IFMT == S_IFDIR ? container : nil
+        }
+        .sorted()
     }
 }

@@ -32,6 +32,22 @@ public enum MaintenanceTask: String, CaseIterable, Codable, Sendable, Identifiab
         }
     }
 
+    /// What it disturbs while it runs, and what can't be undone: so a task
+    /// is run for its problem, not as a general speed-up.
+    public var effect: String {
+        switch self {
+        case .quickLook: "Finder makes thumbnails again as you browse. Nothing to undo."
+        case .launchServices: "An app may ask once which app opens a kind of file. Can't be undone; macOS keeps it up to date from then on."
+        case .savedState: "Undo puts them back."
+        case .brokenPreferences: "Undo puts them back."
+        case .networkDSStore: "A Finder setting; Finder's folder views on those drives aren't remembered from then on."
+        case .flushDNS: "Sites look up their address again on the next visit. Nothing to undo."
+        case .periodic: "Runs a few minutes in the background. Trimmed logs can't be put back."
+        case .spotlight: "Search misses files until the rebuild ends, which can take hours and keeps the disk busy. Can't be undone."
+        case .verifyDisk: "Only reads; the disk is busier while it runs."
+        }
+    }
+
     public var explanation: String {
         switch self {
         case .quickLook: "Resets the thumbnail cache, for blank or outdated previews in Finder."
@@ -84,7 +100,8 @@ public enum MaintenanceTask: String, CaseIterable, Codable, Sendable, Identifiab
     /// tasks start off.
     public var onByDefault: Bool {
         switch self {
-        case .quickLook, .savedState, .brokenPreferences, .flushDNS, .verifyDisk: true
+        // Only what fixes something most Macs gather; DNS and the index are for a problem you have.
+        case .quickLook, .savedState, .brokenPreferences, .verifyDisk: true
         default: false
         }
     }
@@ -146,13 +163,19 @@ public struct MaintenanceEngine: Sendable {
     /// Bundle IDs of the apps running now. Their window states and settings
     /// are never touched, whatever they look like.
     public let running: @Sendable () -> Set<String>
+    /// What the user keeps (Deep Clean's keep list and the paths kept in
+    /// Projects), read as a move runs. Only the user's tasks move files; the
+    /// root ones never do, so they keep nothing.
+    public let protections: @Sendable () throws -> @Sendable (String) -> Bool
 
     public init(
         role: Role, home: String = Home.path, runner: CommandRunner = .live,
         now: @escaping @Sendable () -> Date = { Date() },
         trash: @escaping @Sendable ([String], TrashGate) -> TrashOutcome = { Trasher.moveToTrash($0, through: $1) },
-        running: @escaping @Sendable () -> Set<String> = { [] }
+        running: @escaping @Sendable () -> Set<String> = { [] },
+        protections: @escaping @Sendable () throws -> @Sendable (String) -> Bool = TrashGate.keepsNothing
     ) {
+        self.protections = protections
         self.role = role
         self.home = home
         self.runner = runner
@@ -295,7 +318,7 @@ public struct MaintenanceEngine: Sendable {
 
     func moveToTrash(_ paths: [String], _ t: MaintenanceTask, what: String, still: @escaping @Sendable (String) -> Bool) -> TaskReport {
         guard !paths.isEmpty else { return TaskReport(t, .nothingToDo) }
-        let out = self.trash(paths, TrashGate(still: still))
+        let out = self.trash(paths, TrashGate(still: still, protections: protections))
         let n = out.moved.count
         if !out.failed.isEmpty {
             return TaskReport(t, .failed, "Moved \(n); \(out.failed.count) couldn't be moved.")

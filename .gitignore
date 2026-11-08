@@ -5,3 +5,4 @@
 *.dmg
 /MyMole-AppStore.app
 /MyMole-AppStore.pkg
+/dist/

@@ -67,6 +67,10 @@ import Testing
             return made[n]
         }
         m.rescan(box.project)
+        // The older run is the one measuring before the newer is asked for,
+        // so the two are told apart by when they were asked, not by when
+        // the pool happens to start them.
+        while runs.withLock({ $0 }) < 1 { try await Task.sleep(for: .milliseconds(5)) }
         m.rescan(box.project)
         // The newer run finishes first, the older one after it.
         gates[1].signal()

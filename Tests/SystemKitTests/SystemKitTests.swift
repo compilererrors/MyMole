@@ -36,10 +36,18 @@ import Testing
             77   abc   100 nope
             """
         let top = ProcessList.parse(out, limit: 2)
-        #expect(top.map(\.name) == ["compiler", "Code Helper (Renderer)"])
+        // The two busiest, then the biggest of the rest.
+        #expect(top.map(\.name) == ["compiler", "Code Helper (Renderer)", "launchd"])
         #expect(top[1].memoryBytes == 204_800 * 1024)
         #expect(top[0].pid == 90)
         #expect(ProcessList.parse(out, limit: 10).count == 3)
+    }
+
+    @Test func aStuckProcessReadingIsStoppedAtItsTimeLimit() {
+        let start = Date()
+        #expect(ProcessList.output("/bin/sleep", ["30"], timeLimit: 0.3) == nil)
+        #expect(Date().timeIntervalSince(start) < 5)
+        #expect(ProcessList.output("/bin/echo", ["synthetic"], timeLimit: 10) == "synthetic\n")
     }
 
     @Test func uptimeReadsAsWords() {
@@ -147,5 +155,46 @@ import Testing
         #expect((s.memory?.total ?? 0) > 0)
         #expect(s.volumes.contains { $0.mount == "/" })
         #expect(!s.hardware.osVersion.isEmpty)
+    }
+}
+
+@Suite struct DiskHealthTests {
+    @Test func readsTheStatusAndLeavesOutADiskThatDoesntSay() {
+        let plist = { (status: String) in
+            "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>SMARTStatus</key><string>\(status)</string></dict></plist>"
+        }
+        #expect(DiskHealth.parse(plist("Verified")) == "Verified")
+        #expect(DiskHealth.parse(plist("Not Supported")) == nil)
+        #expect(DiskHealth.parse("not a property list") == nil)
+    }
+
+    @Test func aFailingDiskWeighsMostInTheScore() {
+        let failing = Health.assess(memory: nil, startup: nil, cpu: nil, battery: nil, diskHealth: "Failing")
+        #expect(failing.score == 60 && failing.summary.hasPrefix("The startup disk reports"))
+        #expect(Health.assess(memory: nil, startup: nil, cpu: nil, battery: nil, diskHealth: "Verified").score == 100)
+    }
+}
+
+@Suite struct HealthUnknownTests {
+    @Test func whatCouldntBeReadIsNeverCalledGood() {
+        let h = Health.assess(memory: nil, startup: nil, cpu: nil, battery: nil)
+        #expect(h.unknown == ["memory", "the startup disk"])
+        #expect(h.scoreText == "—" && h.summary.hasPrefix("Couldn't read"))
+        #expect(h.summary != "Everything looks good")
+    }
+}
+
+@Suite struct ProcessOrderTests {
+    @Test func theBusiestAndTheBiggestAreBothKept() {
+        let out = """
+            1 90.0 1000 Busy
+            2 50.0 2000 Middle
+            3 0.1 9000000 Big
+            4 0.0 10 Idle
+            """
+        let ps = ProcessList.parse(out, limit: 2)
+        #expect(ps.map(\.name) == ["Busy", "Middle", "Big", "Idle"])
+        let top = ProcessList.parse(out, limit: 1)
+        #expect(Set(top.map(\.name)) == ["Busy", "Big"])
     }
 }

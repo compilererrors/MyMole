@@ -35,7 +35,7 @@ final class ModelSafetyFixture: @unchecked Sendable {
   let b = try ModelSafetyFixture()
   let url = try b.file("keep.json", data: Data("broken existing protection list".utf8))
   let before = try Data(contentsOf: url)
-  let model = DeepCleanModel(home: b.root.path, base: b.root.appending(path: "store"), keepURL: url, logURL: b.root.appending(path: "history.json"), runningApps: { [] }, runningTools: { [] })
+  let model = DeepCleanModel(home: b.root.path, base: b.root.appending(path: "store"), keepURL: url, logURL: b.root.appending(path: "history.json"), runningApps: { [] }, runningTools: { [] }, projectRules: b.root.appending(path: "projects"), quietFor: 0)
   #expect(model.keepError != nil)
   model.keepAlways(["/synthetic/new-protection"])
   #expect(try Data(contentsOf: url) == before)
@@ -55,7 +55,8 @@ final class ModelSafetyFixture: @unchecked Sendable {
    started.withLock { $0 += 1 }
    _ = release.wait(timeout: .now() + 5)
    return []
-  }, system: .init(base: b.root.appending(path: "System").path, isReady: { false }, remove: { _,_,_ in RemovalReport() }))
+  }, system: .init(base: b.root.appending(path: "System").path, isReady: { false }, remove: { _,_,_ in RemovalReport() }),
+   protections: UserProtections(root: b.root.appending(path: "support")))
   let first = Task { await model.uninstall(a, leftovers: []) }
   let next = Task { await model.uninstall(second, leftovers: []) }
   for _ in 0..<200 {

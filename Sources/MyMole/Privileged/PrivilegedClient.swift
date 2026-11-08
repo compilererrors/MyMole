@@ -22,16 +22,16 @@ final class PrivilegedClient {
 
         var errorDescription: String? {
             switch self {
-            case .unavailable: "System tasks aren't part of this edition of MyMole."
-            case .cancelled: "Administrator access was cancelled, so nothing was changed."
+            case .unavailable: String(localized: "System tasks aren't part of this edition of MyMole.")
+            case .cancelled: String(localized: "Administrator access was cancelled, so nothing was changed.")
             case .refused(let why): why
             case .failed(let why): why
-            case .busy: "Another system task is still running. Wait for it to finish."
+            case .busy: String(localized: "Another system task is still running. Wait for it to finish.")
             case .outcomeUnknown: Self.unknownText
             }
         }
 
-        static let unknownText = "MyMole stopped waiting for the privileged tool, which may still be running. What it changed isn't known yet, so no other system task runs until it has ended."
+        static let unknownText = String(localized: "MyMole stopped waiting for the privileged tool, which may still be running. What it changed isn't known yet, so no other system task runs until it has ended.")
     }
 
     /// A system task is under way: the administrator prompt or the tool.
@@ -67,8 +67,8 @@ final class PrivilegedClient {
 
     /// Why no system task may start now, or nil.
     var blocker: String? {
-        if outcomeUnknown { return "An earlier system task may still be running." }
-        if busy { return "Another system task is running." }
+        if outcomeUnknown { return String(localized: "An earlier system task may still be running.") }
+        if busy { return String(localized: "Another system task is running.") }
         return nil
     }
 
@@ -99,7 +99,7 @@ final class PrivilegedClient {
     /// What the root tasks would do. A check only looks for the programs, so
     /// it needs no password.
     func checkMaintenance(_ tasks: [MaintenanceTask]) async -> [TaskReport] {
-        guard isAvailable else { return tasks.map { TaskReport($0, .needsHelper, "Not part of this edition.") } }
+        guard isAvailable else { return tasks.map { TaskReport($0, .needsHelper, String(localized: "Not part of this edition.")) } }
         return await Task.detached(priority: .userInitiated) {
             let engine = MaintenanceEngine(role: .root, home: "/var/root")
             return tasks.filter(\.needsRoot).map { engine.check($0) }
@@ -108,9 +108,9 @@ final class PrivilegedClient {
 
     /// System caches and logs as far as the user can read them; what can't
     /// be read is marked, and measured for real only when removed.
-    func scanSystem() async throws -> [SystemCandidate] {
+    func scanSystem(progress: ScanProgress = ScanProgress()) async throws -> SystemCleanListing {
         guard isAvailable else { throw Failure.unavailable }
-        return await Task.detached(priority: .userInitiated) { SystemCleanRules.scan() }.value
+        return await Task.detached(priority: .userInitiated) { SystemCleanRules.list(progress: progress) }.value
     }
 
     // MARK: As root
@@ -118,23 +118,23 @@ final class PrivilegedClient {
     func runMaintenance(_ tasks: [MaintenanceTask]) async throws -> [TaskReport] {
         let reply = try await run(
             .maintenance(tasks: tasks.filter(\.needsRoot).map(\.rawValue), dryRun: false),
-            prompt: "MyMole needs administrator rights to run system maintenance.")
-        guard case .reports(let r) = reply else { throw Failure.failed("The privileged tool gave an unexpected answer.") }
+            prompt: String(localized: "MyMole needs administrator rights to run system maintenance."))
+        guard case .reports(let r) = reply else { throw Failure.failed(String(localized: "The privileged tool gave an unexpected answer.")) }
         return r
     }
 
     /// Removes `paths`; the tool itself refuses any `keep` protects.
     func removeSystem(_ paths: [String], keep: CleanKeepList = CleanKeepList()) async throws -> RemovalReport {
-        let reply = try await run(.removeSystem(paths: paths, keep: keep.paths.sorted()), prompt: "MyMole needs administrator rights to delete system caches and logs.")
-        guard case .removal(let r) = reply else { throw Failure.failed("The privileged tool gave an unexpected answer.") }
+        let reply = try await run(.removeSystem(paths: paths, keep: keep.paths.sorted()), prompt: String(localized: "MyMole needs administrator rights to delete system caches and logs."))
+        guard case .removal(let r) = reply else { throw Failure.failed(String(localized: "The privileged tool gave an unexpected answer.")) }
         return r
     }
 
     func removeLeftovers(_ paths: [String], appID: String, ids: [String]) async throws -> RemovalReport {
         let reply = try await run(
             .removeLeftovers(paths: paths, appID: appID, ids: ids),
-            prompt: "MyMole needs administrator rights to delete what the app left outside your Library.")
-        guard case .removal(let r) = reply else { throw Failure.failed("The privileged tool gave an unexpected answer.") }
+            prompt: String(localized: "MyMole needs administrator rights to delete what the app left outside your Library."))
+        guard case .removal(let r) = reply else { throw Failure.failed(String(localized: "The privileged tool gave an unexpected answer.")) }
         return r
     }
 
@@ -165,7 +165,7 @@ final class PrivilegedClient {
         // root apart from it and may still be at work.
         if code == CommandRunner.timedOut || code == CommandRunner.stopUnverified { throw Failure.outcomeUnknown }
         guard code == 0, let reply = PrivilegedTool.reply(from: output) else {
-            throw Failure.failed("The privileged tool didn't finish (code \(code)).")
+            throw Failure.failed(String(localized: "The privileged tool didn't finish (code \(code))."))
         }
         if case .refused(let why) = reply { throw Failure.refused(why) }
         return reply
@@ -226,13 +226,13 @@ extension PrivilegedClient {
         switch envelope.request {
         case .removeSystem(let p, _), .removeLeftovers(let p, _, _): paths = p
         case .maintenance(let tasks, _):
-            let reports = tasks.compactMap(MaintenanceTask.init(rawValue:)).map { TaskReport($0, .failed, "Stood in for by the smoke test.") }
+            let reports = tasks.compactMap(MaintenanceTask.init(rawValue:)).map { TaskReport($0, .failed, String(localized: "Stood in for by the smoke test.")) }
             return (0, PrivilegedTool.output(.reports(reports)))
         }
         var report = RemovalReport()
         for p in paths {
             let parent = (p as NSString).deletingLastPathComponent
-            report.failed[p] = "Part of it couldn't be removed; what was left is kept at \(parent)/.mymole-removing/smoke/\((p as NSString).lastPathComponent)."
+            report.failed[p] = String(localized: "Part of it couldn't be removed; what was left is kept at \(parent)/.mymole-removing/smoke/\((p as NSString).lastPathComponent).")
         }
         return (0, PrivilegedTool.output(.removal(report)))
     }

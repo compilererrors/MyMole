@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Synchronization
 
@@ -8,10 +9,27 @@ public final class ScanProgress: Sendable {
     let bytesCounter = Atomic<Int64>(0)
     let deniedCounter = Atomic<Int>(0)
     let cancelled = Atomic<Bool>(false)
-    /// Large files found since the last `drainFound()`.
+    private let cancellationObservers = Mutex<[UUID: @Sendable () -> Void]>([:])
+    /// Large files found since the last `drainFound()`, at most
+    /// `foundLimit`: past that only the largest are kept. Collected only
+    /// when someone drains them (`collectsFound`).
     let found = Mutex<[FoundFile]>([])
+    let collectsFound: Bool
+    public static let foundLimit = 10_000
 
-    public init() {}
+    /// `collectsFound`: large files are handed out while the scan runs.
+    public init(collectsFound: Bool = false) { self.collectsFound = collectsFound }
+
+    func add(_ files: [FoundFile]) {
+        guard collectsFound, !files.isEmpty else { return }
+        found.withLock { f in
+            f.append(contentsOf: files)
+            if f.count > Self.foundLimit {
+                f.sort { $0.size > $1.size }
+                f.removeLast(f.count - Self.foundLimit)
+            }
+        }
+    }
 
     /// Takes the large files found since the last call, so a list can fill
     /// in while the scan is still running.
@@ -27,9 +45,36 @@ public final class ScanProgress: Sendable {
     public var bytes: Int64 { bytesCounter.load(ordering: .relaxed) }
     public var denied: Int { deniedCounter.load(ordering: .relaxed) }
 
-    /// Stops the scan at the next folder boundary; the result is partial.
-    public func cancel() { cancelled.store(true, ordering: .relaxed) }
+    /// Stops the scan at the next directory entry; the result is partial.
+    public func cancel() {
+        guard !cancelled.exchange(true, ordering: .relaxed) else { return }
+        let callbacks = cancellationObservers.withLock { observers in
+            let callbacks = Array(observers.values)
+            observers.removeAll()
+            return callbacks
+        }
+        // A callback may need another lock, or unregister itself.
+        for callback in callbacks { callback() }
+    }
     public var isCancelled: Bool { cancelled.load(ordering: .relaxed) }
+
+    /// Registration and cancellation cannot miss one another. Already stopped
+    /// progress calls back at once, outside the observer lock.
+    func onCancel(_ callback: @escaping @Sendable () -> Void) -> UUID? {
+        let id = UUID()
+        let registered = cancellationObservers.withLock { observers in
+            guard !isCancelled else { return false }
+            observers[id] = callback
+            return true
+        }
+        if !registered { callback() }
+        return registered ? id : nil
+    }
+
+    func removeCancellationObserver(_ id: UUID?) {
+        guard let id else { return }
+        cancellationObservers.withLock { _ = $0.removeValue(forKey: id) }
+    }
 }
 
 /// A file of at least `Folder.listedFileSize`, reported as soon as it's seen.
@@ -76,11 +121,12 @@ public enum StorageScanner {
         progress: ScanProgress = ScanProgress(),
         workers: Int = defaultWorkers,
         onRoot: (@Sendable (Folder) -> Void)? = nil,
-        onSubtree: @Sendable (Folder) -> Void = { _ in }
+        onSubtree: @Sendable (Folder) -> Void = { _ in },
+        skip: Set<String> = []
     ) -> ScanResult {
         let start = Date()
         let root = Folder(name: (path as NSString).lastPathComponent, parent: nil, rootPath: path)
-        let walk = Walk(rootDevice: DirectoryReader.device(of: path) ?? 0, progress: progress)
+        let walk = Walk(rootDevice: DirectoryReader.device(of: path) ?? 0, progress: progress, skip: skip)
 
         // The root goes first, on this thread, so its top-level folders exist
         // (and can be shown as placeholders) before the parallel walk starts.
@@ -113,6 +159,17 @@ public enum StorageScanner {
             root: root, deniedPaths: walk.denied.withLock { $0 }, duration: Date().timeIntervalSince(start),
             cancelled: progress.isCancelled)
     }
+
+    /// What the item at `path` takes on disk: a folder's whole tree, walked
+    /// with `workers`, or a file's allocated blocks. The walk alone can't
+    /// measure a file: it opens the path as a folder and reports nothing.
+    /// Nil when there's nothing there. Links aren't followed.
+    public static func sizeOnDisk(_ path: String, workers: Int = 1) -> Int64? {
+        var st = stat()
+        guard lstat(path, &st) == 0 else { return nil }
+        if st.st_mode & S_IFMT == S_IFDIR { return scan(path: path, workers: workers).root.size }
+        return Int64(st.st_blocks) * 512
+    }
 }
 
 /// Shared state of one scan.
@@ -126,20 +183,24 @@ private final class Walk: @unchecked Sendable {
     /// Written once on the starting thread before workers exist; read-only after.
     var topIndex: [ObjectIdentifier: Int] = [:]
 
-    init(rootDevice: Int32, progress: ScanProgress) {
+    /// Folders the user asked not to scan, by full path: not walked, not counted.
+    let skip: Set<String>
+
+    init(rootDevice: Int32, progress: ScanProgress, skip: Set<String> = []) {
         self.rootDevice = rootDevice
         self.progress = progress
+        self.skip = skip
     }
 
     /// Reads one folder: tallies its files, creates (and returns) its subfolders.
     func read(_ folder: Folder, path: String) -> [Folder] {
         var entries: [Entry] = []
-        let outcome = DirectoryReader.read(path) { entries.append($0) }
+        let outcome = DirectoryReader.read(path, isCancelled: { progress.isCancelled }) { entries.append($0) }
+        if outcome == .cancelled { return [] }
         if outcome != .ok {
             folder.unreadable = true
             progress.deniedCounter.add(1, ordering: .relaxed)
             denied.withLock { if $0.count < 500 { $0.append(path) } }
-            return []
         }
 
         let siblings = Set(entries.lazy.map(\.name))
@@ -148,10 +209,12 @@ private final class Walk: @unchecked Sendable {
         var files = 0
         var bytes: Int64 = 0
         for e in entries {
+            guard !progress.isCancelled else { break }
             switch e.kind {
             case .folder:
                 // Stay on one volume: mount points and other disks are skipped.
                 guard e.device == rootDevice else { continue }
+                if !skip.isEmpty, skip.contains(path == "/" ? "/" + e.name : path + "/" + e.name) { continue }
                 subs.append(
                     Folder(
                         name: e.name, parent: folder,
@@ -178,7 +241,7 @@ private final class Walk: @unchecked Sendable {
             }
         }
         folder.subfolders = subs
-        if !found.isEmpty { progress.found.withLock { $0.append(contentsOf: found) } }
+        progress.add(found)
         progress.filesCounter.add(files, ordering: .relaxed)
         progress.foldersCounter.add(1, ordering: .relaxed)
         progress.bytesCounter.add(bytes, ordering: .relaxed)

@@ -4,7 +4,7 @@ import SwiftUI
 
 /// One row of a `FileTable`. Every column is optional; a table shows the
 /// columns it was given.
-struct FileRow: Identifiable, Equatable {
+struct FileRow: Identifiable, Equatable, Sendable {
     /// The item's absolute path.
     let id: String
     var name: String
@@ -26,22 +26,27 @@ struct FileRow: Identifiable, Equatable {
     var tint: NSColor?
     var badge: String?
     var badgeHelp: String?
+    /// Green unless the badge says something else than "fine".
+    var badgeTint: NSColor?
     var locked = false
+    /// A measured item may still be protected or required in this review.
+    var canChoose = true
+    var choiceHelp: String?
 }
 
-enum FileColumn: String, CaseIterable {
+enum FileColumn: String, CaseIterable, Sendable {
     case name, size, change, freeable, modified, kind, items, location
 
     var title: String {
         switch self {
-        case .name: "Name"
-        case .size: "Size"
-        case .change: "Change"
-        case .freeable: "Can Free"
-        case .modified: "Modified"
-        case .kind: "Kind"
-        case .items: "Items"
-        case .location: "Location"
+        case .name: String(localized: "Name")
+        case .size: String(localized: "Size")
+        case .change: String(localized: "Change")
+        case .freeable: String(localized: "Removable")
+        case .modified: String(localized: "Modified")
+        case .kind: String(localized: "Kind")
+        case .items: String(localized: "Items")
+        case .location: String(localized: "Location")
         }
     }
 
@@ -50,16 +55,17 @@ enum FileColumn: String, CaseIterable {
 
     var isNumber: Bool { self == .size || self == .change || self == .freeable || self == .items }
 
-    fileprivate var width: (min: CGFloat, ideal: CGFloat, max: CGFloat) {
+    /// Shared by every table and outline, so a column is as wide everywhere.
+    var width: (min: CGFloat, ideal: CGFloat, max: CGFloat) {
         switch self {
-        case .name: (120, 200, 2000)
-        case .size: (64, 80, 140)
-        case .change: (60, 72, 140)
-        case .freeable: (64, 78, 140)
-        case .modified: (100, 112, 220)
-        case .kind: (60, 110, 240)
-        case .items: (48, 64, 120)
-        case .location: (120, 260, 1200)
+        case .name: (120, 200, 32_768)
+        case .size: (64, 80, 32_768)
+        case .change: (60, 72, 32_768)
+        case .freeable: (64, 78, 32_768)
+        case .modified: (100, 112, 32_768)
+        case .kind: (60, 110, 32_768)
+        case .items: (48, 64, 32_768)
+        case .location: (120, 260, 32_768)
         }
     }
 }
@@ -74,8 +80,8 @@ enum TableMenuEntry {
 }
 
 /// The app's list of files, Finder-style, on AppKit's own table: every row
-/// the same height and only the visible ones built, so 50,000 rows scroll,
-/// sort and refresh as fast as 50. Click a header to sort; right-click it to
+/// the same height and only the visible ones built. Large lists sort off
+/// the main thread. Click a header to sort; right-click it to
 /// show or hide columns (remembered). ⌘-click, ⇧-click, ⇧-arrows, ⌘A and
 /// type-to-select pick rows; Space is Quick Look, Return opens, ⌫ marks.
 struct FileTable: NSViewRepresentable {
@@ -105,19 +111,18 @@ struct FileTable: NSViewRepresentable {
         table.coordinator = context.coordinator
         table.style = DS.Table.style
         table.rowHeight = Self.rowHeight
-        table.usesAlternatingRowBackgroundColors = true
+        table.apply(context.environment.palette, lines: context.environment.tableLines, stripes: true)
         table.allowsMultipleSelection = true
         table.allowsColumnReordering = true
         table.allowsColumnResizing = true
-        table.columnAutoresizingStyle = .firstColumnOnlyAutoresizingStyle
-        table.intercellSpacing = NSSize(width: DS.Table.columnGap, height: 0)
+        table.columnAutoresizingStyle = .noColumnAutoresizing
         for c in columns {
             let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(c.rawValue))
             col.title = titles[c] ?? c.title
             col.minWidth = c.width.min
             col.width = c.width.ideal
             col.maxWidth = c.width.max
-            col.resizingMask = c == .name ? [.autoresizingMask, .userResizingMask] : .userResizingMask
+            col.resizingMask = .userResizingMask
             col.sortDescriptorPrototype = NSSortDescriptor(key: c.rawValue, ascending: c.ascendingFirst)
             if c.isNumber { col.headerCell.alignment = .right }
             col.isHidden = hiddenByDefault.contains(c)
@@ -143,17 +148,55 @@ struct FileTable: NSViewRepresentable {
         let scroll = NSScrollView()
         scroll.documentView = table
         scroll.hasVerticalScroller = true
+        scroll.hasHorizontalScroller = true
         scroll.autohidesScrollers = true
         scroll.drawsBackground = false
         context.coordinator.load(rows, marks: marks, selection: selection)
+        table.configureUserColumns()
         context.coordinator.fitting = table.keepFitting(FileColumn.name.rawValue)
         return scroll
+    }
+
+    static func dismantleNSView(_ scroll: NSScrollView, coordinator: Coordinator) {
+        coordinator.stopSorting()
+        NSTableView.stopFitting(&coordinator.fitting)
     }
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         let c = context.coordinator
         c.parent = self
+        c.table?.apply(context.environment.palette, lines: context.environment.tableLines, stripes: true)
         c.load(rows, marks: marks, selection: selection)
+    }
+
+    /// `rows` in the order of a column, ties broken by name, as Finder does.
+    /// The column's values are read out once and positions are sorted, so
+    /// the rows themselves, which are large, move only once.
+    nonisolated static func sorted(_ rows: [FileRow], by col: FileColumn, ascending asc: Bool) -> [FileRow] {
+        func byName(_ i: Int, _ j: Int) -> Bool { rows[i].name.localizedStandardCompare(rows[j].name) == .orderedAscending }
+        func order<T: Comparable>(_ keys: [T]) -> [Int] {
+            rows.indices.sorted { i, j in
+                keys[i] == keys[j] ? byName(i, j) : (asc ? keys[i] < keys[j] : keys[i] > keys[j])
+            }
+        }
+        func text(_ keys: [String], tieByName: Bool) -> [Int] {
+            rows.indices.sorted { i, j in
+                let r = keys[i].localizedStandardCompare(keys[j])
+                if r == .orderedSame { return tieByName && byName(i, j) }
+                return asc ? r == .orderedAscending : r == .orderedDescending
+            }
+        }
+        let positions: [Int] = switch col {
+        case .name: text(rows.map(\.name), tieByName: false)
+        case .size: order(rows.map { $0.size ?? -1 })
+        case .freeable: order(rows.map { $0.freeable ?? -1 })
+        case .change: order(rows.map { $0.change ?? 0 })
+        case .modified: order(rows.map { $0.modified ?? .distantPast })
+        case .kind: order(rows.map { $0.kind ?? "" })
+        case .items: order(rows.map { $0.items ?? -1 })
+        case .location: text(rows.map { $0.location ?? "" }, tieByName: true)
+        }
+        return positions.map { rows[$0] }
     }
 
     // MARK: Coordinator
@@ -168,6 +211,16 @@ struct FileTable: NSViewRepresentable {
         private var source: [FileRow] = []
         private(set) var shown: [FileRow] = []
         private var marks: Set<String>?
+        private struct SortRequest: Sendable {
+            let rows: [FileRow]
+            let column: FileColumn
+            let ascending: Bool
+            let generation: Int
+        }
+
+        private var sortGeneration = 0
+        private var pendingSort: SortRequest?
+        private(set) var sortJob: Task<Void, Never>?
         /// Set while the table's selection is changed from code, so it isn't
         /// echoed back into the binding.
         private var syncing = false
@@ -184,28 +237,16 @@ struct FileTable: NSViewRepresentable {
         func load(_ rows: [FileRow], marks: Set<String>?, selection: Set<String>) {
             guard let table else { return }
             if rows != source {
-                let before = shown.map(\.id)
                 source = rows
-                resort()
                 self.marks = marks
-                if shown.map(\.id) == before {
-                    // Same rows in the same order, new values (a scan filling
-                    // in sizes): only the rows on screen are drawn again.
-                    reloadVisible(table)
-                } else {
-                    table.reloadData()
-                    select(selection)
-                }
-                if QLPreviewPanel.sharedPreviewPanelExists() && QLPreviewPanel.shared().isVisible {
-                    QLPreviewPanel.shared().reloadData()
-                }
+                resort()
             } else if marks != self.marks {
                 self.marks = marks
                 // Only the tick boxes change: set in place, no cell made again.
                 let col = table.column(withIdentifier: NSUserInterfaceItemIdentifier(FileColumn.name.rawValue))
                 guard col >= 0 else { return }
                 table.enumerateAvailableRowViews { rowView, row in
-                    guard row < self.shown.count, let cell = rowView.view(atColumn: col) as? NameCell else { return }
+                    guard row < self.shown.count, let cell = rowView.view(atColumn: col) as? FileNameCell else { return }
                     cell.setMarked(marks.map { $0.contains(self.shown[row].id) })
                 }
             }
@@ -234,26 +275,61 @@ struct FileTable: NSViewRepresentable {
         private func resort() {
             let d = table?.sortDescriptors.first
             let col = d.flatMap { $0.key }.flatMap(FileColumn.init) ?? parent.defaultSort
-            let asc = d?.ascending ?? col.ascendingFirst
-            func byName(_ a: FileRow, _ b: FileRow) -> Bool { a.name.localizedStandardCompare(b.name) == .orderedAscending }
-            func ordered<T: Comparable>(_ x: T, _ y: T, _ a: FileRow, _ b: FileRow) -> Bool {
-                x == y ? byName(a, b) : (asc ? x < y : x > y)
+            sortGeneration += 1
+            let request = SortRequest(rows: source, column: col, ascending: d?.ascending ?? col.ascendingFirst, generation: sortGeneration)
+            // Small lists are immediate; a large one keeps its earlier rows
+            // usable while one worker sorts. Updates replace only the pending
+            // request, so repeated refreshes can't start unbounded workers.
+            if source.count <= 512 {
+                pendingSort = nil
+                let rows = source
+                install(Timings.measure(.sort, rows: rows.count) { FileTable.sorted(rows, by: col, ascending: request.ascending) }, generation: request.generation)
+                return
             }
-            shown = source.sorted { a, b in
-                switch col {
-                case .name:
-                    let r = a.name.localizedStandardCompare(b.name)
-                    return asc ? r == .orderedAscending : r == .orderedDescending
-                case .size: return ordered(a.size ?? -1, b.size ?? -1, a, b)
-                case .freeable: return ordered(a.freeable ?? -1, b.freeable ?? -1, a, b)
-                case .change: return ordered(a.change ?? 0, b.change ?? 0, a, b)
-                case .modified: return ordered(a.modified ?? .distantPast, b.modified ?? .distantPast, a, b)
-                case .kind: return ordered(a.kind ?? "", b.kind ?? "", a, b)
-                case .items: return ordered(a.items ?? -1, b.items ?? -1, a, b)
-                case .location:
-                    let r = (a.location ?? "").localizedStandardCompare(b.location ?? "")
-                    return r == .orderedSame ? byName(a, b) : (asc ? r == .orderedAscending : r == .orderedDescending)
+            pendingSort = request
+            guard sortJob == nil else { return }
+            sortJob = Task { [weak self] in
+                while let request = self?.takeSortRequest() {
+                    let sorted = await Task.detached(priority: .userInitiated) {
+                        Timings.measure(.sort, rows: request.rows.count) {
+                            FileTable.sorted(request.rows, by: request.column, ascending: request.ascending)
+                        }
+                    }.value
+                    guard !Task.isCancelled else { return }
+                    self?.install(sorted, generation: request.generation)
                 }
+                self?.sortJob = nil
+            }
+        }
+
+        private func takeSortRequest() -> SortRequest? {
+            defer { pendingSort = nil }
+            return pendingSort
+        }
+
+        func stopSorting() {
+            sortGeneration += 1
+            pendingSort = nil
+            sortJob?.cancel()
+            sortJob = nil
+        }
+
+        private func install(_ rows: [FileRow], generation: Int) {
+            guard generation == sortGeneration, let table else { return }
+            let sameOrder = rows.count == shown.count && zip(rows, shown).allSatisfy { $0.id == $1.id }
+            shown = rows
+            if sameOrder {
+                Timings.measure(.refresh, rows: rows.count) { reloadVisible(table) }
+            } else {
+                Timings.measure(.reload, rows: rows.count) {
+                    syncing = true
+                    table.reloadData()
+                    syncing = false
+                    select(parent.selection)
+                }
+            }
+            if QLPreviewPanel.sharedPreviewPanelExists() && QLPreviewPanel.shared().isVisible {
+                QLPreviewPanel.shared().reloadData()
             }
         }
 
@@ -277,23 +353,28 @@ struct FileTable: NSViewRepresentable {
             guard let id = tableColumn?.identifier, let col = FileColumn(rawValue: id.rawValue), row < shown.count else { return nil }
             let r = shown[row]
             if col == .name {
-                let cell = tableView.makeView(withIdentifier: id, owner: nil) as? NameCell ?? NameCell(identifier: id)
-                cell.configure(r, marked: marks.map { $0.contains(r.id) }) { [weak self] in self?.parent.onToggleMark(r.id) }
+                let cell = tableView.makeView(withIdentifier: id, owner: nil) as? FileNameCell ?? FileNameCell(identifier: id)
+                cell.configure(r, marked: marks.map { $0.contains(r.id) }, dimUnmeasured: parent.columns.contains(.size)) { [weak self] in self?.parent.onToggleMark(r.id) }
                 return cell
             }
-            let cell = tableView.makeView(withIdentifier: id, owner: nil) as? TextCell ?? TextCell(identifier: id)
+            let cell = tableView.makeView(withIdentifier: id, owner: nil) as? FileTextCell ?? FileTextCell(identifier: id)
             cell.configure(r, column: col)
             return cell
+        }
+
+        func tableView(_ tableView: NSTableView, sizeToFitWidthOfColumn column: Int) -> CGFloat {
+            tableView.visibleContentWidth(of: column)
+        }
+
+        func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
+            LinedRowView.make(in: tableView)
         }
 
         func tableView(_ tableView: NSTableView, sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]) {
             if let d = tableView.sortDescriptors.first, let key = d.key {
                 UserDefaults.standard.set("\(key):\(d.ascending ? "a" : "d")", forKey: parent.autosave + ".sort")
             }
-            let keep = selectedIDs
             resort()
-            tableView.reloadData()
-            select(keep)
         }
 
         func tableViewSelectionDidChange(_ notification: Notification) {
@@ -321,6 +402,10 @@ struct FileTable: NSViewRepresentable {
         // MARK: Menus
 
         func menuNeedsUpdate(_ menu: NSMenu) {
+            Timings.measure(.menu) { updateMenu(menu) }
+        }
+
+        private func updateMenu(_ menu: NSMenu) {
             menu.removeAllItems()
             guard let table else { return }
             if menu === headerMenu {
@@ -333,6 +418,7 @@ struct FileTable: NSViewRepresentable {
                     item.state = col.isHidden ? .off : .on
                     menu.addItem(item)
                 }
+                table.addColumnWidthActions(to: menu)
                 return
             }
             let ids = targetIDs(clicked: table.clickedRow)
@@ -345,7 +431,7 @@ struct FileTable: NSViewRepresentable {
                 switch e {
                 case .action(let title, let run): menu.addItem(ClosureMenuItem(title, run))
                 case .quickLook:
-                    menu.addItem(ClosureMenuItem("Quick Look") { [weak self] in
+                    menu.addItem(ClosureMenuItem(String(localized: "Quick Look")) { [weak self] in
                         guard let table = self?.table else { return }
                         if table.clickedRow >= 0, !table.selectedRowIndexes.contains(table.clickedRow) {
                             table.selectRowIndexes([table.clickedRow], byExtendingSelection: false)
@@ -368,9 +454,16 @@ struct FileTable: NSViewRepresentable {
 }
 
 /// The table view itself: keys, hover, Quick Look.
-final class FileTableView: NSTableView {
+final class FileTableView: NSTableView, LinedTable {
     weak var coordinator: FileTable.Coordinator?
+    var lines = TableLines.none
+    var lineColor = NSColor.separatorColor
     private var tracking: NSTrackingArea?
+
+    override func drawBackground(inClipRect clipRect: NSRect) {
+        super.drawBackground(inClipRect: clipRect)
+        drawColumnLinesAboveRows(in: clipRect)
+    }
 
     override func keyDown(with event: NSEvent) {
         switch event.keyCode {
@@ -436,7 +529,7 @@ extension FileTableView: @preconcurrency QLPreviewPanelDataSource {
 
 // MARK: - Cells (laid out by hand: cheap, and exact at a fixed row height)
 
-private final class NameCell: NSTableCellView {
+final class FileNameCell: NSTableCellView, ColumnWidthProviding {
     private let check = NSButton(checkboxWithTitle: "", target: nil, action: nil)
     private let icon = NSImageView()
     private let label = NSTextField(wrappingLabelWithString: "")
@@ -446,6 +539,12 @@ private final class NameCell: NSTableCellView {
     private var showsCheck = false
     private var name = ""
     private var onToggle: () -> Void = {}
+    private var normalBadgeTint = NSColor.systemGreen
+    private var choiceIsEditable = true
+
+    override var backgroundStyle: NSView.BackgroundStyle {
+        didSet { updateBadgeColors() }
+    }
 
     init(identifier: NSUserInterfaceItemIdentifier) {
         super.init(frame: .zero)
@@ -464,7 +563,7 @@ private final class NameCell: NSTableCellView {
         badge.wantsLayer = true
         badge.layer?.cornerRadius = 4
         badge.layer?.backgroundColor = NSColor.systemGreen.withAlphaComponent(0.15).cgColor
-        lock.image = NSImage(systemSymbolName: "lock.fill", accessibilityDescription: "Unreadable")
+        lock.image = NSImage(systemSymbolName: "lock.fill", accessibilityDescription: String(localized: "Unreadable"))
         lock.contentTintColor = .systemOrange
         sub.font = .systemFont(ofSize: 11)
         sub.textColor = .secondaryLabelColor
@@ -475,26 +574,51 @@ private final class NameCell: NSTableCellView {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    func configure(_ r: FileRow, marked: Bool?, onToggle: @escaping () -> Void) {
+    func configure(_ r: FileRow, marked: Bool?, dimUnmeasured: Bool = true, onToggle: @escaping () -> Void) {
         showsCheck = marked != nil
         check.isHidden = marked == nil
         check.state = marked == true ? .on : .off
-        check.isEnabled = r.size != nil
+        choiceIsEditable = r.size != nil && r.canChoose
+        check.isEnabled = choiceIsEditable
+        check.setAccessibilityLabel(String(localized: "Choose \(r.name) for removal"))
+        check.toolTip = r.choiceHelp ?? String(localized: "Choose for removal. ⌫ chooses or unchooses the selected rows.")
         self.onToggle = onToggle
         icon.image = NSImage(systemSymbolName: r.symbol, accessibilityDescription: nil)
         icon.contentTintColor = r.tint ?? .secondaryLabelColor
         name = r.name
         sub.stringValue = r.subtitle ?? ""
+        sub.toolTip = r.subtitle
+        toolTip = [r.name, r.subtitle].compactMap { $0 }.joined(separator: "\n")
         sub.isHidden = r.subtitle == nil
         label.stringValue = Breakable.text(r.name)
-        label.textColor = r.size == nil ? .secondaryLabelColor : .labelColor
+        label.textColor = dimUnmeasured && r.size == nil ? .secondaryLabelColor : .labelColor
         label.toolTip = r.name
         badge.isHidden = r.badge == nil
         badge.stringValue = r.badge ?? ""
-        badge.toolTip = r.badgeHelp
+        normalBadgeTint = r.badgeTint ?? .systemGreen
+        updateBadgeColors()
+        badge.toolTip = r.badgeHelp ?? r.badge
         lock.isHidden = !r.locked
-        lock.toolTip = r.locked ? "MyMole couldn't read inside this folder" : nil
+        lock.toolTip = r.locked ? String(localized: "MyMole couldn't read inside this folder") : nil
         needsLayout = true
+    }
+
+    var preferredColumnWidth: CGFloat {
+        let text = max((name as NSString).size(withAttributes: [.font: label.font as Any]).width,
+                       (sub.stringValue as NSString).size(withAttributes: [.font: sub.font as Any]).width)
+        let trailing = (badge.isHidden ? 0 : badge.intrinsicContentSize.width + 16) + (lock.isHidden ? 0 : 18)
+        return ceil(text + DS.Table.cellInset + DS.Table.iconStep + (showsCheck ? DS.Table.tickStep : 0) + trailing + 16)
+    }
+
+    private func updateBadgeColors() {
+        let color: NSColor = backgroundStyle == .emphasized ? .selectedControlTextColor : normalBadgeTint
+        badge.textColor = color
+        badge.layer?.backgroundColor = color.withAlphaComponent(0.15).cgColor
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateBadgeColors()
     }
 
     @objc private func toggled() { onToggle() }
@@ -504,16 +628,21 @@ private final class NameCell: NSTableCellView {
         if check.state != state { check.state = state }
     }
 
+    func setChoosingEnabled(_ enabled: Bool, help: String? = nil) {
+        check.isEnabled = enabled && choiceIsEditable
+        if let help { check.toolTip = help }
+    }
+
     override func layout() {
         super.layout()
         let h = bounds.height
         var x: CGFloat = DS.Table.cellInset
         if showsCheck {
             check.frame = NSRect(x: x, y: (h - 18) / 2, width: 18, height: 18)
-            x += 22
+            x += DS.Table.tickStep
         }
         icon.frame = NSRect(x: x, y: (h - 16) / 2, width: 16, height: 16)
-        x += 22
+        x += DS.Table.iconStep
         var right = bounds.width - 2
         if !lock.isHidden {
             lock.frame = NSRect(x: right - 12, y: (h - 12) / 2, width: 12, height: 12)
@@ -560,7 +689,7 @@ private final class NameCell: NSTableCellView {
     }
 }
 
-private final class TextCell: NSTableCellView {
+final class FileTextCell: NSTableCellView, ColumnWidthProviding {
     private let label = NSTextField(wrappingLabelWithString: "")
 
     init(identifier: NSUserInterfaceItemIdentifier) {
@@ -584,7 +713,7 @@ private final class TextCell: NSTableCellView {
         label.toolTip = nil
         switch column {
         case .size:
-            label.stringValue = r.size.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? "Scanning…"
+            label.stringValue = r.size.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? String(localized: "Scanning…")
             if r.size == nil { label.textColor = .tertiaryLabelColor }
         case .freeable:
             label.stringValue = r.freeable.map { $0 > 0 ? ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) : "—" } ?? ""
@@ -607,7 +736,13 @@ private final class TextCell: NSTableCellView {
             label.toolTip = r.location
         case .name: break
         }
+        if label.toolTip == nil, !label.stringValue.isEmpty { label.toolTip = label.stringValue }
+        toolTip = label.toolTip
         needsLayout = true
+    }
+
+    var preferredColumnWidth: CGFloat {
+        ceil((label.stringValue as NSString).size(withAttributes: [.font: label.font as Any]).width + 16)
     }
 
     override func layout() {
@@ -620,79 +755,6 @@ private final class TextCell: NSTableCellView {
 }
 
 extension NSTableView {
-    /// Gives the flexible column whatever width the others leave, growing
-    /// or shrinking it, so the table fills its view and never scrolls
-    /// sideways. AppKit's own first-column resizing never shrinks a table
-    /// that starts out too wide.
-    ///
-    /// When space runs short the flexible column gives way down to a
-    /// comfortable width, then the other columns down to their minimum, and
-    /// only then the flexible column below that: names stay readable longest.
-    func fitFlexibleColumn(_ id: String, comfortable: CGFloat = 200) {
-        guard let clip = enclosingScrollView?.contentView, clip.bounds.width > 0,
-            let col = tableColumn(withIdentifier: NSUserInterfaceItemIdentifier(id)), !col.isHidden
-        else { return }
-        let visible = tableColumns.indices.filter { !tableColumns[$0].isHidden }
-        guard let first = visible.first, let last = visible.last else { return }
-        let lead = rect(ofColumn: first).minX
-        var excess = rect(ofColumn: last).maxX + lead - clip.bounds.width
-        // Narrower than comfortable while others have room to give: they give it.
-        if excess <= 0.5, col.width < comfortable {
-            var want = comfortable - col.width + max(0, -excess)
-            for i in visible.reversed() where want > 0.5 {
-                let other = tableColumns[i]
-                guard other !== col else { continue }
-                let take = min(want, other.width - other.minWidth)
-                if take > 0 {
-                    other.width -= take
-                    want -= take
-                }
-            }
-            excess = rect(ofColumn: last).maxX + lead - clip.bounds.width
-        }
-        guard abs(excess) > 0.5 else { return }
-        if excess < 0 {
-            col.width = min(col.maxWidth, col.width - excess)
-            return
-        }
-        let floor = max(col.minWidth, min(comfortable, col.width))
-        let give = min(excess, col.width - floor)
-        col.width -= give
-        excess -= give
-        for i in visible.reversed() where excess > 0.5 {
-            let other = tableColumns[i]
-            guard other !== col else { continue }
-            let take = min(excess, other.width - other.minWidth)
-            if take > 0 {
-                other.width -= take
-                excess -= take
-            }
-        }
-        if excess > 0.5 { col.width = max(col.minWidth, col.width - excess) }
-    }
-
-    /// Keeps `id` fitted as the view resizes and the other columns are resized.
-    func keepFitting(_ id: String) -> [NSObjectProtocol] {
-        guard let clip = enclosingScrollView?.contentView else { return [] }
-        clip.postsFrameChangedNotifications = true
-        let nc = NotificationCenter.default
-        DispatchQueue.main.async { [weak self] in self?.fitFlexibleColumn(id) }
-        return [
-            nc.addObserver(forName: NSView.frameDidChangeNotification, object: clip, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.fitFlexibleColumn(id) }
-            },
-            // Another column resized by hand: the flexible one gives or takes
-            // the difference. Its own resizing is left as the user made it.
-            nc.addObserver(forName: NSTableView.columnDidResizeNotification, object: self, queue: .main) { [weak self] n in
-                let resized = (n.userInfo?["NSTableColumn"] as? NSTableColumn).map { ObjectIdentifier($0) }
-                MainActor.assumeIsolated {
-                    guard let self, resized != self.tableColumn(withIdentifier: NSUserInterfaceItemIdentifier(id)).map(ObjectIdentifier.init) else { return }
-                    self.fitFlexibleColumn(id)
-                }
-            },
-        ]
-    }
-
     /// Draws again the rows that have cells: those on screen and the few
     /// AppKit prepared just past its edges, which would otherwise show what
     /// they showed before when scrolled in.

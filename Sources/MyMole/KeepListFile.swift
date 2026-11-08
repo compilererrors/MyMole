@@ -9,8 +9,8 @@ struct KeepListFile {
     let url: URL
     /// What applies now: the saved list with the unsaved change.
     private(set) var list = CleanKeepList()
-    private(set) var readError: String?
-    private(set) var saveError: String?
+    private(set) var readError: Problem?
+    private(set) var saveError: Problem?
     private var saved = CleanKeepList()
     private var added = Set<String>()
     private var removed = Set<String>()
@@ -24,8 +24,8 @@ struct KeepListFile {
 
     /// Why nothing may be removed against this list now, or nil.
     var blocker: String? {
-        if readError != nil { return "The keep list couldn't be read." }
-        if hasUnsavedChange { return "A change to the keep list hasn't been saved." }
+        if readError != nil { return String(localized: "The keep list couldn't be read.") }
+        if hasUnsavedChange { return String(localized: "A change to the keep list hasn't been saved.") }
         return nil
     }
 
@@ -36,7 +36,7 @@ struct KeepListFile {
                 saved = try CleanKeepList.load(from: url)
                 readError = nil
             } catch {
-                readError = error.localizedDescription
+                readError = Problem(.keepList, error)
             }
             saveError = nil
             refresh()
@@ -55,10 +55,10 @@ struct KeepListFile {
         } catch {
             // Told apart so the notice says what really went wrong.
             if (try? CleanKeepList.load(from: url)) == nil {
-                readError = error.localizedDescription
+                readError = Problem(.keepList, error)
             } else {
                 readError = nil
-                saveError = error.localizedDescription
+                saveError = Problem(.keepList, error)
             }
         }
         refresh()

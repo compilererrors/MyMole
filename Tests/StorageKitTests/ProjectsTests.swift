@@ -196,6 +196,40 @@ import Testing
         #expect(fp.items.map(\.id) == ["src", "s", "g"])
     }
 
+    @Test func growthNeverMeasuresAgainstAnIncompleteScan() throws {
+        let box = try Sandbox()
+        let project = DevProject(path: "/p", markers: [])
+        func sized(_ bytes: Int64, incomplete: Bool = false) -> ProjectFootprint {
+            var f = ProjectFootprint(project: project, items: [item("x", .build, [("/p/x", bytes, 0)])])
+            f.incomplete = incomplete
+            return f
+        }
+        let hour: TimeInterval = 3_600
+        func save(_ f: ProjectFootprint, at h: Double) -> [ProjectStore.Sample] {
+            ProjectStore.save([f], roots: ["/w"], date: Date(timeIntervalSince1970: h * hour), base: box.url)["/p"] ?? []
+        }
+        _ = save(sized(1_000), at: 0)
+        // A day later part of it couldn't be read: no shrink of 900.
+        var samples = save(sized(100, incomplete: true), at: 25)
+        #expect(samples.last?.incomplete == true)
+        #expect(ProjectStore.growth(samples) == nil)
+        // Readable again a day after that: growth is against the complete
+        // sample, not a jump from the partial one.
+        _ = save(sized(1_000), at: 31)
+        samples = save(sized(1_050), at: 50)
+        let g = try #require(ProjectStore.growth(samples))
+        #expect(g.bytes == 50 && g.since == Date(timeIntervalSince1970: 0))
+        // An unmeasured project is no sample to measure against either.
+        let unmeasured = ProjectFootprint(project: project, items: [], measured: false)
+        #expect(save(unmeasured, at: 80).last?.incomplete == true)
+    }
+
+    @Test func samplesSavedBeforeTheFlagReadAsComplete() throws {
+        let old = Data(#"[{"date":0,"bytes":5}]"#.utf8)
+        let samples = try JSONDecoder().decode([ProjectStore.Sample].self, from: old)
+        #expect(samples == [ProjectStore.Sample(date: Date(timeIntervalSinceReferenceDate: 0), bytes: 5)])
+    }
+
     @Test func growthIsMeasuredOverADay() throws {
         let box = try Sandbox()
         let project = DevProject(path: "/p", markers: [])

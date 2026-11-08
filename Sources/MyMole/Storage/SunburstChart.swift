@@ -5,6 +5,7 @@ import SwiftUI
 /// each ring out is the next level down. Click a segment to step into it,
 /// click the middle to step back out.
 struct SunburstChart: View {
+    @Environment(\.palette) private var palette
     @Bindable var model: StorageModel
     @State private var arcs: [Arc] = []
 
@@ -21,7 +22,7 @@ struct SunburstChart: View {
                             for: arc.segment, branch: arc.branch, depth: arc.depth, byKind: model.colorByKind)
                         let path = g.path(arc)
                         ctx.fill(path, with: .color(hot ? color.mix(with: .white, by: 0.35) : color))
-                        ctx.stroke(path, with: .color(Color(nsColor: .windowBackgroundColor)), lineWidth: 1)
+                        ctx.stroke(path, with: .color(palette.workspace.color), lineWidth: 1)
                     }
                 }
                 center(g)

@@ -19,9 +19,9 @@ enum FileActions {
 
     /// The same items as `FileMenuItems`, for AppKit-backed tables.
     @MainActor static func menu(_ paths: [String], canOpen: Bool = true) -> [TableMenuEntry] {
-        var out: [TableMenuEntry] = [.action("Reveal in Finder") { reveal(paths) }]
-        if canOpen, paths.count == 1, let p = paths.first { out.append(.action("Open with Default App") { open(p) }) }
-        out.append(.action(paths.count == 1 ? "Copy Path" : "Copy \(paths.count) Paths") { copy(paths) })
+        var out: [TableMenuEntry] = [.action(String(localized: "Reveal in Finder")) { reveal(paths) }]
+        if canOpen, paths.count == 1, let p = paths.first { out.append(.action(String(localized: "Open with Default App")) { open(p) }) }
+        out.append(.action(paths.count == 1 ? String(localized: "Copy Path") : String(localized: "Copy \(paths.count) Paths")) { copy(paths) })
         return out
     }
 }
@@ -37,6 +37,6 @@ struct FileMenuItems: View {
         if canOpen, paths.count == 1, let p = paths.first {
             Button("Open with Default App") { FileActions.open(p) }
         }
-        Button(paths.count == 1 ? "Copy Path" : "Copy \(paths.count) Paths") { FileActions.copy(paths) }
+        Button(paths.count == 1 ? String(localized: "Copy Path") : String(localized: "Copy \(paths.count) Paths")) { FileActions.copy(paths) }
     }
 }

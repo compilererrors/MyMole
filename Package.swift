@@ -60,7 +60,8 @@ let package = Package(
         .testTarget(
             name: "StorageKitTests",
             dependencies: ["StorageKit"],
-            path: "Tests/StorageKitTests"
+            path: "Tests/StorageKitTests",
+            resources: [.copy("Fixtures/UninstallCorpus.json")]
         ),
         .testTarget(
             name: "PrivilegedKitTests",

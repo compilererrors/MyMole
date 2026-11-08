@@ -84,7 +84,8 @@ extension ProjectsModel {
     /// chosen whole. Inside a chosen folder, unchoosing leaves it out: the
     /// folder still goes, it stays.
     func toggle(path: String) {
-        guard let o = owner(of: path) else { return }
+        // What Deep Clean keeps is never chosen here.
+        guard !isKeptElsewhere(path), let o = owner(of: path) else { return }
         let top = o.entry.path
         let wasOff = state(of: path) != .on
         // Only what's above the path decides; what was inside it starts over.

@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 import PrivilegedKit
 import StorageKit
 import Testing
@@ -29,7 +30,7 @@ import Testing
     func model(asked: Asked) -> SystemCleanModel {
         let backend = SystemCleanModel.Backend(
             isReady: { true },
-            scan: { Self.found },
+            scan: { _ in SystemCleanListing(candidates: Self.found) },
             remove: { paths, keep in
                 if asked.holds { await withCheckedContinuation { asked.gate = $0 } }
                 asked.removed.append(paths)
@@ -38,9 +39,11 @@ import Testing
                 r.removed = paths
                 return r
             })
-        return SystemCleanModel(
+        let m = SystemCleanModel(
             privileged: PrivilegedClient(toolPath: nil), logURL: dir.appending(path: "history.json"),
             keepURL: keepURL, backend: backend)
+        m.lookForStaging = { [] }
+        return m
     }
 
     @Test func keptItemsAreNeverChosenOrSentToTheHelper() async throws {
@@ -128,7 +131,7 @@ import Testing
         let asked = Asked()
         let m = SystemCleanModel(
             privileged: PrivilegedClient(toolPath: nil), logURL: dir.appending(path: "history.json"), keepURL: url,
-            backend: .init(isReady: { true }, scan: { Self.found }, remove: { p, _ in asked.removed.append(p); return RemovalReport() }))
+            backend: .init(isReady: { true }, scan: { _ in SystemCleanListing(candidates: Self.found) }, remove: { p, _ in asked.removed.append(p); return RemovalReport() }))
         m.scan()
         await m.scanJob?.value
         try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: locked.path)
@@ -158,7 +161,7 @@ import Testing
         try Data().write(to: URL(fileURLWithPath: url.path + ".lock"))
         let m = SystemCleanModel(
             privileged: PrivilegedClient(toolPath: nil), logURL: dir.appending(path: "history.json"), keepURL: url,
-            backend: .init(isReady: { true }, scan: { Self.found }, remove: { _, _ in RemovalReport() }))
+            backend: .init(isReady: { true }, scan: { _ in SystemCleanListing(candidates: Self.found) }, remove: { _, _ in RemovalReport() }))
         try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: locked.path)
         m.stopKeeping(["/Library/Caches/com.vendor.Kept"])
         #expect(m.keepSaveError != nil && !m.keep.protects("/Library/Caches/com.vendor.Kept"))
@@ -171,7 +174,7 @@ import Testing
         let staged = "/Library/Caches/.mymole-removing/job/remainder"
         let m = SystemCleanModel(
             privileged: PrivilegedClient(toolPath: nil), logURL: dir.appending(path: "history.json"), keepURL: keepURL,
-            backend: .init(isReady: { true }, scan: { Self.found }, remove: { paths, _ in
+            backend: .init(isReady: { true }, scan: { _ in SystemCleanListing(candidates: Self.found) }, remove: { paths, _ in
                 var r = RemovalReport()
                 r.failed[paths[0]] = "Part of it couldn't be removed; what was left is kept at \(staged)."
                 return r
@@ -208,5 +211,28 @@ import Testing
         other.reloadKeepList()
         #expect(other.keepSaveError == nil)
         #expect(try CleanKeepList.load(from: keepURL).paths.isEmpty)
+    }
+
+    @Test func aStoppedScanKeepsTheLastCompleteList() async throws {
+        let second = Mutex(false)
+        let backend = SystemCleanModel.Backend(
+            isReady: { true },
+            scan: { p in
+                guard second.withLock({ $0 }) else { return SystemCleanListing(candidates: Self.found) }
+                // Stopped while it ran: what it had is a part only.
+                p.cancel()
+                return SystemCleanListing(candidates: [Self.found[0]])
+            },
+            remove: { _, _ in RemovalReport() })
+        let m = SystemCleanModel(
+            privileged: PrivilegedClient(toolPath: nil), logURL: dir.appending(path: "history.json"), keepURL: keepURL, backend: backend)
+        m.lookForStaging = { [] }
+        m.scan()
+        await m.scanJob?.value
+        #expect(m.candidates.count == 3)
+        second.withLock { $0 = true }
+        m.scan()
+        await m.scanJob?.value
+        #expect(m.candidates.count == 3 && !m.scanning)
     }
 }

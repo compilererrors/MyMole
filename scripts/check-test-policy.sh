@@ -34,7 +34,7 @@ done < <(find Tests -name '*.swift' | sort)
 
 # Every move to the Trash goes through Trasher's gate, and only known
 # places delete: the helper's staging and safe removal, MyMole's own
-# snapshot store.
+# snapshot store, and emptying the Trash.
 only() {
   local pattern=$1 file allowed; shift
   for file in $(grep -rlE "$pattern" Sources || true); do
@@ -46,6 +46,7 @@ only() {
 only 'trashItem\(' Sources/StorageKit/Trash.swift
 only '\.recycle\(' Sources/MyMole/Uninstall/AppsModel.swift
 only '(removeItem|moveItem|replaceItem)\(at(Path)?:|replaceItemAt\(|(^|[^a-zA-Z_.])(unlink|unlinkat|rmdir|removefile)\(' Sources/StorageKit/Trash.swift Sources/StorageKit/Snapshot.swift \
+  Sources/StorageKit/TrashEmpty.swift \
   Sources/PrivilegedKit/SystemCleanup.swift Sources/PrivilegedKit/SecureRemove.swift Sources/PrivilegedKit/Staging.swift Sources/PrivilegedKit/SystemLeftovers.swift
 # Renames move things too: only Undo and the helper's staging rename.
 only '(^|[^a-zA-Z_.])(rename|renamex_np|renameat|renameatx_np)\(' Sources/StorageKit/Trash.swift Sources/PrivilegedKit/Staging.swift

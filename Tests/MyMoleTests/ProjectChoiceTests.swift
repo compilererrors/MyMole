@@ -123,4 +123,23 @@ import Testing
         m.clearChoice(in: [box.project])
         #expect(m.chosen.isEmpty && m.check(build) == .off)
     }
+
+    @Test func dataTiedByANameAloneIsNeverChosenForTheUser() throws {
+        let box = try Box()
+        let p = box.project
+        let outside = box.root + "/Caches/com.vendor.App"
+        try FileManager.default.createDirectory(atPath: outside, withIntermediateDirectories: true)
+        let named = FootprintItem(
+            id: p + "#named", category: .build, title: "com.vendor.App", location: outside, attribution: .nameMatch,
+            entries: [FootprintEntry(path: outside, bytes: 4096, modified: .distantPast)])
+        let build = FootprintItem(
+            id: p + "#build", category: .build, title: ".build", location: p, attribution: .inside,
+            entries: [FootprintEntry(path: p + "/.build", bytes: 4096, modified: .distantPast)])
+        let f = ProjectFootprint(project: DevProject(path: p, markers: [".git"]), items: [named, build])
+        let store = URL(fileURLWithPath: box.root + "/store")
+        let m = ProjectsModel(footprints: [f], base: store, defaults: testDefaults(in: store), logURL: store.appending(path: "history.json"))
+        m.chooseRebuildable(in: [f.id])
+        #expect(m.chosen == [p + "/.build"])
+        #expect(m.notice?.text.contains("matched by name only") == true)
+    }
 }

@@ -11,12 +11,16 @@ public struct SystemSnapshot: Sendable, Equatable {
         public var memoryBytes: Int64?
         /// "macOS 26.1".
         public var osVersion: String
+        /// The startup disk's own health check (SMART): "Verified", "Failing",
+        /// or nil when the disk or this edition can't say.
+        public var diskHealth: String?
 
-        public init(model: String?, chip: String?, memoryBytes: Int64?, osVersion: String) {
+        public init(model: String?, chip: String?, memoryBytes: Int64?, osVersion: String, diskHealth: String? = nil) {
             self.model = model
             self.chip = chip
             self.memoryBytes = memoryBytes
             self.osVersion = osVersion
+            self.diskHealth = diskHealth
         }
     }
 
@@ -193,7 +197,8 @@ public struct SystemSnapshot: Sendable, Equatable {
         self.battery = battery
         self.topProcesses = topProcesses
         self.health = Health.assess(
-            memory: memory, startup: volumes.first { $0.mount == "/" } ?? volumes.first, cpu: cpu, battery: battery)
+            memory: memory, startup: volumes.first { $0.mount == "/" } ?? volumes.first, cpu: cpu, battery: battery,
+            diskHealth: hardware.diskHealth)
     }
 
     /// The startup volume, or the first one listed.
@@ -219,14 +224,26 @@ public struct Health: Sendable, Equatable {
 
     public let score: Int
     public let issues: [Issue]
+    /// What couldn't be read for this score ("memory", "the startup disk"):
+    /// missing isn't taken as fine, so a score with gaps isn't called good.
+    public var unknown: [String] = []
 
-    public var summary: String { issues.first?.text ?? "Everything looks good" }
+    /// The score as shown: a dash when what matters most couldn't be read.
+    public var scoreText: String { unknown.isEmpty ? String(score) : issues.isEmpty ? "—" : String(score) }
+
+    public var summary: String {
+        if let first = issues.first?.text { return first }
+        return unknown.isEmpty ? "Everything looks good" : "Couldn't read \(unknown.joined(separator: " and "))"
+    }
 
     public static func assess(
         memory: SystemSnapshot.Memory?, startup: SystemSnapshot.Volume?, cpu: SystemSnapshot.CPU?,
-        battery: SystemSnapshot.Battery?
+        battery: SystemSnapshot.Battery?, diskHealth: String? = nil
     ) -> Health {
         var issues: [Issue] = []
+        if let d = diskHealth, d.lowercased().contains("fail") {
+            issues.append(Issue(penalty: 40, text: "The startup disk reports that it's failing. Back it up now"))
+        }
         if let v = startup, v.total > 0 {
             let p = Int(v.usedPercent.rounded())
             if p >= 95 {
@@ -261,7 +278,9 @@ public struct Health: Sendable, Equatable {
             }
         }
         issues.sort { $0.penalty > $1.penalty }
-        return Health(score: max(0, 100 - issues.reduce(0) { $0 + $1.penalty }), issues: issues)
+        var h = Health(score: max(0, 100 - issues.reduce(0) { $0 + $1.penalty }), issues: issues)
+        h.unknown = [memory == nil ? "memory" : nil, (startup?.total ?? 0) > 0 ? nil : "the startup disk"].compactMap { $0 }
+        return h
     }
 
     private static func format(_ b: Int64) -> String { ByteCountFormatter.string(fromByteCount: b, countStyle: .memory) }
