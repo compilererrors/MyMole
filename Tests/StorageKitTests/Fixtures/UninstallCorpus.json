@@ -356,7 +356,7 @@
         {
           "path": "Library/Caches/Example/Starlight",
           "evidence": "vendorFolder",
-          "chosen": true
+          "chosen": false
         }
       ],
       "mustKeep": [],
@@ -506,7 +506,7 @@
         {
           "path": "Library/Application Support/com.apple.sharedfilelist/com.apple.LSSharedFileList.ApplicationRecentDocuments/org.example.starlight.sfl2",
           "evidence": "bundleID",
-          "chosen": true
+          "chosen": false
         }
       ],
       "mustKeep": [],
@@ -700,6 +700,477 @@
         "Library/Caches/org.example.Launcher"
       ],
       "blocked": false
+    },
+    {
+      "id": "persistent_webkit_is_review_only",
+      "deep": false,
+      "apps": [
+        {
+          "key": "target",
+          "name": "Starlight",
+          "bundleID": "org.example.Starlight",
+          "helpers": [],
+          "groups": []
+        }
+      ],
+      "files": [
+        "Library/WebKit/org.example.Starlight/WebsiteData/IndexedDB/offline.db"
+      ],
+      "links": {},
+      "expected": [
+        {
+          "path": "Library/WebKit/org.example.Starlight",
+          "evidence": "bundleID",
+          "chosen": false
+        }
+      ],
+      "mustKeep": [],
+      "blocked": false
+    },
+    {
+      "id": "persistent_httpstorages_is_review_only",
+      "deep": false,
+      "apps": [
+        {
+          "key": "target",
+          "name": "Starlight",
+          "bundleID": "org.example.Starlight",
+          "helpers": [],
+          "groups": []
+        }
+      ],
+      "files": [
+        "Library/HTTPStorages/org.example.Starlight/state.db"
+      ],
+      "links": {},
+      "expected": [
+        {
+          "path": "Library/HTTPStorages/org.example.Starlight",
+          "evidence": "bundleID",
+          "chosen": false
+        }
+      ],
+      "mustKeep": [],
+      "blocked": false
+    },
+    {
+      "id": "persistent_cookies_is_review_only",
+      "deep": false,
+      "apps": [
+        {
+          "key": "target",
+          "name": "Starlight",
+          "bundleID": "org.example.Starlight",
+          "helpers": [],
+          "groups": []
+        }
+      ],
+      "files": [
+        "Library/Cookies/org.example.Starlight.binarycookies"
+      ],
+      "links": {},
+      "expected": [
+        {
+          "path": "Library/Cookies/org.example.Starlight.binarycookies",
+          "evidence": "bundleID",
+          "chosen": false
+        }
+      ],
+      "mustKeep": [],
+      "blocked": false
+    },
+    {
+      "id": "persistent_saved_application_state_is_review_only",
+      "deep": false,
+      "apps": [
+        {
+          "key": "target",
+          "name": "Starlight",
+          "bundleID": "org.example.Starlight",
+          "helpers": [],
+          "groups": []
+        }
+      ],
+      "files": [
+        "Library/Saved Application State/org.example.Starlight.savedState/windows.data"
+      ],
+      "links": {},
+      "expected": [
+        {
+          "path": "Library/Saved Application State/org.example.Starlight.savedState",
+          "evidence": "bundleID",
+          "chosen": false
+        }
+      ],
+      "mustKeep": [],
+      "blocked": false
+    },
+    {
+      "id": "persistent_application_scripts_is_review_only",
+      "deep": false,
+      "apps": [
+        {
+          "key": "target",
+          "name": "Starlight",
+          "bundleID": "org.example.Starlight",
+          "helpers": [],
+          "groups": []
+        }
+      ],
+      "files": [
+        "Library/Application Scripts/org.example.Starlight/custom.scpt"
+      ],
+      "links": {},
+      "expected": [
+        {
+          "path": "Library/Application Scripts/org.example.Starlight",
+          "evidence": "bundleID",
+          "chosen": false
+        }
+      ],
+      "mustKeep": [],
+      "blocked": false
+    },
+    {
+      "id": "launch_configuration_is_review_only",
+      "deep": false,
+      "apps": [
+        {
+          "key": "target",
+          "name": "Starlight",
+          "bundleID": "org.example.Starlight",
+          "helpers": [],
+          "groups": []
+        }
+      ],
+      "files": [
+        "Library/LaunchAgents/org.example.Starlight.plist"
+      ],
+      "links": {},
+      "expected": [
+        {
+          "path": "Library/LaunchAgents/org.example.Starlight.plist",
+          "evidence": "bundleID",
+          "chosen": false
+        }
+      ],
+      "mustKeep": [],
+      "blocked": false
+    },
+    {
+      "id": "shared_group_cannot_reappear_by_group_id",
+      "deep": false,
+      "apps": [
+        {
+          "key": "target",
+          "name": "Starlight",
+          "bundleID": "org.example.Starlight",
+          "helpers": [],
+          "groups": [
+            "group.org.example.Starlight"
+          ]
+        },
+        {
+          "key": "peer",
+          "name": "Viewer",
+          "bundleID": "net.peer.Viewer",
+          "helpers": [],
+          "groups": [
+            "group.org.example.Starlight"
+          ]
+        }
+      ],
+      "files": [
+        "Library/Group Containers/group.org.example.Starlight/shared.db"
+      ],
+      "links": {},
+      "expected": [],
+      "mustKeep": [
+        "Library/Group Containers/group.org.example.Starlight"
+      ],
+      "blocked": false
+    },
+    {
+      "id": "shared_group_cannot_reappear_by_team_id",
+      "deep": false,
+      "apps": [
+        {
+          "key": "target",
+          "name": "Starlight",
+          "bundleID": "org.example.Starlight",
+          "helpers": [],
+          "groups": [
+            "ABCDE12345.org.example.Starlight"
+          ]
+        },
+        {
+          "key": "peer",
+          "name": "Viewer",
+          "bundleID": "net.peer.Viewer",
+          "helpers": [],
+          "groups": [
+            "ABCDE12345.org.example.Starlight"
+          ]
+        }
+      ],
+      "files": [
+        "Library/Group Containers/ABCDE12345.org.example.Starlight/shared.db"
+      ],
+      "links": {},
+      "expected": [],
+      "mustKeep": [
+        "Library/Group Containers/ABCDE12345.org.example.Starlight"
+      ],
+      "blocked": false
+    },
+    {
+      "id": "unsigned_group_name_is_not_ownership",
+      "deep": false,
+      "apps": [
+        {
+          "key": "target",
+          "name": "Starlight",
+          "bundleID": "org.example.Starlight",
+          "helpers": [],
+          "groups": []
+        }
+      ],
+      "files": [
+        "Library/Group Containers/group.org.example.Starlight/unknown.db"
+      ],
+      "links": {},
+      "expected": [],
+      "mustKeep": [
+        "Library/Group Containers/group.org.example.Starlight"
+      ],
+      "blocked": false
+    },
+    {
+      "id": "another_apps_nested_copy_keeps_vendor_profile",
+      "deep": false,
+      "apps": [
+        {
+          "key": "target",
+          "name": "Starlight",
+          "bundleID": "org.example.Starlight",
+          "helpers": [],
+          "groups": []
+        },
+        {
+          "key": "peer",
+          "name": "Viewer",
+          "bundleID": "net.peer.Viewer",
+          "helpers": [
+            "org.example.Starlight"
+          ],
+          "groups": []
+        }
+      ],
+      "files": [
+        "Library/Caches/Example/Starlight/data",
+        "Library/Application Support/Example/Starlight/data"
+      ],
+      "links": {},
+      "expected": [],
+      "mustKeep": [
+        "Library/Caches/Example/Starlight",
+        "Library/Application Support/Example/Starlight"
+      ],
+      "blocked": false
+    },
+    {
+      "id": "case_variant_name_is_not_ownership",
+      "deep": false,
+      "apps": [
+        {
+          "key": "target",
+          "name": "Starlight",
+          "bundleID": "org.example.Starlight",
+          "helpers": [],
+          "groups": []
+        },
+        {
+          "key": "peer",
+          "name": "STARLIGHT",
+          "bundleID": "net.peer.Viewer",
+          "helpers": [],
+          "groups": []
+        }
+      ],
+      "files": [
+        "Library/Application Support/Starlight/data"
+      ],
+      "links": {},
+      "expected": [],
+      "mustKeep": [
+        "Library/Application Support/Starlight"
+      ],
+      "blocked": false
+    },
+    {
+      "id": "runtime_exact_ids_are_review_only",
+      "deep": true,
+      "apps": [
+        {
+          "key": "target",
+          "name": "Starlight",
+          "bundleID": "org.example.Starlight",
+          "helpers": [],
+          "groups": []
+        }
+      ],
+      "files": [
+        "Runtime/Caches/org.example.Starlight/cache",
+        "Runtime/Temp/org.example.Starlight/session",
+        "Runtime/Temp/org.example.StarlightExtra/foreign"
+      ],
+      "links": {},
+      "expected": [
+        {
+          "path": "Runtime/Caches/org.example.Starlight",
+          "evidence": "runtimeID",
+          "chosen": false
+        },
+        {
+          "path": "Runtime/Temp/org.example.Starlight",
+          "evidence": "runtimeID",
+          "chosen": false
+        }
+      ],
+      "mustKeep": [
+        "Runtime/Temp/org.example.StarlightExtra"
+      ],
+      "blocked": false,
+      "runtimeRoots": [
+        {
+          "path": "Runtime/Caches",
+          "temporary": false
+        },
+        {
+          "path": "Runtime/Temp",
+          "temporary": true
+        }
+      ]
+    },
+    {
+      "id": "runtime_carried_helper",
+      "deep": true,
+      "apps": [
+        {
+          "key": "target",
+          "name": "Starlight",
+          "bundleID": "org.example.Starlight",
+          "helpers": [
+            "org.example.Worker"
+          ],
+          "groups": []
+        }
+      ],
+      "files": [
+        "Runtime/Caches/org.example.Worker/cache"
+      ],
+      "links": {},
+      "expected": [
+        {
+          "path": "Runtime/Caches/org.example.Worker",
+          "evidence": "runtimeID",
+          "chosen": false
+        }
+      ],
+      "mustKeep": [],
+      "blocked": false,
+      "runtimeRoots": [
+        {
+          "path": "Runtime/Caches",
+          "temporary": false
+        },
+        {
+          "path": "Runtime/Temp",
+          "temporary": true
+        }
+      ]
+    },
+    {
+      "id": "runtime_shared_helper_stays",
+      "deep": true,
+      "apps": [
+        {
+          "key": "target",
+          "name": "Starlight",
+          "bundleID": "org.example.Starlight",
+          "helpers": [
+            "org.example.Worker"
+          ],
+          "groups": []
+        },
+        {
+          "key": "peer",
+          "name": "Viewer",
+          "bundleID": "net.peer.Viewer",
+          "helpers": [
+            "org.example.Worker"
+          ],
+          "groups": []
+        }
+      ],
+      "files": [
+        "Runtime/Caches/org.example.Worker/cache"
+      ],
+      "links": {},
+      "expected": [],
+      "mustKeep": [
+        "Runtime/Caches/org.example.Worker"
+      ],
+      "blocked": false,
+      "runtimeRoots": [
+        {
+          "path": "Runtime/Caches",
+          "temporary": false
+        },
+        {
+          "path": "Runtime/Temp",
+          "temporary": true
+        }
+      ]
+    },
+    {
+      "id": "runtime_other_copy_stays",
+      "deep": true,
+      "apps": [
+        {
+          "key": "target",
+          "name": "Starlight",
+          "bundleID": "org.example.Starlight",
+          "helpers": [],
+          "groups": []
+        },
+        {
+          "key": "peer",
+          "name": "Viewer",
+          "bundleID": "org.example.Starlight",
+          "helpers": [],
+          "groups": []
+        }
+      ],
+      "files": [
+        "Runtime/Temp/org.example.Starlight/session"
+      ],
+      "links": {},
+      "expected": [],
+      "mustKeep": [
+        "Runtime/Temp/org.example.Starlight"
+      ],
+      "blocked": false,
+      "runtimeRoots": [
+        {
+          "path": "Runtime/Caches",
+          "temporary": false
+        },
+        {
+          "path": "Runtime/Temp",
+          "temporary": true
+        }
+      ]
     }
   ]
 }

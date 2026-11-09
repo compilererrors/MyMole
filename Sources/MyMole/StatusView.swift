@@ -15,31 +15,32 @@ struct StatusView: View {
     @State private var quitTarget: StatusAppTarget?
     @State private var actionProblem: String?
     @State private var scrollRequest = 0
+    @State private var editingLayout = false
+    @State private var dragSession = UUID()
+    @State private var dropTarget: StatusCardID?
+    @State private var endTargeted = false
+    @State private var gridWidth: CGFloat = 900
+    @State private var lastHidden: StatusCardID?
     let app: AppModel
 
     static let interval: Duration = .seconds(2)
     private var layout: StatusLayout { StatusLayout.read(savedLayout) }
     private var layoutBinding: Binding<StatusLayout> {
-        Binding(get: { layout }, set: { savedLayout = $0.saved })
+        Binding(get: { layout }, set: apply)
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            DSPaneHeader {
-                DSMetric(app.status?.health.scoreText ?? "—", "system health")
-            } actions: {
-                EmptyView()
-            } strip: {
-                DSCapsule("Live, every 2 s", tint: palette.accentText.color, live: true)
-                if let date = app.status?.date {
-                    DSStatusFact("Read at \(date.formatted(date: .omitted, time: .standard))", symbol: "clock")
+            StatusOverviewStrip(date: app.status?.date, score: app.status?.health.scoreText,
+                                healthSummary: app.status?.health.summary,
+                                needsAttention: app.status?.health.issues.isEmpty == false)
+            if editingLayout || !layout.hidden.isEmpty { layoutControls }
+            if let actionProblem {
+                DSNotice(.warning, actionProblem) {
+                    Button("Dismiss") { self.actionProblem = nil }
                 }
-            } detail: {
-                if let actionProblem {
-                    DSNotice(.warning, actionProblem) {
-                        Button("Dismiss") { self.actionProblem = nil }
-                    }
-                }
+                .padding(.horizontal, DS.Space.page)
+                .padding(.bottom, DS.Space.sm)
             }
             Divider()
             ScrollViewReader { proxy in
@@ -48,22 +49,55 @@ struct StatusView: View {
                         ContentUnavailableView {
                             Label("No Cards Visible", systemImage: "rectangle.grid.2x2")
                         } description: {
-                            Text("Choose which readings to show, or restore the default layout.")
+                            Text("Your cards are hidden. Show them again without changing their saved sizes or order.")
                         } actions: {
                             Button("Customize Live Status…") { customizing = true }
-                            Button("Restore Default Layout") { savedLayout = StatusLayout().saved }
+                            Button("Show All Cards") { change { $0.showAll() } }
                         }
                     } else if let snapshot = app.status {
-                        StatusGrid(sizes: layout.visible.map(\.size), spacing: DS.Space.md) {
+                        StatusGrid(cards: layout.visible, compactDensity: Density.current == .compact, editing: editingLayout, spacing: DS.Space.md) {
                             ForEach(layout.visible) { card in
-                                StatusCard(card: card.id) {
-                                    cardContent(card.id, snapshot)
+                                StatusCard(card: card.id, editing: editingLayout, size: card.size,
+                                           canResize: StatusGrid.columnCount(width: gridWidth, spacing: DS.Space.md) > 1,
+                                           drag: StatusCardDrag(card: card.id, session: dragSession),
+                                           onResize: { size in change { $0.setSize(size, for: card.id) } },
+                                           onMove: { offset in change { $0.move(card.id, by: offset, visibleOnly: true) } }) {
+                                    StatusTelemetry(card: card.id, snapshot: snapshot, history: app.statusHistory,
+                                                    trashBytes: app.trash.bytes, canEmptyTrash: app.trash.canEmpty,
+                                                    order: $order, action: perform) { target in
+                                        guard target.matches(StatusAppTarget.capture(target.pid)) else {
+                                            actionProblem = String(localized: "That app changed or already quit. Refresh the reading before trying again.")
+                                            return
+                                        }
+                                        quitTarget = target
+                                        confirmingQuit = true
+                                    }
                                 } actions: {
                                     cardActions(card)
                                 }
                                 .id(card.id)
+                                .overlay {
+                                    if editingLayout, dropTarget == card.id {
+                                        RoundedRectangle(cornerRadius: DS.Radius.card)
+                                            .stroke(palette.accentText.color, lineWidth: 2)
+                                            .overlay(alignment: .top) {
+                                                Text("Place before \(card.id.title)").font(.caption.weight(.medium))
+                                                    .padding(DS.Space.xs).background(.regularMaterial, in: .capsule)
+                                            }
+                                            .allowsHitTesting(false)
+                                    }
+                                }
+                                .contentShape(Rectangle())
+                                .dropDestination(for: StatusCardDrag.self) { items, _ in
+                                    accept(items, before: card.id)
+                                } isTargeted: { targeted in
+                                    if targeted && editingLayout { dropTarget = card.id }
+                                    else if dropTarget == card.id { dropTarget = nil }
+                                }
                             }
                         }
+                        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { gridWidth = $0 }
+                        if editingLayout { endDropTarget }
                     } else {
                         DSLoading("Reading your Mac's status…").padding(DS.Space.xl * 2)
                     }
@@ -80,6 +114,13 @@ struct StatusView: View {
         }
         .paneToolbar("Live Status", subtitle: "\(meta)") {
             ToolbarItemGroup(placement: .primaryAction) {
+                Button {
+                    editingLayout.toggle()
+                } label: {
+                    Label(editingLayout ? String(localized: "Done Arranging") : String(localized: "Edit Layout"),
+                          systemImage: editingLayout ? "checkmark" : "rectangle.3.group")
+                }
+                .help("Move and resize cards directly in the grid")
                 Button {
                     StatusActions.openActivityMonitor()
                 } label: {
@@ -123,7 +164,71 @@ struct StatusView: View {
     private func change(_ edit: (inout StatusLayout) -> Void) {
         var changed = layout
         edit(&changed)
-        savedLayout = changed.saved
+        apply(changed)
+    }
+
+    private func apply(_ changed: StatusLayout) {
+        let previous = layout
+        guard previous != changed else { return }
+        let newlyHidden = previous.visible.filter { before in changed.hidden.contains { $0.id == before.id } }
+        if let id = newlyHidden.last?.id { lastHidden = id }
+        if let lastHidden, changed.visible.contains(where: { $0.id == lastHidden }) { self.lastHidden = nil }
+        withAnimation(reduceMotion ? nil : Motion.snappy) { savedLayout = changed.saved }
+    }
+
+    private func accept(_ items: [StatusCardDrag], before target: StatusCardID?) -> Bool {
+        guard editingLayout, items.count == 1, let item = items.first,
+              item.canMove(in: layout, session: dragSession, before: target) else { return false }
+        change { $0.move(item.card, before: target) }
+        dropTarget = nil
+        return true
+    }
+
+    private var layoutControls: some View {
+        DSActionGroup {
+            if editingLayout {
+                Text("Drag a handle to move a card. Drag its corner sideways to resize. Cards fill each row and share its height.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if let id = lastHidden, layout.hidden.contains(where: { $0.id == id }) {
+                HStack(spacing: DS.Space.sm) {
+                    Text("\(id.title) hidden").font(.caption).foregroundStyle(.secondary)
+                    Button("Undo Hide") { change { $0.setVisible(true, for: id) } }
+                }
+            }
+        } trailing: {
+            if !layout.hidden.isEmpty {
+                Menu {
+                    ForEach(layout.hidden) { card in
+                        Button { change { $0.setVisible(true, for: card.id) } } label: {
+                            Label("Show \(card.id.title)", systemImage: card.id.symbol)
+                        }
+                    }
+                    Divider()
+                    Button("Show All Cards") { change { $0.showAll() } }
+                } label: {
+                    Label("\(layout.hidden.count) hidden", systemImage: "eye.slash")
+                }
+                .fixedSize()
+                .accessibilityLabel("Show hidden cards (\(layout.hidden.count))")
+                .help("Show one hidden card or bring them all back")
+            }
+        }
+        .frame(maxWidth: DS.Size.pageMaxWidth, alignment: .leading)
+        .padding(.horizontal, DS.Space.page)
+        .padding(.bottom, DS.Space.md)
+        .frame(maxWidth: .infinity)
+    }
+
+    private var endDropTarget: some View {
+        Label("Drop here to move to the end", systemImage: "arrow.down.to.line")
+            .font(.caption).foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, minHeight: 38)
+            .background(palette.accent.color.opacity(endTargeted ? 0.15 : 0.04), in: .rect(cornerRadius: DS.Radius.control))
+            .overlay(RoundedRectangle(cornerRadius: DS.Radius.control)
+                .strokeBorder(palette.accentText.color.opacity(endTargeted ? 0.8 : 0.25), style: StrokeStyle(lineWidth: 1, dash: [4])))
+            .dropDestination(for: StatusCardDrag.self) { items, _ in accept(items, before: nil) }
+                isTargeted: { endTargeted = $0 }
     }
 
     private func showProcesses(_ order: ProcessOrder) {
@@ -156,142 +261,14 @@ struct StatusView: View {
         Button("Customize Live Status…") { customizing = true }
     }
 
-    @ViewBuilder private func cardContent(_ card: StatusCardID, _ s: SystemSnapshot) -> some View {
-        switch card {
-        case .health:
-            Metric(s.health.scoreText)
-            if s.health.issues.isEmpty {
-                DSText(s.health.summary, .metadata)
-            } else {
-                ForEach(s.health.issues, id: \.text) { DSText($0.text, .metadata) }
-            }
-            if let up = s.uptime { kv(String(localized: "Uptime"), SystemSnapshot.uptimeText(up)) }
-        case .cpu:
-            if let cpu = s.cpu {
-                big(cpu.usage)
-                Sparkline(values: app.statusHistory.cpu)
-                HStack(alignment: .bottom, spacing: 3) {
-                    ForEach(Array(cpu.perCore.enumerated()), id: \.offset) { _, value in
-                        RoundedRectangle(cornerRadius: 2).fill(Theme.load(value))
-                            .frame(height: max(3, 40 * min(value, 100) / 100))
-                    }
-                }.frame(height: 40, alignment: .bottom)
-                if let load = cpu.load {
-                    Text(String(format: "load %.2f · %.2f · %.2f", load.one, load.five, load.fifteen))
-                        .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                }
-                if let p = cpu.performanceCores, let e = cpu.efficiencyCores {
-                    DSText("\(p) performance · \(e) efficiency cores", .metadata)
-                }
-                Button("Show CPU Processes") { showProcesses(.cpu) }.buttonStyle(.link)
-            } else {
-                unavailable
-            }
-        case .memory:
-            if let memory = s.memory {
-                big(memory.usedPercent)
-                Sparkline(values: app.statusHistory.memory)
-                UsageBar(fraction: memory.usedPercent / 100)
-                kv(String(localized: "Used / total"), "\(fmt(memory.used)) / \(fmt(memory.total))")
-                kv(String(localized: "Swap"), fmt(memory.swapUsed))
-                kv(
-                    String(localized: "Pressure"),
-                    memory.pressure == .normal
-                        ? String(localized: "Normal")
-                        : memory.pressure == .critical ? String(localized: "Critical") : String(localized: "High"))
-                Button("Show Memory Processes") { showProcesses(.memory) }.buttonStyle(.link)
-            } else {
-                unavailable
-            }
-        case .storage:
-            if let volume = s.startupVolume {
-                big(volume.usedPercent)
-                UsageBar(fraction: volume.usedPercent / 100)
-                kv(String(localized: "Used / total"), "\(fmt(volume.used)) / \(fmt(volume.total))")
-                if let health = s.hardware.diskHealth { kv(String(localized: "Disk health (SMART)"), health) }
-                if let bytes = app.trash.bytes { kv(String(localized: "Trash"), fmt(bytes)) }
-                Button("Open Disk Map") { app.pane = .diskMap }.buttonStyle(.link)
-                if app.trash.canEmpty {
-                    Button("Empty Trash…") { Task { await app.trash.askToEmpty() } }.buttonStyle(.link)
-                }
-                ForEach(s.volumes.filter { $0.isInternal && $0.mount != "/" }.prefix(2)) {
-                    kv($0.name, String(localized: "\(fmt($0.available)) free"))
-                }
-            } else {
-                unavailable
-            }
-        case .diskIO:
-            if let disk = s.disk {
-                kv(String(localized: "Read"), rate(disk.read))
-                kv(String(localized: "Write"), rate(disk.write))
-                DSText("Transfer rates since the previous reading.", .metadata)
-            } else {
-                unavailable
-            }
-        case .network:
-            if s.network.isEmpty { unavailable }
-            ForEach(s.network) { network in
-                DSText(network.name, .heading)
-                if let address = network.address { Text(address).font(.caption.monospaced()).textSelection(.enabled) }
-                kv(String(localized: "Received"), rate(network.received))
-                kv(String(localized: "Sent"), rate(network.sent))
-            }
-        case .battery:
-            if let battery = s.battery {
-                big(battery.percent)
-                Sparkline(values: app.statusHistory.battery)
-                kv(String(localized: "Power"), battery.state)
-                if let minutes = battery.minutesLeft {
-                    kv(String(localized: "Estimated time left"), String(localized: "\(minutes / 60)h \(minutes % 60)m"))
-                }
-                if let count = battery.cycleCount { kv(String(localized: "Cycles"), count.formatted()) }
-                if let capacity = battery.capacityPercent { kv(String(localized: "Capacity"), "\(Int(capacity.rounded()))%") }
-                if let health = battery.health { kv(String(localized: "Health"), health) }
-            } else {
-                DSText("macOS hasn't provided battery data. You can hide this card if it isn't useful on this Mac.", .metadata)
-            }
-        case .processes:
-            if s.topProcesses.isEmpty {
-                DSText("Process details aren't available for this reading.", .metadata)
-                Button("Open Activity Monitor") { StatusActions.openActivityMonitor() }.buttonStyle(.link)
-            } else {
-                DSControlField("Sort processes by") {
-                    Picker("Order", selection: $order) {
-                        Text("CPU").tag(ProcessOrder.cpu)
-                        Text("Memory").tag(ProcessOrder.memory)
-                    }.pickerStyle(.segmented).labelsHidden().controlSize(.small)
-                }
-                HStack {
-                    Text("Process")
-                    Spacer(minLength: DS.Space.xs)
-                    Text("CPU").frame(width: 44, alignment: .trailing)
-                    Text("Memory").frame(width: 70, alignment: .trailing)
-                    Color.clear.frame(width: 20, height: 1)
-                }.font(.caption2).foregroundStyle(.secondary)
-                ForEach(order.sorted(s.topProcesses).prefix(8)) { process in
-                    ProcessRow(process: process, emphasis: order) { target in
-                        guard target.matches(StatusAppTarget.capture(target.pid)) else {
-                            actionProblem = String(localized: "That app changed or already quit. Refresh the reading before trying again.")
-                            return
-                        }
-                        quitTarget = target
-                        confirmingQuit = true
-                    }
-                }
-            }
+    private func perform(_ action: StatusTelemetry.Action) {
+        switch action {
+        case .cpuProcesses: showProcesses(.cpu)
+        case .memoryProcesses: showProcesses(.memory)
+        case .diskMap: app.pane = .diskMap
+        case .emptyTrash: Task { await app.trash.askToEmpty() }
+        case .activityMonitor: StatusActions.openActivityMonitor()
         }
-    }
-
-    private var unavailable: some View { DSText("No reading available right now.", .metadata) }
-    private func rate(_ value: Double) -> String { ByteCountFormatter.string(fromByteCount: Int64(value), countStyle: .file) + "/s" }
-    private func big(_ value: Double) -> some View { Metric("\(Int(value.rounded()))%").lineLimit(1) }
-    private func fmt(_ value: Int64) -> String { ByteSize.format(value) }
-    private func kv(_ key: String, _ value: String) -> some View {
-        HStack(alignment: .top, spacing: DS.Space.sm) {
-            Text(key).foregroundStyle(.secondary)
-            Spacer(minLength: DS.Space.sm)
-            Text(value).bold().multilineTextAlignment(.trailing)
-        }.font(.caption.monospacedDigit())
     }
 
     enum ProcessOrder: String, CaseIterable {
@@ -305,72 +282,77 @@ struct StatusView: View {
     }
 }
 
-/// The last few minutes of a 0–100 reading as a line; nothing until there
-/// are two readings to join.
+/// A compact fixed-scale trace. An empty history stays empty rather than
+/// inventing readings to fill the chart.
 struct Sparkline: View {
     let values: [Double]
     @Environment(\.palette) private var palette
 
     var body: some View {
         GeometryReader { geo in
-            if values.count > 1 {
-                Path { p in
-                    let step = geo.size.width / CGFloat(StatusHistory.kept - 1)
-                    let start = geo.size.width - step * CGFloat(values.count - 1)
-                    for (i, v) in values.enumerated() {
-                        let pt = CGPoint(x: start + step * CGFloat(i), y: geo.size.height * (1 - CGFloat(min(max(v, 0), 100)) / 100))
-                        if i == 0 { p.move(to: pt) } else { p.addLine(to: pt) }
-                    }
+            ZStack {
+                VStack {
+                    Divider().opacity(0.35)
+                    Spacer(minLength: 0)
+                    Divider().opacity(0.35)
                 }
-                .stroke(palette.accent.color, lineWidth: 1.5)
+                if values.count > 1 {
+                    let line = Path { p in
+                        let step = geo.size.width / CGFloat(StatusHistory.kept - 1)
+                        let start = geo.size.width - step * CGFloat(values.count - 1)
+                        for (i, v) in values.enumerated() {
+                            let pt = CGPoint(x: start + step * CGFloat(i), y: geo.size.height * (1 - CGFloat(min(max(v, 0), 100)) / 100))
+                            if i == 0 { p.move(to: pt) } else { p.addLine(to: pt) }
+                        }
+                    }
+                    let area = Path { p in
+                        p.addPath(line)
+                        p.addLine(to: CGPoint(x: geo.size.width, y: geo.size.height))
+                        let start = geo.size.width - geo.size.width / CGFloat(StatusHistory.kept - 1) * CGFloat(values.count - 1)
+                        p.addLine(to: CGPoint(x: start, y: geo.size.height))
+                        p.closeSubpath()
+                    }
+                    area.fill(LinearGradient(colors: [palette.accent.color.opacity(0.18), palette.accent.color.opacity(0.02)], startPoint: .top, endPoint: .bottom))
+                    line.stroke(palette.accentText.color, style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
+                }
             }
         }
-        .frame(height: 24)
+        .frame(height: 32)
         .accessibilityLabel("The last few minutes")
         .accessibilityValue(values.last.map { "\(Int($0.rounded())) percent now" } ?? "")
     }
 }
 
-/// A menu captures the app identity once, not from a freshly reused PID at confirmation.
-private struct ProcessRow: View {
-    let process: SystemSnapshot.Process
-    let emphasis: StatusView.ProcessOrder
-    let requestQuit: (StatusAppTarget) -> Void
-    @State private var target: StatusAppTarget?
+/// Live Status already has a dedicated Health card; a second large score
+/// above the cards adds space without adding information.
+struct StatusOverviewStrip: View {
+    let date: Date?
+    var score: String? = nil
+    var healthSummary: String? = nil
+    var needsAttention = false
+    @Environment(\.palette) private var palette
 
     var body: some View {
-        HStack(spacing: DS.Space.sm) {
-            DSName(process.name, .lead, lines: 2)
-            Spacer(minLength: DS.Space.xs)
-            Text("\(Int(process.cpu.rounded()))%").fontWeight(emphasis == .cpu ? .bold : .regular)
-                .monospacedDigit().frame(width: 44, alignment: .trailing)
-            Text(ByteSize.format(process.memoryBytes)).fontWeight(emphasis == .memory ? .bold : .regular)
-                .foregroundStyle(emphasis == .memory ? .primary : .secondary).monospacedDigit()
-                .frame(width: 70, alignment: .trailing)
-            Menu {
-                actions
-            } label: {
-                Image(systemName: "ellipsis")
+        HStack(spacing: DS.Space.md) {
+            Text("System overview").font(.headline)
+            Spacer(minLength: DS.Space.md)
+            if let score {
+                Label {
+                    Text("Health \(score)").foregroundStyle(needsAttention ? palette.text.color : palette.secondaryText.color)
+                } icon: {
+                    if needsAttention { Image(systemName: "exclamationmark.triangle").foregroundStyle(palette.warning) }
+                }.font(.caption.monospacedDigit())
+                    .help(healthSummary ?? "")
             }
-            .menuIndicator(.hidden).menuStyle(.borderlessButton).frame(width: 20)
-            .accessibilityLabel("Actions for \(process.name)")
+            DSCapsule("Live, every 2 s", tint: palette.accentText.color, live: true)
+            if let date {
+                Text("Read at \(date.formatted(date: .omitted, time: .standard))")
+                    .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+            }
         }
-        .font(.caption)
-        .contentShape(.rect)
-        .help("\(process.name) · process \(process.pid)")
-        .contextMenu { actions }
-        .task(id: "\(process.pid):\(process.name)") { target = StatusAppTarget.capture(process.pid) }
-    }
-
-    @ViewBuilder private var actions: some View {
-        Button("Open Activity Monitor") { StatusActions.openActivityMonitor() }
-        Button("Copy Name") {
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(process.name, forType: .string)
-        }
-        if let target {
-            Divider()
-            Button("Quit \(target.name)…") { requestQuit(target) }
-        }
+        .frame(maxWidth: DS.Size.pageMaxWidth)
+        .padding(.horizontal, DS.Space.page)
+        .padding(.vertical, DS.Space.md)
+        .frame(maxWidth: .infinity)
     }
 }

@@ -17,12 +17,12 @@ struct DuplicatesView: View {
             Divider()
             HStack(spacing: 0) {
                 VStack(spacing: 0) {
-                    if !model.groups.isEmpty {
+                    if !model.displayGroups.isEmpty {
                         DSListHeading("Duplicate groups", detail: "Select a group to compare its copies.")
                     }
                     groups
                 }.frame(minWidth: 300, maxWidth: .infinity)
-                if !model.groups.isEmpty {
+                if !model.displayGroups.isEmpty {
                     Divider()
                     VStack(spacing: 0) {
                         DSListHeading("Copies in selected groups", detail: "Tick copies for removal. One copy always stays.")
@@ -63,7 +63,9 @@ struct DuplicatesView: View {
             Menu {
                 Section("Looking in") {
                     ForEach(model.roots, id: \.self) { root in
-                        Button(Breakable.path(root).replacingOccurrences(of: "\u{200B}", with: "")) { FileActions.reveal([root]) }
+                        Menu(Breakable.path(root).replacingOccurrences(of: "\u{200B}", with: "")) {
+                            FileMenuItems(paths: [root], canOpen: false)
+                        }
                     }
                 }
             } label: {
@@ -91,12 +93,12 @@ struct DuplicatesView: View {
     private var header: some View {
         DSPaneHeader {
             DSMetric(
-                fmt(model.spareBytes), "in spare copies of \(model.groups.count.formatted()) file\(model.groups.count == 1 ? "" : "s")")
+                fmt(model.spareBytes), "in spare copies of \(model.displayGroups.count.formatted()) file\(model.displayGroups.count == 1 ? "" : "s")")
         } actions: {
             DSControlField("Filter duplicate groups") {
                 DSFilterField(String(localized: "Filter by name or folder"), text: $query)
-                    .frame(width: 280)
-                    .disabled(model.groups.isEmpty)
+                    .frame(minWidth: 180, idealWidth: 280, maxWidth: .infinity)
+                    .disabled(model.displayGroups.isEmpty)
             }
             DSControlField("Choose copies for removal") {
                 Menu("Choose Copies") {
@@ -104,7 +106,7 @@ struct DuplicatesView: View {
                     Button("All but the Oldest") { model.chooseAll(keeping: .oldest) }
                     Button("All but the Copy in a Folder…") { model.chooseKeepingCopiesIn() }
                 }
-                .disabled(model.groups.isEmpty)
+                .disabled(model.groups.isEmpty || model.scanning)
                 .help("In the selected files, or in all when none is selected")
                 .fixedSize()
             }
@@ -113,18 +115,23 @@ struct DuplicatesView: View {
                 DSRunningCapsule(text: stepText, since: model.startedAt)
                 if let s = model.step, s.phase == .comparing, s.total > 0 { DSScanProgress(fraction: Double(s.done) / Double(s.total)) }
                 DSStripButton("Stop", symbol: "stop.fill") { model.stop() }
+                if model.groups.isEmpty, !model.preview.isEmpty {
+                    DSCapsule("Results so far · choosing is available when the search finishes", symbol: "eye")
+                }
             } else if let at = model.scannedAt {
                 DSCapsule("Searched \(at.formatted(.relative(presentation: .named)))", symbol: "checkmark", tint: .green)
             }
             Menu {
                 Section("Searched folders") {
                     ForEach(model.roots, id: \.self) { r in
-                        if model.addedRoots.contains(r) {
-                            Button(String(localized: "Stop Searching \((r as NSString).abbreviatingWithTildeInPath)")) {
-                                model.removeRoot(r)
+                        Menu((r as NSString).abbreviatingWithTildeInPath) {
+                            FileMenuItems(paths: [r], canOpen: false)
+                            if model.addedRoots.contains(r) {
+                                Divider()
+                                Button(String(localized: "Stop Searching \((r as NSString).abbreviatingWithTildeInPath)")) {
+                                    model.removeRoot(r)
+                                }
                             }
-                        } else {
-                            Text((r as NSString).abbreviatingWithTildeInPath)
                         }
                     }
                 }
@@ -152,6 +159,10 @@ struct DuplicatesView: View {
                     "They couldn't be read through, or changed while they were read, so whether they have copies isn't known. Search again to try them."
                 )
             }
+            if !model.excludedRoots.isEmpty {
+                DSCapsule("\(model.excludedRoots.count) search folders excluded for safety", symbol: "shield", tint: .orange)
+                    .help(model.excludedRoots.map { ($0 as NSString).abbreviatingWithTildeInPath }.joined(separator: "\n"))
+            }
             if !model.unreadable.isEmpty {
                 DSCapsule(
                     "\(model.unreadable.count) folder\(model.unreadable.count == 1 ? "" : "s") couldn't be read",
@@ -169,9 +180,11 @@ struct DuplicatesView: View {
 
     private var stepText: String {
         switch model.step?.phase {
-        case .comparing: String(localized: "Comparing files")
+        case .waiting: String(localized: "Waiting for a scan slot")
+        case .comparing:
+            String(localized: "Comparing files: \((model.step?.done ?? 0).formatted()) of \((model.step?.total ?? 0).formatted())")
         case .listing: String(localized: "Listing files: \((model.step?.done ?? 0).formatted())")
-        case nil: String(localized: "Listing files")
+        case nil: String(localized: "Preparing search")
         }
     }
 
@@ -200,29 +213,39 @@ struct DuplicatesView: View {
             defaultSort: .freeable,
             selection: $model.selection,
             marks: nil,
-            onOpen: { ids in FileActions.reveal(model.groups.filter { ids.contains($0.id) }.flatMap { $0.files.map(\.path) }) })
-        .task(id: FilterKey(groups: model.groups, query: query)) {
-            let (groups, query) = (model.groups, query)
+            onOpen: { ids in FileActions.reveal(pathsInGroups(ids)) },
+            menu: { ids in FileActions.menu(pathsInGroups(ids), canOpen: false) },
+            filePaths: pathsInGroups)
+        .task(id: FilterKey(groups: model.displayGroups, query: query)) {
+            let (groups, query) = (model.displayGroups, query)
             let search = TextQuery(query)
             await filtered.update(count: groups.count) {
                 search.isEmpty ? groups : groups.filter { g in g.files.contains { search.matches($0.name, $0.path) } }
             }
         }
         .overlay {
-            if !model.groups.isEmpty, shown.isEmpty, !filtered.working {
+            if !model.displayGroups.isEmpty, shown.isEmpty, !filtered.working {
                 ContentUnavailableView.search(text: query)
-            } else if model.groups.isEmpty {
+            } else if model.displayGroups.isEmpty {
                 if model.scanning {
                     DSLoading("Searching for duplicates…")
                 } else if model.scannedAt != nil, !model.unreadable.isEmpty {
                     DSIncompleteEmpty(what: String(localized: "Duplicates"), unreadable: model.unreadable) { model.scan() }
+                } else if model.scannedAt != nil, model.uncompared > 0 {
+                    CenterCard(symbol: "exclamationmark.triangle", title: "Search Incomplete", subtitle: "Some files couldn't be compared, so this search can't confirm that there are no duplicates.") {
+                        Button("Search Again") { model.scan() }.primaryAction()
+                    }
+                } else if model.scannedAt != nil, !model.excludedRoots.isEmpty {
+                    CenterCard(symbol: "shield", title: "Search Areas Excluded", subtitle: "App libraries, dependency folders, hidden folders and Git repositories are excluded. Add a folder of personal files to search there.") {
+                        Button("Add Folder…") { model.addRoot() }.primaryAction()
+                    }
                 } else if model.scannedAt != nil {
                     ContentUnavailableView(
                         String(localized: "No Duplicates"), systemImage: Pane.duplicates.symbol,
-                        description: Text("No two files of 1 MB or more in the searched folders have the same content."))
+                        description: Text("No two files of \(fmt(model.minimum)) or more in the searched folders have the same content."))
                 } else {
-                    CenterCard(symbol: Pane.duplicates.symbol, title: "Duplicates", subtitle: "Finds files with the same content in Desktop, Documents, Downloads, Movies, Music and Pictures. Files are only read.") {
-                        Button("Start Search") { model.scan() }.primaryAction()
+                    CenterCard(symbol: Pane.duplicates.symbol, title: model.attempted ? "Search Stopped" : "Duplicates", subtitle: "Finds files with the same content in Desktop, Documents, Downloads, Movies, Music and Pictures. Files are only read.") {
+                        Button(model.attempted ? String(localized: "Search Again") : String(localized: "Start Search")) { model.scan() }.primaryAction()
                     }
                 }
             }
@@ -242,6 +265,10 @@ struct DuplicatesView: View {
                         r.badgeHelp = String(localized: "Shares its space with \(clones) other cop\(clones == 1 ? "y" : "ies") here: moving it frees space only when they all go.")
                     }
                     model.keep.mark(&r)
+                    if model.scanning {
+                        r.canChoose = false
+                        r.choiceHelp = String(localized: "Wait for the search to finish before choosing copies.")
+                    }
                     return r
                 }
             },
@@ -250,7 +277,7 @@ struct DuplicatesView: View {
             autosave: "duplicates.copies",
             defaultSort: .name,
             selection: $model.fileSelection,
-            marks: model.chosen,
+            marks: model.scanning ? nil : model.chosen,
             onToggleMark: { model.toggle($0) },
             onOpen: { FileActions.reveal($0) },
             onMark: { model.choose($0) },
@@ -258,21 +285,26 @@ struct DuplicatesView: View {
                 let paths = ids.filter { byPath[$0] != nil }
                 return [
                     .quickLook,
-                    .action(String(localized: "Show in Finder")) { FileActions.reveal(paths) },
                     .divider,
                     paths.contains(where: { !model.chosen.contains($0) })
                         ? .action(String(localized: "Choose for Removal")) { model.choose(paths) }
                         : .action(String(localized: "Unchoose")) { model.chosen.subtract(paths) },
                     model.keep.menuEntry(paths, keep: model.keepAlways, stop: model.stopKeeping),
-                ]
+                    .divider,
+                ] + FileActions.menu(paths)
             })
         .overlay {
-            if model.shownGroups.isEmpty, !model.groups.isEmpty {
+            if model.shownGroups.isEmpty, !model.displayGroups.isEmpty {
                 ContentUnavailableView(
                     String(localized: "No File Selected"), systemImage: "doc.on.doc",
                     description: Text("Select a file on the left to see its copies."))
             }
         }
+    }
+
+    private func pathsInGroups(_ ids: [String]) -> [String] {
+        let selected = Set(ids)
+        return model.displayGroups.filter { selected.contains($0.id) }.flatMap { $0.files.map(\.path) }
     }
 
     /// "Documents, Downloads": the folders a group's copies are in, by name.

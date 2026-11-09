@@ -13,6 +13,37 @@ func makeApp(_ box: Sandbox, _ rel: String, id: String?, name: String? = nil, by
 }
 
 @Suite struct AppFinderTests {
+    @Test func earlyAppPathsAreMetadataOnlyAndSkipLinkedLocations() throws {
+        let box = try Sandbox()
+        try makeApp(box, "Applications/Editor.app", id: "com.vendor.Editor", name: "Editor")
+        try box.file("Library/Preferences/com.vendor.Editor.plist", bytes: 100)
+        try box.file("Library/Caches/com.vendor.Editor/large/branch/file", bytes: 4000)
+        try box.file("elsewhere/file", bytes: 100)
+        try FileManager.default.createSymbolicLink(atPath: box.path + "/Library/Containers", withDestinationPath: box.path + "/elsewhere")
+        let app = try #require(AppFinder.metadata(box.path + "/Applications/Editor.app"))
+        let preview = AppLeftovers.preview(for: app, home: box.path)
+        #expect(preview.count == 2)
+        #expect(preview.first { $0.place == "Caches" }?.bytes == nil)
+        #expect(preview.allSatisfy { !$0.path.contains("elsewhere") })
+        let stopped = ScanProgress()
+        stopped.cancel()
+        #expect(AppLeftovers.preview(for: app, home: box.path, progress: stopped).isEmpty)
+    }
+    @Test func cancellingAnEarlyLeftoverPreviewCannotTurnItIntoACompletedResult() throws {
+        let box = try Sandbox()
+        try makeApp(box, "Applications/Editor.app", id: "com.vendor.Editor", name: "Editor")
+        try box.file("Library/Preferences/com.vendor.Editor.plist", bytes: 100)
+        try box.file("Library/Caches/com.vendor.Editor/cache", bytes: 4000)
+        let app = try #require(AppFinder.metadata(box.path + "/Applications/Editor.app"))
+        let progress = ScanProgress()
+        var preview: [Leftover] = []
+        let report = AppLeftovers.list(for: app, home: box.path, installed: [app], progress: progress, onStep: { items in
+            preview = items
+            progress.cancel()
+        })
+        #expect(preview.count == 1 && preview[0].place == "Preferences")
+        #expect(report.cancelled && report.manualReview == nil)
+    }
     @Test func findsAppsAndOneLevelOfSubfolders() throws {
         let box = try Sandbox()
         try makeApp(box, "Applications/Editor.app", id: "com.vendor.Editor", name: "Editor", bytes: 60_000)
@@ -114,7 +145,8 @@ func makeApp(_ box: Sandbox, _ rel: String, id: String?, name: String? = nil, by
 
     @Test func findsWhatTheAppLeftAndNothingShared() throws {
         let box = try home()
-        let found = AppLeftovers.find(for: editor, home: box.path, installed: [editor])
+        let identity = AppIdentity(groups: ["ABCDE12345.com.vendor.Editor", "group.com.vendor.Editor"])
+        let found = AppLeftovers.find(for: editor, home: box.path, installed: [editor], identity: identity)
         let rel = Set(found.map { String($0.path.dropFirst(box.path.count + "/Library/".count)) })
         #expect(rel == [
             "Application Support/com.vendor.Editor", "Application Support/Editor", "Caches/com.vendor.Editor",
@@ -150,14 +182,12 @@ func makeApp(_ box: Sandbox, _ rel: String, id: String?, name: String? = nil, by
         #expect(!AppLeftovers.isStillLeftover(lib + "/Caches/com.vendor.Editor", of: editor, home: box.path, installed: [editor]))
     }
 
-    @Test func onlyCachesAndAppPartsStartChosen() throws {
+    @Test func onlyIdentityCachesAndLogsStartChosen() throws {
         let box = try home()
-        let found = AppLeftovers.find(for: editor, home: box.path, installed: [editor])
-        let chosen = Set(found.filter(\.kind.chosenByDefault).map { String($0.path.dropFirst(box.path.count + "/Library/".count)) })
-        #expect(chosen == [
-            "Caches/com.vendor.Editor", "Saved Application State/com.vendor.Editor.savedState", "Logs/Editor",
-            "HTTPStorages/com.vendor.Editor.binarycookies", "LaunchAgents/com.vendor.Editor.helper.plist",
-        ])
+        let identity = AppIdentity(groups: ["ABCDE12345.com.vendor.Editor", "group.com.vendor.Editor"])
+        let found = AppLeftovers.find(for: editor, home: box.path, installed: [editor], identity: identity)
+        let chosen = Set(found.filter(\.chosenByDefault).map { String($0.path.dropFirst(box.path.count + "/Library/".count)) })
+        #expect(chosen == ["Caches/com.vendor.Editor"])
         #expect(found.first { $0.place == "Group Containers" }?.kind == .shared)
         #expect(found.first { $0.place == "Containers" }?.kind == .data)
         #expect(found.first { $0.place == "Preferences" }?.kind == .settings)

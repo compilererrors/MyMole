@@ -45,7 +45,7 @@ import StorageKit
             "/private/var/db/receipts/com.vendor.Editor.pkg.plist",
         ])
         #expect(found.first { $0.place == "/Library/Preferences" }?.kind.chosenByDefault == false)
-        #expect(found.first { $0.place == "/Library/LaunchDaemons" }?.kind.chosenByDefault == true)
+        #expect(found.allSatisfy { !$0.kind.chosenByDefault })
     }
 
     @Test func idsTooLooseOrApplesFindNothing() throws {

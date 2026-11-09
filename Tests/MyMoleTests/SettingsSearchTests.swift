@@ -17,6 +17,8 @@ import Testing
         #expect(find("Show menu bar").contains(.menuBar))
         #expect(find("Notify me when the disk is nearly full").contains(.background))
         #expect(find("Installers").contains(.confirmations))
+        #expect(find("App Management").contains(.appManagement))
+        #expect(find("cannot move Trash").contains(.appManagement))
         #expect(find("unfindable-synthetic-setting").isEmpty)
     }
 

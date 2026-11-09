@@ -31,17 +31,20 @@ struct DeepCleanView: View {
             explaining?.name ?? "", isPresented: Binding(get: { explaining != nil }, set: { if !$0 { explaining = nil } }),
             presenting: explaining
         ) { _ in
-            Button("OK") {}
+            Button("OK", role: .cancel) {}
         } message: { c in
             Text([
                 String(localized: "Found by: \(c.reason)"), model.choiceReason(c), String(localized: "If it goes: \(c.consequence)"),
             ].joined(separator: "\n\n"))
         }
+        .confirmationKeyboard(isPresented: Binding(get: { explaining != nil }, set: { if !$0 { explaining = nil } }))
         .actionConfirmation(
             String(localized: "Move \(fmt(model.chosenBytes)) to the Trash?"),
             isPresented: $confirming, action: .deepClean, message: confirmationText
         ) { model.trashChosen() }
         .onAppear { model.scanIfNeeded() }
+        .liveRefresh(every: .seconds(5)) { await model.refreshActivity() }
+        .onChange(of: model.chosen) { _, _ in confirming = false }
     }
 
     private var confirmationText: String {
@@ -91,7 +94,7 @@ struct DeepCleanView: View {
         } actions: {
             DSControlField("Filter results") {
                 DSFilterField(String(localized: "Filter by name or folder"), text: $query)
-                    .frame(width: 280)
+                    .frame(minWidth: 180, idealWidth: 280, maxWidth: .infinity)
                     .disabled(listed.isEmpty)
             }
             DSControlField("Choose for removal") {

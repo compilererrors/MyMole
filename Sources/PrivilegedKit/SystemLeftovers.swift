@@ -12,7 +12,8 @@ public enum SystemLeftovers {
     public enum Kind: String, Codable, Sendable {
         case rebuildable, appPart, record, settings, data
 
-        public var chosenByDefault: Bool { self == .rebuildable || self == .appPart || self == .record }
+        /// Permanent system removal always needs an explicit per-item choice.
+        public var chosenByDefault: Bool { false }
 
         public var title: String {
             switch self {

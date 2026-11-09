@@ -17,6 +17,7 @@ final class SelfRemovalModel {
     private(set) var removed = false
     private(set) var problem: String?
     private(set) var dataUnavailable = false
+    private(set) var dataIncomplete = false
     private(set) var kept = Set<String>()
     private(set) var keepsUnreadable = false
     var chosen = Set<String>()
@@ -33,7 +34,7 @@ final class SelfRemovalModel {
 
     var available: Bool { apps.ownAppPath != nil }
     var canRemove: Bool { app != nil && !keepsUnreadable && !kept.contains(app?.path ?? "") }
-    var chosenLeftovers: [Leftover] { leftovers.filter { chosen.contains($0.path) } }
+    var chosenLeftovers: [Leftover] { leftovers.filter { $0.canRemove && chosen.contains($0.path) } }
 
     func load() async {
         guard !running, !removed, let path = apps.ownAppPath else { return }
@@ -50,12 +51,14 @@ final class SelfRemovalModel {
             return
         }
         app = found
-        let data = await apps.leftovers(for: found, deep: false)
+        let report = await apps.leftoverReport(for: found)
+        let data = report?.items
         guard !Task.isCancelled, loadID == run else { return }
         let protected = await apps.kept(among: [found.path] + (data ?? []).map(\.path))
         guard !Task.isCancelled, loadID == run else { return }
         leftovers = data ?? []
-        dataUnavailable = data == nil
+        dataUnavailable = report?.ownershipVerified != true
+        dataIncomplete = report.map { $0.limited || !$0.unreadable.isEmpty } ?? false
         keepsUnreadable = protected == nil
         kept = protected ?? []
         chosen = Set(leftovers.filter(\.chosenByDefault).map(\.path)).subtracting(kept)
@@ -106,7 +109,10 @@ struct SelfRemovalSheet: View {
             )
             if model.dataUnavailable {
                 DSNotice(
-                    .warning, "Other copies couldn't be checked, so shared settings and caches stay. This app can still go to the Trash.")
+                    .warning, "Ownership couldn't be fully verified. Possible data matches are shown for inspection only and stay. This app can still go to the Trash.")
+            }
+            if model.dataIncomplete {
+                DSNotice(.warning, "Some app-data locations couldn't be inspected or the search reached its limit. Only completely measured candidates are offered; additional data may remain.")
             }
             if let problem = model.problem { DSNotice(.warning, problem) }
             if model.keepsUnreadable {
@@ -121,7 +127,7 @@ struct SelfRemovalSheet: View {
                     rows: rows, columns: [.name, .size, .kind, .location], autosave: "uninstall.self",
                     selection: $model.selection, marks: model.chosen.union(model.app.flatMap { model.kept.contains($0.path) ? nil : [$0.path] } ?? []),
                     onToggleMark: { path in
-                        guard !model.kept.contains(path), model.leftovers.contains(where: { $0.path == path }) else { return }
+                        guard !model.kept.contains(path), model.leftovers.contains(where: { $0.path == path && $0.canRemove }) else { return }
                         if model.chosen.contains(path) { model.chosen.remove(path) } else { model.chosen.insert(path) }
                     }, onOpen: { FileActions.reveal($0) }
                 )
@@ -149,7 +155,7 @@ struct SelfRemovalSheet: View {
         }
         .padding(DS.Space.xl)
         .frame(width: DS.Size.reviewWidth)
-        .interactiveDismissDisabled(model.running || model.removed)
+        .dialogKeyboard(canClose: !model.running && !model.removed)
         .task { await model.load() }
         .actionConfirmation(
             String(localized: "Uninstall this copy of MyMole?"), isPresented: $confirming,
@@ -182,7 +188,7 @@ struct SelfRemovalSheet: View {
                 return FileRow(
                     id: $0.path, name: $0.name, size: $0.bytes, kind: $0.kind.title,
                     location: ($0.path as NSString).deletingLastPathComponent, symbol: "folder",
-                    badge: kept ? String(localized: "Kept") : nil, badgeTint: .secondaryLabelColor, canChoose: !kept,
+                    badge: kept ? String(localized: "Kept") : ($0.canRemove ? nil : String(localized: "Inspection only")), badgeTint: .secondaryLabelColor, canChoose: !kept && $0.canRemove,
                     choiceHelp: kept ? String(localized: "On your keep list; this data stays.") : nil)
             }
     }

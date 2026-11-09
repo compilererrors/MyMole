@@ -6,6 +6,32 @@ import Testing
 @testable import MyMole
 
 @MainActor @Suite struct RemovedAppTests {
+    @Test func finderContinuationRequiresTheOriginalObjectInTrashRatherThanAMatchingNameOrID() throws {
+        let box = Box()
+        let original = try box.app("Applications/Editor.app", id: "com.example.Editor")
+        let source = try #require(RemovedApp.Source.capture(original))
+        try box.app(".Trash/Editor.app", id: "com.example.Editor")
+        #expect(source.movedToTrash(home: box.home) == nil)
+        let moved = box.home + "/.Trash/Editor 2.app"
+        try FileManager.default.moveItem(atPath: original.path, toPath: moved)
+        #expect(source.movedToTrash(home: box.home)?.app.path == moved)
+        try FileManager.default.moveItem(atPath: moved, toPath: box.home + "/Elsewhere.app")
+        try FileManager.default.createSymbolicLink(atPath: moved, withDestinationPath: box.home + "/Elsewhere.app")
+        #expect(source.movedToTrash(home: box.home) == nil)
+    }
+
+    @Test func changedBundleIdentityCannotResumeTheOriginalReview() throws {
+        let box = Box()
+        let app = try box.app("Applications/Editor.app", id: "com.example.Editor")
+        let source = try #require(RemovedApp.Source.capture(app))
+        try FileManager.default.createDirectory(atPath: box.home + "/.Trash", withIntermediateDirectories: true)
+        let moved = box.home + "/.Trash/Editor.app"
+        try FileManager.default.moveItem(atPath: app.path, toPath: moved)
+        try (["CFBundleIdentifier": "com.example.Other", "CFBundleName": "Other"] as NSDictionary)
+            .write(to: URL(fileURLWithPath: moved + "/Contents/Info.plist"))
+        #expect(source.movedToTrash(home: box.home) == nil)
+    }
+
     private final class Box {
         let root = FileManager.default.temporaryDirectory.appending(path: "removed-app-\(UUID().uuidString)")
         var home: String { root.path }

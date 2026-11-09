@@ -69,4 +69,34 @@ import Testing
         await job.value
         #expect(coordinator.shown == earlier && table.numberOfRows == 1)
     }
+
+    @Test func unchangedRowsAndSelectionReuseThePreparedSnapshot() async throws {
+        let input = rows("unchanged")
+        let (coordinator, table) = fixture()
+        coordinator.load(input, marks: [], selection: [])
+        await coordinator.sortJob?.value
+        for _ in 0..<20 {
+            coordinator.load(input, marks: [input[10].id], selection: [input[15].id])
+            #expect(coordinator.sortJob == nil)
+        }
+        #expect(table.selectedRowIndexes == IndexSet(integer: input.count - 1 - 15))
+        #expect(coordinator.shown.first?.id == input.last?.id)
+    }
+
+    @Test func hiddenTableKeepsItsRowsAndResumesWithOnlyTheLatestResult() async throws {
+        let (coordinator, table) = fixture()
+        let earlier = rows("earlier", count: 1)
+        coordinator.load(earlier, marks: nil, selection: [])
+        coordinator.setPresentationActive(false)
+        coordinator.load(rows("intermediate"), marks: nil, selection: [])
+        await coordinator.sortJob?.value
+        let latest = rows("latest")
+        coordinator.load(latest, marks: nil, selection: [])
+        await coordinator.sortJob?.value
+        #expect(coordinator.shown == earlier && table.numberOfRows == 1)
+        coordinator.setPresentationActive(true)
+        for _ in 0..<100 where coordinator.shown.count != latest.count { try await Task.sleep(for: .milliseconds(5)) }
+        #expect(coordinator.shown.map(\.id) == latest.reversed().map(\.id))
+        #expect(table.numberOfRows == latest.count)
+    }
 }

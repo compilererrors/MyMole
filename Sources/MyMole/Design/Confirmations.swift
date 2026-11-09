@@ -76,6 +76,7 @@ private struct ActionConfirmation: ViewModifier {
                 Text(message + (action != nil && !always
                      ? "\n\n" + String(localized: "Don't Ask Again applies only to this action. Turn the question on again in Settings → Confirmations.") : ""))
             }
+            .confirmationKeyboard(isPresented: Binding(get: { requested && asks }, set: { requested = $0 }))
             .onChange(of: requested, initial: true) { _, asked in
                 if asked, !asks { run(skip: false) }
             }
@@ -135,7 +136,7 @@ struct ConfirmationsSection: View {
     @State private var settings = ConfirmationSettings.shared
 
     var body: some View {
-        DSSection("Confirmations", footer: "Turning a question off applies only to that action. Your choices, Keep rules and all file checks still apply. Permanent deletion, emptying the Trash, system maintenance, startup changes, similar-photo removal and uninstalling MyMole always ask.") {
+        DSSection("Confirmations", footer: "Turning a question off applies only to that action. Your choices, Keep rules and all file checks still apply. Manually chosen unverified matches, permanent deletion, emptying the Trash, system maintenance, startup changes, similar-photo removal and uninstalling MyMole always ask.") {
             ForEach(ConfirmationAction.allCases) { action in
                 Toggle(isOn: Binding(get: { settings.asks(action) }, set: { settings.setAsking($0, for: action) })) {
                     Text(action.title)

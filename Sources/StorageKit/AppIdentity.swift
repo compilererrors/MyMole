@@ -15,11 +15,14 @@ public struct AppIdentity: Sendable, Equatable {
     /// Bundle and helper IDs claimed by other installed apps. These must
     /// survive every fallback match, including vendor and deeper searches.
     public var otherOwnerIDs: [String] = []
+    /// Known competing signed group claims, including read-only discovery.
+    public var otherGroupIDs: [String] = []
 
-    public init(helperIDs: [String] = [], groups: [String] = [], otherOwnerIDs: [String] = []) {
+    public init(helperIDs: [String] = [], groups: [String] = [], otherOwnerIDs: [String] = [], otherGroupIDs: [String] = []) {
         self.helperIDs = helperIDs
         self.groups = groups
         self.otherOwnerIDs = otherOwnerIDs
+        self.otherGroupIDs = otherGroupIDs
     }
 
     /// Where an app keeps code with identities of its own.
@@ -48,65 +51,93 @@ public struct AppIdentity: Sendable, Equatable {
 
     private static func contents(atPath path: String) -> Contents? {
         var found = Set<String>()
-        var code: [String] = []
+        var code = Set<String>()
         var remaining = 10_000
-        func visit(_ path: String, depth: Int) -> Bool {
-            guard depth <= 8 else { return false }
-            code.append(path)
-            for folder in bundleFolders {
-                let dir = path + "/" + folder
-                guard let names = identityNames(in: folder, bundle: path) else { return false }
-                remaining -= names.count
-                guard remaining >= 0 else { return false }
-                for name in names {
-                    let item = dir + "/" + name
-                    var st = stat()
-                    guard lstat(item, &st) == 0 else { return false }
-                    if st.st_mode & S_IFMT == S_IFDIR {
-                        let candidates = [item + "/Contents/Info.plist", item + "/Info.plist"]
-                        var identified = false
-                        for file in candidates {
-                            switch readPlist(file, within: item) {
-                            case .missing: continue
-                            case .invalid: return false
-                            case .value(let info):
-                                guard let id = info["CFBundleIdentifier"] as? String, AppLeftovers.isWellFormed(id) else { return false }
-                                found.insert(id)
-                                identified = true
-                                guard visit(item, depth: depth + 1) else { return false }
-                            }
-                            break
-                        }
-                        // An opaque directory in a code location may hold another owner.
-                        guard identified else { return false }
-                    } else if st.st_mode & S_IFMT == S_IFREG {
-                        if st.st_mode & 0o111 != 0 { code.append(item) }
-                        if folder == "Contents/Library/LaunchServices", AppLeftovers.isWellFormed(name) {
-                            found.insert(name)
-                        }
-                    } else {
-                        return false
-                    }
-                }
-                guard Trasher.noLinksBetween(path, and: dir) || names.isEmpty else { return false }
+        var visited = Set<String>()
+        let root = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+
+        func canonical(_ item: String) -> String? {
+            let resolved = URL(fileURLWithPath: item).resolvingSymlinksInPath().path
+            guard resolved == root || resolved.hasPrefix(root + "/"),
+                  Trasher.noLinksBetween(root, and: resolved) else { return nil }
+            return resolved
+        }
+        func names(_ directory: String) -> [String]? {
+            guard let names = DirectoryListing.names(directory) else { return nil }
+            remaining -= names.count
+            return remaining >= 0 ? names : nil
+        }
+        func inspect(_ item: String, depth: Int, launchService: Bool = false) -> Bool {
+            guard depth <= 8, let item = canonical(item) else { return false }
+            guard visited.insert(item).inserted else { return true }
+            var st = stat()
+            guard lstat(item, &st) == 0 else { return false }
+            if st.st_mode & S_IFMT == S_IFREG {
+                if st.st_mode & 0o111 != 0 { code.insert(item) }
+                let name = (item as NSString).lastPathComponent
+                if launchService, AppLeftovers.isWellFormed(name) { found.insert(name) }
+                return true
             }
-            for folder in jobFolders {
-                let dir = path + "/" + folder
-                guard let names = identityNames(in: folder, bundle: path) else { return false }
-                remaining -= names.count
-                guard remaining >= 0 else { return false }
-                for name in names where name.hasSuffix(".plist") {
-                    guard case .value(let info) = readPlist(dir + "/" + name, within: path),
-                        let label = info["Label"] as? String, AppLeftovers.isWellFormed(label)
-                    else { return false }
-                    found.insert(label)
+            guard st.st_mode & S_IFMT == S_IFDIR else { return false }
+            var identified = false
+            for relative in ["Contents/Info.plist", "Info.plist", "Resources/Info.plist"] {
+                let candidate = item + "/" + relative
+                var infoStat = stat()
+                if lstat(candidate, &infoStat) != 0 {
+                    guard errno == ENOENT || errno == ENOTDIR else { return false }
+                    continue
                 }
-                guard Trasher.noLinksBetween(path, and: dir) || names.isEmpty else { return false }
+                guard let file = canonical(candidate), case .value(let info) = readPlist(file, within: root) else { return false }
+                // Storyboards and language plug-ins also use Info.plist,
+                // without declaring a code identity. Still inspect their children.
+                guard let value = info["CFBundleIdentifier"] else { continue }
+                guard let id = value as? String, AppLeftovers.isWellFormed(id) else { return false }
+                found.insert(id)
+                identified = true
+                code.insert(item)
+                break
+            }
+            let ext = (item as NSString).pathExtension.lowercased()
+            // A claimed bundle with broken/missing metadata is unknown. A
+            // plain plug-in container is traversed instead of treated as an error.
+            if ["app", "xpc", "appex", "framework", "bundle"].contains(ext), !identified { return false }
+            if identified, FileManager.default.fileExists(atPath: item + "/Contents") {
+                return visit(item, depth: depth)
+            }
+            guard let entries = names(item) else { return false }
+            for name in entries {
+                guard inspect(item + "/" + name, depth: depth + 1) else { return false }
             }
             return true
         }
-        guard visit(path, depth: 0) else { return nil }
-        return Contents(ids: found, code: code)
+        func visit(_ bundle: String, depth: Int) -> Bool {
+            guard depth <= 8 else { return false }
+            code.insert(bundle)
+            for folder in bundleFolders {
+                let dir = bundle + "/" + folder
+                guard let entries = identityNames(in: folder, bundle: bundle) else { return false }
+                remaining -= entries.count
+                guard remaining >= 0 else { return false }
+                for name in entries {
+                    guard inspect(dir + "/" + name, depth: depth + 1,
+                                  launchService: folder == "Contents/Library/LaunchServices") else { return false }
+                }
+            }
+            for folder in jobFolders {
+                let dir = bundle + "/" + folder
+                guard let entries = identityNames(in: folder, bundle: bundle) else { return false }
+                remaining -= entries.count
+                guard remaining >= 0 else { return false }
+                for name in entries where name.hasSuffix(".plist") {
+                    guard case .value(let info) = readPlist(dir + "/" + name, within: bundle),
+                          let label = info["Label"] as? String, AppLeftovers.isWellFormed(label) else { return false }
+                    found.insert(label)
+                }
+            }
+            return true
+        }
+        guard Trasher.noLinksBetween(path, and: path), visit(path, depth: 0) else { return nil }
+        return Contents(ids: found, code: code.sorted())
     }
 
     /// Include groups claimed by nested apps, services and executable helpers.
@@ -162,8 +193,8 @@ public struct AppIdentity: Sendable, Equatable {
                 return !claimed.contains(h) && !otherIDs.contains { o in h == o.lowercased() || h.hasPrefix(o.lowercased() + ".") }
             }
         }
+        var claimed = Set<String>()
         if !groups.isEmpty {
-            var claimed = Set<String>()
             // Bundle prefixes can differ while apps still share an app group.
             for other in others {
                 guard let ids = readers.groups(other.path) else { return nil }
@@ -172,12 +203,31 @@ public struct AppIdentity: Sendable, Equatable {
             let folded = Set(claimed.map { $0.lowercased() })
             groups = groups.filter { !folded.contains($0.lowercased()) }
         }
-        return AppIdentity(helperIDs: helpers, groups: groups, otherOwnerIDs: carried.union(otherIDs).sorted())
+        return AppIdentity(helperIDs: helpers, groups: groups, otherOwnerIDs: carried.union(otherIDs).sorted(), otherGroupIDs: claimed.sorted())
     }
 
     public static func owned(for app: AppBundle, installed: [AppBundle], readers: Readers = .live) -> AppIdentity? {
         guard let identity = of(app, readers: readers) else { return nil }
         return owned(identity, of: app, installed: installed, readers: readers)
+    }
+
+    /// Partial evidence for read-only discovery. It grants no ownership or
+    /// removal permission; known competing claims still exclude matches.
+    public static func possible(for app: AppBundle, installed: [AppBundle], readers: Readers = .live) -> AppIdentity {
+        let others = installed.filter { $0.path != app.path }
+        let carried = Set(others.flatMap { readers.carried($0.path) ?? [] })
+        let otherIDs = carried.union(others.compactMap(\.bundleID))
+        let claimedGroups = Set(others.flatMap { readers.groups($0.path) ?? [] }.map { $0.lowercased() })
+        let space = app.bundleID.flatMap(namespace)
+        let helpers = (readers.carried(app.path) ?? []).filter { id in
+            guard let space else { return false }
+            return id != app.bundleID && id.hasPrefix(space) && !id.hasPrefix("com.apple.") && AppLeftovers.isWellFormed(id)
+                && !otherIDs.contains { id.caseInsensitiveCompare($0) == .orderedSame }
+        }
+        let groups = (readers.groups(app.path) ?? []).filter {
+            isRemovableGroup($0) && !claimedGroups.contains($0.lowercased())
+        }
+        return AppIdentity(helperIDs: helpers.sorted(), groups: groups.sorted(), otherOwnerIDs: otherIDs.sorted(), otherGroupIDs: claimedGroups.sorted())
     }
 
     private static func identityNames(in folder: String, bundle: String) -> [String]? {

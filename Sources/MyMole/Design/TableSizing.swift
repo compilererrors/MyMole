@@ -5,7 +5,9 @@ import AppKit
 }
 
 extension NSTableView {
-    func configureUserColumns() {
+    func configureUserColumns(hiddenByDefault: Set<String> = []) {
+        (self as? any UserColumnTable)?.defaultHiddenColumns = hiddenByDefault
+        tableColumn(withIdentifier: .init(FileColumn.name.rawValue))?.isHidden = false
         allowsColumnResizing = true
         allowsColumnReordering = true
         columnAutoresizingStyle = .noColumnAutoresizing
@@ -14,7 +16,7 @@ extension NSTableView {
             if let field = FileColumn(rawValue: column.identifier.rawValue) { column.maxWidth = field.width.max }
         }
         enclosingScrollView?.hasHorizontalScroller = true
-        headerView?.toolTip = String(localized: "Drag column dividers to resize. Double-click a divider to fit visible contents. Scroll sideways or hover to read full text.")
+        headerView?.toolTip = String(localized: "Drag column dividers to resize. Double-click a divider to fit visible contents. Right-click a heading to show or hide columns. Scroll sideways or hover to read full text.")
     }
 
     /// Fill unused space without shrinking any user-chosen column width.

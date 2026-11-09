@@ -76,7 +76,8 @@ import Testing
         let m = box.model()
         m.chosen = [box.project + "/.build"]
         m.trashChosen()
-        #expect(!m.trashing)
+        #expect(m.trashing)
+        while m.trashing { try await Task.sleep(for: .milliseconds(5)) }
         #expect(m.notice?.text == "Nothing was moved: Deep Clean's keep list couldn't be read.")
         #expect(box.exists("App/.build/out"))
     }

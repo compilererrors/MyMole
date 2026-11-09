@@ -49,6 +49,14 @@ import Testing
         #expect(!PrivilegedClient.Failure.unknownText.contains("was stopped"))
     }
 
+    @Test func applicationMoveRefusalsPreserveTheirSpecificSupportCode() {
+        let failure = ApplicationTrash.Failure(.backgroundStopFailed, "Synthetic launch agent did not stop.")
+        #expect(throws: failure) {
+            try PrivilegedClient.interpret(code: 0, output: PrivilegedTool.output(.applicationTrashRefusal(failure)))
+        }
+        #expect(ErrorCode(.uninstall, failure).description == "MM-UNINST-ApplicationTrashFailure2107")
+    }
+
     #if !APPSTORE
     @Test func oneSystemTaskAtATimeFromOneClient() async throws {
         let state = Mutex((active: 0, peak: 0, calls: 0))
@@ -146,6 +154,12 @@ import Testing
         await #expect(throws: PrivilegedClient.Failure.unavailable) {
             try await client.removeLeftovers(["/Library/LaunchDaemons/com.vendor.Agent.plist"], appID: "com.vendor.Agent", ids: [])
         }
+        let identity = Trasher.Identity(type: 0, device: 0, inode: 0)
+        let request = ApplicationTrash.Request(path: "/synthetic/Editor.app", bundleID: "com.example.Editor",
+            identity: identity, parentIdentity: identity, uid: 501, trashName: "synthetic.app")
+        let receipt = ApplicationTrash.Receipt(request: request, record: .init(
+            original: URL(fileURLWithPath: "/synthetic/Editor.app"), trashed: URL(fileURLWithPath: "/synthetic/Trash/Editor.app")))
+        #expect((try? await client.restoreApplication(receipt)) == false)
         #expect(calls.list.isEmpty)
         // The live prompt is a stub that runs nothing.
         #expect(PrivilegedClient.adminPrompt("/bin/echo", "x", "y").code == -1)

@@ -28,6 +28,34 @@ public struct Orphan: Sendable, Hashable, Identifiable {
 ///   settings under their own name, outside any one app.
 /// - Settings and data are never chosen by default.
 public enum Orphans {
+    /// A fresh ownership snapshot shared by one discovery or queued move.
+    /// Exact IDs and dot-boundary ancestors are indexed once, not rescanned
+    /// for every candidate. The live registration lookup remains separate.
+    public struct Owners: Sendable {
+        private let vendors: Set<String>
+        private let ids: Set<String>
+        private let ancestors: Set<String>
+
+        public init(installed: [AppBundle], running: Set<String>, claimedIDs: Set<String>) {
+            self.init(vendors: Orphans.vendors(of: installed), running: running, claimedIDs: claimedIDs)
+        }
+
+        init(vendors: Set<String>, running: Set<String>, claimedIDs: Set<String>) {
+            self.vendors = vendors
+            ids = Set(running.union(claimedIDs).map { $0.lowercased() })
+            var prefixes = Set<String>()
+            for id in ids {
+                for index in id.indices where id[index] == "." { prefixes.insert(String(id[..<index])) }
+            }
+            ancestors = prefixes
+        }
+
+        func claims(_ id: String) -> Bool {
+            let lower = id.lowercased()
+            if vendors.contains(Orphans.vendor(lower)) || ids.contains(lower) || ancestors.contains(lower) { return true }
+            return lower.indices.contains { lower[$0] == "." && ids.contains(String(lower[..<$0])) }
+        }
+    }
     /// Library folders searched, and the ending an entry's name has there.
     static let places: [(folder: String, suffix: String)] = [
         ("Application Support", ""), ("Caches", ""), ("Containers", ""), ("Preferences", ".plist"),
@@ -55,14 +83,7 @@ public enum Orphans {
 
     /// Whether something on the Mac still answers to `id`.
     static func isClaimed(_ id: String, vendors: Set<String>, known: (String) -> Bool, running: Set<String>, claimedIDs: Set<String>) -> Bool {
-        let lower = id.lowercased()
-        if vendors.contains(vendor(id)) { return true }
-        func claims(_ r: String) -> Bool {
-            let r = r.lowercased()
-            return r == lower || lower.hasPrefix(r + ".") || r.hasPrefix(lower + ".")
-        }
-        if running.contains(where: claims) || claimedIDs.contains(where: claims) { return true }
-        return known(id)
+        Owners(vendors: vendors, running: running, claimedIDs: claimedIDs).claims(id) || known(id)
     }
 
     /// The vendors of the installed apps.
@@ -101,7 +122,7 @@ public enum Orphans {
         guard let claimed = claimedIDs ?? Self.claimedIDs(of: installed, readers: readers) else {
             return OrphanListing(orphans: [], unreadable: [], unknownOwners: true)
         }
-        let vendors = vendors(of: installed)
+        let owners = Owners(installed: installed, running: running, claimedIDs: claimed)
         let lib = home + "/Library"
         var out: [Orphan] = []
         var unreadable: [String] = []
@@ -126,7 +147,7 @@ public enum Orphans {
             }
             entries: for entry in names where !entry.hasPrefix(".") && !progress.isCancelled {
                 guard let id = bundleID(of: entry, suffix: place.suffix),
-                    !isClaimed(id, vendors: vendors, known: registered, running: running, claimedIDs: claimed)
+                    !owners.claims(id), !registered(id)
                 else { continue }
                 let path = dir + "/" + entry
                 guard !Trasher.isProtected(path, home: home), Trasher.noLinksBetween(home, and: path), lstat(path, &st) == 0 else { continue }
@@ -155,6 +176,11 @@ public enum Orphans {
         _ path: String, home: String = Home.path, installed: [AppBundle], known: (String) -> Bool, running: Set<String>, claimedIDs: Set<String>? = nil
     ) -> Bool {
         guard let claimed = claimedIDs ?? Self.claimedIDs(of: installed) else { return false }
+        return isStillOrphan(path, home: home, owners: Owners(installed: installed, running: running, claimedIDs: claimed), known: known)
+    }
+
+    /// Uses the ownership snapshot read after this move obtained its queue slot.
+    public static func isStillOrphan(_ path: String, home: String, owners: Owners, known: (String) -> Bool) -> Bool {
         let lib = home + "/Library/"
         guard Trasher.isPlainPath(path), path.hasPrefix(lib), !Trasher.isProtected(path, home: home),
             Trasher.noLinksBetween(home, and: path)
@@ -162,7 +188,7 @@ public enum Orphans {
         let folder = (String(path.dropFirst(lib.count)) as NSString).deletingLastPathComponent
         let entry = (path as NSString).lastPathComponent
         guard let place = places.first(where: { $0.folder == folder }), let id = bundleID(of: entry, suffix: place.suffix),
-            !isClaimed(id, vendors: vendors(of: installed), known: known, running: running, claimedIDs: claimed)
+            !owners.claims(id), !known(id)
         else { return false }
         var st = stat()
         guard lstat(path, &st) == 0 else { return false }

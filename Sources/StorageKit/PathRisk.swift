@@ -60,6 +60,39 @@ public struct PathRisk: Sendable, Hashable {
         rules.first(where: { $0.match(path) })?.risk
     }
 
+    static func code(of path: String) -> Int8 {
+        rules.firstIndex(where: { $0.match(path) }).map(Int8.init) ?? -1
+    }
+
+    static func merging(_ a: Int8, _ b: Int8) -> Int8 {
+        guard a >= 0 else { return b }
+        guard b >= 0 else { return a }
+        let (x, y) = (rules[Int(a)].risk.level, rules[Int(b)].risk.level)
+        return x == y ? min(a, b) : x > y ? a : b
+    }
+
+    static func decoded(_ code: Int8) -> PathRisk? {
+        guard code >= 0, Int(code) < rules.count else { return nil }
+        let risk = rules[Int(code)].risk
+        return PathRisk(level: risk.level, reason: "Inside: " + risk.reason)
+    }
+
+    // Ancestor-wide rules are checked once per directory, rather than once
+    // per ordinary file. Only names that can add a new rule need a full path.
+    private static let specificNames: Set<String> = [
+        ".aws", ".kube", ".azure", ".netrc", ".npmrc", "config.json", "gh", "gcloud",
+        "Safari", "Chrome", "Profiles", "BraveSoftware", "Microsoft Edge", "Arc", ".Trash",
+        "Backup", "Docker.raw", "Archives", "Devices",
+    ]
+    private static let specificSuffixes = [".photoslibrary", ".vmwarevm", ".pvm", ".utm", ".vdi", ".vmdk", ".qcow2"]
+
+    static func childCode(_ name: String, in parent: String) -> Int8 {
+        guard specificNames.contains(name) || specificSuffixes.contains(where: name.contains) else { return -1 }
+        return code(of: (parent == "/" ? "" : parent) + "/" + name)
+    }
+
+    public static let incomplete = PathRisk(level: .caution, reason: "This folder wasn't fully scanned and may contain personal data. Check its location before moving it.")
+
     /// The gravest risk of anything inside `folder` as scanned, so marking a
     /// parent warns about what it holds. Looks at up to `limit` folders, and
     /// ends at the next folder once `stop` says so, with what it found by

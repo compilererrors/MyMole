@@ -17,20 +17,29 @@ public final class KnownAppCopies: Sendable {
     }
 
     public func adding(to inventory: [AppBundle]) -> [AppBundle]? {
+        let report = listing(alongside: inventory)
+        return report.complete ? report.apps : nil
+    }
+
+    /// Discovery retains every readable known owner even if another is unknown.
+    /// A partial report never authorizes ordinary cleanup.
+    public func listing(alongside inventory: [AppBundle]) -> (apps: [AppBundle], complete: Bool) {
         var result = inventory
+        var complete = true
         var seen = Set(inventory.map(\.path))
         for path in paths.withLock({ $0.sorted() }) where !seen.contains(path) {
-            guard Trasher.isPlainPath(path) else { return nil }
+            guard Trasher.isPlainPath(path) else { complete = false; continue }
             var st = stat()
             if lstat(path, &st) != 0 {
                 if errno == ENOENT || errno == ENOTDIR { continue }
-                return nil
+                complete = false
+                continue
             }
             guard st.st_mode & S_IFMT == S_IFDIR, URL(fileURLWithPath: path).resolvingSymlinksInPath().path == path,
-                  let app = AppFinder.metadata(path), let id = app.bundleID, AppLeftovers.isWellFormed(id) else { return nil }
+                  let app = AppFinder.metadata(path), let id = app.bundleID, AppLeftovers.isWellFormed(id) else { complete = false; continue }
             result.append(app)
             seen.insert(path)
         }
-        return result
+        return (result, complete)
     }
 }

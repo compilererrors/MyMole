@@ -32,8 +32,9 @@ struct InstallersView: View {
         ) { model.trashChosen() }
         .onAppear { model.scanIfNeeded() }
         .alert(model.problem ?? "", isPresented: Binding(get: { model.problem != nil }, set: { if !$0 { model.problem = nil } })) {
-            Button("OK") {}
+            Button("OK", role: .cancel) {}
         }
+        .confirmationKeyboard(isPresented: Binding(get: { model.problem != nil }, set: { if !$0 { model.problem = nil } }))
     }
 
     @ToolbarContentBuilder private var tools: some ToolbarContent {
@@ -41,8 +42,8 @@ struct InstallersView: View {
             Menu {
                 Section("Looking in") {
                     ForEach(model.locations, id: \.path) { loc in
-                        Button(String(localized: "\(Breakable.path(loc.path).replacingOccurrences(of: "\u{200B}", with: "")) · \(loc.depth) level\(loc.depth == 1 ? "" : "s") deep")) {
-                            FileActions.reveal([loc.path])
+                        Menu(String(localized: "\(Breakable.path(loc.path).replacingOccurrences(of: "\u{200B}", with: "")) · \(loc.depth) level\(loc.depth == 1 ? "" : "s") deep")) {
+                            FileMenuItems(paths: [loc.path], canOpen: false)
                         }
                     }
                 }
@@ -88,7 +89,7 @@ struct InstallersView: View {
         } actions: {
             DSControlField("Filter installers") {
                 DSFilterField(String(localized: "Filter by name or folder"), text: $query)
-                    .frame(width: 280)
+                    .frame(minWidth: 180, idealWidth: 280, maxWidth: .infinity)
                     .disabled(model.files.isEmpty)
             }
             DSControlField("Choose for removal") {

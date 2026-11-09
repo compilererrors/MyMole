@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>NSAppBundlesUsageDescription</key>
+    <string>MyMole inspects apps and moves only the apps you choose to the Trash when you confirm an uninstall.</string>
+    <key>NSAppDataUsageDescription</key>
+    <string>MyMole finds app caches, settings and leftover data so you can review and choose what to move to the Trash.</string>
+    <key>UTExportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeIdentifier</key>
+            <string>app.mymole.status-card</string>
+            <key>UTTypeDescription</key>
+            <string>MyMole status card</string>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>public.json</string>
+            </array>
+        </dict>
+    </array>
+</dict>
+</plist>

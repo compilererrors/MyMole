@@ -52,7 +52,7 @@ struct SavedFilter: Codable, Hashable, Identifiable {
         var parts: [String] = []
         if !f.query.isEmpty { parts.append("“\(f.query)”") }
         if let k = f.kind { parts.append(k.title) }
-        if f.date.isActive { parts.append(f.date.preset.title) }
+        if f.date.isActive { parts.append(f.date.summary) }
         if f.wholeScan { parts.append(String(localized: "whole scan")) }
         return parts.joined(separator: " · ")
     }

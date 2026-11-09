@@ -138,6 +138,10 @@ enum ProcessGroup {
         if read.wait(timeout: .now() + drain) == .timedOut {
             killpg(pid, SIGKILL)
             _ = read.wait(timeout: .now() + 1)
+            // Closing the pipe can precede the child's actual termination.
+            guard groupGone(pid, within: grace) else {
+                return (CommandRunner.stopUnverified, "Its output stayed open; part of it may still be running.")
+            }
             return (CommandRunner.outputUnfinished, "Something it started kept its output open, so the output wasn't used.")
         }
         if output.withLock({ $0.overflow }) {

@@ -21,7 +21,7 @@ struct DateFilter: Hashable, Codable {
             case .olderYear: String(localized: "Older than 1 Year")
             case .olderTwoYears: String(localized: "Older than 2 Years")
             case .before: String(localized: "Before a Date…")
-            case .after: String(localized: "After a Date…")
+            case .after: String(localized: "On or After a Date…")
             case .between: String(localized: "Between Dates…")
             }
         }
@@ -42,6 +42,19 @@ struct DateFilter: Hashable, Codable {
 
     var isActive: Bool { preset != .any }
     var isCustom: Bool { [.before, .after, .between].contains(preset) }
+
+    var summary: String {
+        let first = start.formatted(date: .abbreviated, time: .omitted)
+        switch preset {
+        case .before: return String(localized: "Before \(first)")
+        case .after: return String(localized: "On or after \(first)")
+        case .between:
+            let lo = min(start, end).formatted(date: .abbreviated, time: .omitted)
+            let hi = max(start, end).formatted(date: .abbreviated, time: .omitted)
+            return String(localized: "\(lo) – \(hi)")
+        default: return preset.title
+        }
+    }
 
     nonisolated func matches(_ date: Date) -> Bool {
         let cal = Calendar.current
@@ -89,6 +102,7 @@ struct DateFilterControl: View {
                     systemImage: "calendar")
             }
             .fixedSize()
+            .accessibilityIdentifier("date.filter.preset")
             .help("Show only items by the date they last changed")
             if filter.isCustom {
                 DSFlow(spacing: DS.Space.sm) {
@@ -109,5 +123,5 @@ struct DateFilterControl: View {
         }
     }
 
-    private var value: String { filter.preset.title.replacingOccurrences(of: "…", with: "") }
+    private var value: String { filter.summary }
 }

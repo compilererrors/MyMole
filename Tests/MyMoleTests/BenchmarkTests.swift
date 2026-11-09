@@ -203,6 +203,39 @@ struct BenchmarkTests {
         _ = Self.time("duplicates 5,000 × 8 KB") { DuplicateFinder.find(in: [box.path + "/same"], minimum: 4_096, workers: 4) }
     }
 
+    @Test func duplicateSearchStages() throws {
+        for count in [50, 5_000] {
+            let box = try Box()
+            try box.folder("files")
+            for pair in 0..<(count / 2) {
+                box.file("files/f\(pair)-a.bin", bytes: 8_192)
+                try FileManager.default.copyItem(atPath: box.path + "/files/f\(pair)-a.bin", toPath: box.path + "/files/f\(pair)-b.bin")
+            }
+            var measurements: [String: [Double]] = [:]
+            for _ in 0..<7 {
+                let start = ContinuousClock.now
+                let stages = Mutex<[String: Double]>([:])
+                @Sendable func elapsed() -> Double { Double((ContinuousClock.now - start) / .microseconds(1)) / 1_000 }
+                let found = DuplicateFinder.find(in: [box.path + "/files"], minimum: 4_096, workers: 4,
+                    onGroup: { _ in stages.withLock { if $0["first verified group"] == nil { $0["first verified group"] = elapsed() } } },
+                    onStep: { s in
+                        if s.phase == .comparing, s.done == 0 { stages.withLock { $0["metadata"] = elapsed() } }
+                    })
+                #expect(found.groups.count == count / 2 && found.uncompared == 0 && found.unreadable.isEmpty)
+                let total = elapsed()
+                let measured = stages.withLock { $0 }
+                for (name, value) in measured { measurements[name, default: []].append(value) }
+                measurements["content comparison", default: []].append(total - (measured["metadata"] ?? total))
+                measurements["total", default: []].append(total)
+            }
+            for name in measurements.keys.sorted() {
+                let values = measurements[name, default: []].sorted()
+                #expect(values.count == 7)
+                print(String(format: "bench duplicates %d %@   n 7   median %.3f ms   p95 %.3f ms", count, name, values[values.count / 2], values.last ?? 0))
+            }
+        }
+    }
+
     @Test func groupingTwentyThousandFingerprints() {
         let prints = (0..<20_000).map { i in
             (SimilarImage(path: "/synthetic/\(i).jpg", bytes: 1, modified: .distantPast, width: 1, height: 1, inode: 0, length: 1),
@@ -230,6 +263,35 @@ struct BenchmarkTests {
                 let found = list.filter { query.matches($0.name, $0.location ?? "") }
                 withExtendedLifetime(found) {}
             }
+        }
+    }
+
+    @MainActor @Test func repeatedLargeListInteractions() async {
+        let rows = (0..<50_000).map { FileRow(id: "/synthetic/\($0)", name: "Item \($0)", size: Int64($0)) }
+        let parent = FileTable(rows: rows, columns: [.name, .size], autosave: "synthetic.interactions", selection: .constant([]))
+        let coordinator = parent.makeCoordinator()
+        let table = FileTableView()
+        coordinator.table = table
+        table.dataSource = coordinator
+        coordinator.load(rows, marks: [], selection: [])
+        await coordinator.sortJob?.value
+        Self.repeated("unchanged table 50k", runs: 31) {
+            coordinator.load(rows, marks: [], selection: [])
+        }
+        var offset = 0
+        Self.repeated("selection table 50k", runs: 31) {
+            offset += 1
+            coordinator.load(rows, marks: [], selection: [rows[offset].id])
+        }
+        #expect(coordinator.shown.count == rows.count && coordinator.sortJob == nil)
+    }
+
+    @Test func preparedOrphanOwnerLookups() {
+        let claimed = Set((0..<5_000).map { "net.syntheticcatalog.Product\($0)" })
+        let owners = Orphans.Owners(vendors: [], running: [], claimedIDs: claimed)
+        let candidates = (0..<12_000).map { "org.syntheticunused.Item\($0)" }
+        Self.repeated("orphan ownership 5k x 12k", runs: 15) {
+            #expect(!candidates.contains(where: owners.claims))
         }
     }
 
@@ -270,7 +332,7 @@ struct BenchmarkTests {
             let menu = NSMenu()
             Self.repeated("context menu in \(count) rows") {
                 coordinator.menuNeedsUpdate(menu)
-                #expect(menu.items.count == 3)
+                #expect(menu.items.contains { $0.title == "Copy Absolute Path" })
             }
         }
     }

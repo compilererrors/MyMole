@@ -485,39 +485,42 @@ final class ProjectsModel {
             show(Notice(text: String(localized: "Nothing was moved: a scan is running. Try again when it's done."), canUndo: false))
             return
         }
-        let onDisk: ProjectRules
+        trashing = true
         let base = base
-        do {
-            onDisk = try ProjectStore.loadRules(base: base)
-            rulesError = nil
-        } catch {
-            rulesError = Problem(.projectRules, error)
-            show(Notice(text: String(localized: "Nothing was moved: your project rules couldn't be read."), canUndo: false))
-            return
-        }
-        // What Deep Clean keeps stays here too; a list that can't be read
-        // stops the run, as unreadable rules do.
         let keepList = keepList
-        do {
-            keptInDeepClean = try CleanKeepList.load(from: keepList)
-        } catch {
-            show(Notice(text: String(localized: "Nothing was moved: Deep Clean's keep list couldn't be read."), canUndo: false))
-            return
-        }
         let current = rules
-        // A path kept in Deep Clean counts as one kept here: it's left
-        // alone, and a chosen folder holding it goes around it.
-        var merged = current.merging(onDisk)
-        merged.keepPaths.formUnion(keptInDeepClean.paths)
-        let guarding = merged
         // What the user left out of a chosen folder stays, like a kept path.
         let picks = picked.map {
             (path: $0.entry.path, project: $0.project, worktree: $0.item.category == .worktrees, leftOut: excluded(inside: $0.entry.path))
         }
         let backend = trashBackend
-        trashing = true
         Task {
-            let (plan, held, outcome) = await jobs.perform(.moveToTrash) { job in
+            let job = await jobs.begin(.moveToTrash)
+            defer { jobs.end(job) }
+            let loaded = await Task.detached(priority: .userInitiated) { () -> Result<(ProjectRules, CleanKeepList), Problem> in
+                let onDisk: ProjectRules
+                do { onDisk = try ProjectStore.loadRules(base: base) }
+                catch { return .failure(Problem(.projectRules, error)) }
+                do { return .success((onDisk, try CleanKeepList.load(from: keepList))) }
+                catch { return .failure(Problem(.keepList, error)) }
+            }.value
+            guard case .success(let (onDisk, deepKeep)) = loaded else {
+                trashing = false
+                if case .failure(let why) = loaded {
+                    if why.code?.area == .projectRules { rulesError = why }
+                    show(Notice(text: why.code?.area == .projectRules
+                        ? String(localized: "Nothing was moved: your project rules couldn't be read.")
+                        : String(localized: "Nothing was moved: Deep Clean's keep list couldn't be read."), canUndo: false))
+                }
+                if scanAfterTrash { scanAfterTrash = false; scan() }
+                return
+            }
+            rulesError = nil
+            keptInDeepClean = deepKeep
+            var merged = current.merging(onDisk)
+            merged.keepPaths.formUnion(deepKeep.paths)
+            let guarding = merged
+            let (plan, held, outcome) = await Task.detached(priority: .userInitiated) {
                 // The picks never overlap: one inside another sits in
                 // something the outer one leaves out.
                 var plan: [String: [String]] = [:]
@@ -545,7 +548,7 @@ final class ProjectsModel {
                         return { now.guards($0) }
                     })
                 return (plan, held, job.moveToTrash(plan.values.flatMap { $0 }, through: gate, backend: backend))
-            }
+            }.value
             applyTrash(outcome, plan: plan, held: held, picked: picked)
         }
     }

@@ -200,6 +200,12 @@ struct Notifier: Sendable {
 
     static var isAvailable: Bool { Bundle.main.bundleIdentifier != nil && Bundle.main.bundlePath.hasSuffix(".app") }
 
+    @MainActor static func notificationsDenied() async -> Bool {
+        guard isAvailable else { return false }
+        let settings = await UNUserNotificationCenter.current().notificationSettings()
+        return settings.authorizationStatus == .denied
+    }
+
     static var live: Notifier {
         guard isAvailable else { return .none }
         return Notifier(
@@ -314,7 +320,7 @@ extension AppModel {
 
     /// The panes that found something, most first.
     var finds: [(pane: Pane, bytes: Int64)] {
-        [Pane.projects, .clean, .installer, .systemClean].filter(\.isAvailable)
+        [Pane.projects, .clean, .installer, .duplicates, .systemClean].filter(\.isAvailable)
             .map { ($0, found($0)) }.filter { $0.1 > 0 }.sorted { $0.1 > $1.1 }
     }
 
@@ -325,14 +331,14 @@ extension AppModel {
     /// scan, a move to the Trash or an Undo that's already running. Scans
     /// only read; what they find waits for the user.
     func backgroundScan() async {
-        guard canScan, !anyScanRunning, takeBackBlocker == nil, !TrashJobs.shared.isBusy else { return }
+        guard canScan, !anyScanRunning, !smartScanning, takeBackBlocker == nil, !TrashJobs.shared.isBusy else { return }
         let started = Date()
         scanAll(background: true)
         projects.scan(background: true)
         let deadline = ContinuousClock.now + Self.backgroundScanLimit
         // A scan reports that it started a moment after it's asked for.
         try? await Task.sleep(for: .milliseconds(500))
-        while anyScanRunning, ContinuousClock.now < deadline { try? await Task.sleep(for: .seconds(1)) }
+        while anyScanRunning || smartScanning, ContinuousClock.now < deadline { try? await Task.sleep(for: .seconds(1)) }
         // Only what this run found is news: a pane whose scan was stopped
         // (access taken back, a move began) still shows what it had before.
         guard canScan else { return }
@@ -350,6 +356,7 @@ extension AppModel {
         case .installer: installers.scannedAt
         case .clean: deepClean.scannedAt
         case .systemClean: systemClean.scannedAt
+        case .duplicates: duplicates.scannedAt
         default: nil
         }
     }

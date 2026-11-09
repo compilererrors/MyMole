@@ -84,18 +84,20 @@ enum Pane: String, CaseIterable, Identifiable {
 final class AppModel {
     var settingsQuery = ""
     private(set) var leaving = false
-    @ObservationIgnored private let selfRemovalAccess = SelfRemovalAccess()
+    @ObservationIgnored private let selfRemovalAccess = AppBundleAccess()
     @ObservationIgnored lazy var selfRemoval = SelfRemovalModel(apps: apps) { [weak self] in
         guard let self else { return String(localized: "MyMole is closing.") }
         return await self.prepareToRemoveSelf()
     } resume: { [weak self] in
         guard let self else { return }
         self.selfRemovalAccess.release()
+        self.apps.selfRemovalURL = nil
         self.leaving = false
         self.startMonitoring()
         self.watch.schedule { [weak self] in await self?.backgroundScan() }
     } quit: { [weak self] in
         self?.selfRemovalAccess.release()
+        self?.apps.selfRemovalURL = nil
         NSApp.terminate(nil)
     }
     /// Every way of opening a pane sets this; each change is a visit that
@@ -150,12 +152,15 @@ final class AppModel {
     /// Read once the folders are open: in the App Sandbox the probe folders
     /// are only reachable through the home folder's bookmark, so a probe
     /// before it is opened always reads as no access.
-    var fullDiskAccess = false
+    let diskAccess = DiskAccessMonitor()
+    var fullDiskAccess: Bool { diskAccess.hasResult && diskAccess.state != .denied && access.has(.home) }
     /// When the user last started a Smart Scan, so a module it didn't get
     /// through shows its result as an earlier one.
     var smartScanStarted: Date?
+    private(set) var smartScanWaiting = Set<Pane>()
+    private(set) var smartScanning = false
     /// What the probe found: granted, refused, or it couldn't tell.
-    private(set) var diskAccessState: FullDiskAccess.State = .unknown
+    var diskAccessState: FullDiskAccess.State { diskAccess.state }
 
     let storage = StorageModel()
     let projects = ProjectsModel()
@@ -189,16 +194,30 @@ final class AppModel {
     init() {
         // Folders chosen for a pane before, opened again before any pane reads them.
         ChosenFolders.shared.restore()
+        #if SMOKE
+        let privileged = ProcessInfo.processInfo.environment["MYMOLE_SMOKE_APPS"] == nil
+            ? PrivilegedClient() : PrivilegedClient(toolPath: nil)
+        #else
         let privileged = PrivilegedClient()
+        #endif
         self.privileged = privileged
         let knownCopies = KnownAppCopies()
-        apps = AppsModel(system: Edition.current.hasSystemTasks ? .live(privileged) : .unavailable, knownCopies: knownCopies)
+        var appSystem: AppsModel.SystemSide = Edition.current.hasSystemTasks ? .live(privileged) : .unavailable
+        var copies: @Sendable (AppBundle) -> [AppBundle]? = AppsModel.liveOtherCopies
+        var runtime = Edition.current.isSandboxed ? [] : RuntimeLeftovers.systemRoots()
+        #if SMOKE
+        if ProcessInfo.processInfo.environment["MYMOLE_SMOKE_APPS"] != nil {
+            appSystem = .init(base: Home.path + "/System", isReady: { false }, remove: { _, _, _ in .init() })
+            copies = { _ in [] }
+            runtime = [.init(path: Home.path + "/Runtime/Caches", kind: .caches), .init(path: Home.path + "/Runtime/Temp", kind: .temporary)]
+        }
+        #endif
+        apps = AppsModel(otherCopies: copies, system: appSystem, knownCopies: knownCopies, runtimeRoots: runtime)
         orphans = OrphansModel(knownCopies: knownCopies)
         maintenance = MaintenanceModel(privileged: privileged)
         systemClean = SystemCleanModel(privileged: privileged)
-        let probed = FullDiskAccess.state()
-        diskAccessState = probed
-        fullDiskAccess = probed != .denied
+        diskAccess.didChange = { [weak self] in self?.prefetchScans() }
+        recheckDiskAccess()
     }
 
     /// Keeps a slow reading going for as long as the app runs, for the menu
@@ -246,12 +265,7 @@ final class AppModel {
     /// Probed off the main thread: the probe reads protected folders, which
     /// can be slow on a busy disk.
     func recheckDiskAccess() {
-        Task {
-            let probed = await Task.detached(priority: .userInitiated) { FullDiskAccess.state() }.value
-            if probed != diskAccessState { diskAccessState = probed }
-            if (probed != .denied) != fullDiskAccess { fullDiskAccess = probed != .denied }
-            prefetchScans()
-        }
+        diskAccess.request(scope: !leaving && access.has(.home) ? access.generation : nil)
     }
 
     private var prewarmed = false
@@ -302,11 +316,11 @@ final class AppModel {
         }
     }
 
-    /// The scans started one after another, at launch and by a Smart Scan
-    /// at the lower performance levels, so taking back a folder can stop
-    /// them between steps.
+    /// Launch preparation and staged Smart Scan jobs. Taking back folder
+    /// access stops a chain before its next step starts.
     private var prefetchChain: Task<Void, Never>?
     private var scanChain: Task<Void, Never>?
+    private var scanChainID: UUID?
 
     /// Whether the next step of a chain started now may still run: not once
     /// folder access has changed, or scanning isn't allowed any more.
@@ -353,7 +367,7 @@ final class AppModel {
     func takeBack(_ place: FolderAccess.Place) async {
         guard takeBackBlocker == nil else { return }
         prefetchChain?.cancel()
-        scanChain?.cancel()
+        cancelSmartScanChain()
         await Self.settle(
             stop: { [self] in
                 deepClean.stop()
@@ -409,10 +423,11 @@ final class AppModel {
             guard let path = apps.ownAppPath, selfRemovalAccess.acquire(path: path) else {
                 return String(localized: "Choose this copy of MyMole to allow uninstalling it. Nothing was moved.")
             }
+            apps.selfRemovalURL = selfRemovalAccess.url
         }
         leaving = true
         prefetchChain?.cancel()
-        scanChain?.cancel()
+        cancelSmartScanChain()
         let monitoring = monitor
         monitor?.cancel()
         monitor = nil
@@ -443,38 +458,73 @@ final class AppModel {
         return nil
     }
 
-    /// Every cleanup scan at once, so the wall time is the slowest, not the
-    /// sum; at the lower performance levels one after another instead.
+    /// Metadata and quick checks first, cleanup walks next, duplicate
+    /// comparison last. Lower performance levels serialize cleanup walks.
     func scanAll(background: Bool = false) {
         // Checked here, not by callers: every module reads protected
         // folders, and a scan without access would report a partial Mac.
         guard canScan else { return }
-        if !background { smartScanStarted = Date() }
-        if privileged.isAvailable && !systemClean.scanning { systemClean.scan() }
-        maintenance.check()
-        guard PerformanceLevel.current().runsScansTogether else {
-            let allowed = stepsAllowed()
-            scanChain?.cancel()
-            scanChain = Task {
-                await Self.run([
-                    { [self] in
-                        if !installers.scanning { installers.scan(background: background) }
-                        await installers.scanJob?.value
-                    },
-                    { [self] in
-                        if !deepClean.scanning { deepClean.scan(background: background) }
-                        await deepClean.scanJob?.value
-                    },
-                    { [self] in
-                        if (apps.apps.isEmpty || apps.isStale) && !apps.loading { apps.load(background: background) }
-                    },
-                ], while: allowed)
-            }
-            return
+        guard !smartScanning else { return }
+        let requestedAt = Date()
+        if !background { smartScanStarted = requestedAt }
+        prefetchChain?.cancel()
+        let allowed = stepsAllowed()
+        let together = PerformanceLevel.current().runsScansTogether
+        let id = UUID()
+        scanChainID = id
+        smartScanning = true
+        smartScanWaiting = Set(smartScanModules)
+        var jobs: [Pane: SmartScanPipeline.Job] = [
+            .optimize: .init(start: { [self] in maintenance.check() }, wait: { [self] in
+                while maintenance.phase == .checking && !Task.isCancelled {
+                    try? await Task.sleep(for: .milliseconds(100))
+                }
+            }),
+            .uninstall: .init(start: { [self] in
+                if !apps.loading { apps.load(background: background) }
+            }, wait: { [self] in await apps.loadJob?.value }),
+            .installer: .init(start: { [self] in
+                if !installers.scanning { installers.scan(background: background) }
+            }, wait: { [self] in await installers.scanJob?.value }),
+            .clean: .init(start: { [self] in
+                if !deepClean.scanning { deepClean.scan(background: background) }
+            }, wait: { [self] in await deepClean.scanJob?.value }),
+            .duplicates: .init(start: { [self] in
+                if !duplicates.scanning, duplicates.scannedAt.map({ $0 < requestedAt }) ?? true {
+                    duplicates.scan(background: background)
+                }
+            }, wait: { [self] in await duplicates.scanJob?.value }),
+        ]
+        if smartScanModules.contains(.systemClean) {
+            jobs[.systemClean] = .init(start: { [self] in
+                if !systemClean.scanning { systemClean.scan() }
+            }, wait: { [self] in await systemClean.scanJob?.value })
         }
-        if !installers.scanning { installers.scan(background: background) }
-        if !deepClean.scanning { deepClean.scan(background: background) }
-        if (apps.apps.isEmpty || apps.isStale) && !apps.loading { apps.load(background: background) }
+        let pipeline = SmartScanPipeline(jobs: jobs)
+        scanChain = Task { [self] in
+            defer {
+                if scanChainID == id {
+                    smartScanWaiting = []
+                    smartScanning = false
+                    scanChainID = nil
+                }
+            }
+            await pipeline.run(together: together, allowed: allowed) { [self] pane in
+                if scanChainID == id { smartScanWaiting.remove(pane) }
+            }
+        }
+    }
+
+    private func cancelSmartScanChain() {
+        scanChain?.cancel()
+        scanChainID = nil
+        smartScanWaiting = []
+        smartScanning = false
+    }
+
+    func stopSmartScan() {
+        cancelSmartScanChain()
+        deepClean.stop(); installers.stop(); apps.stop(); duplicates.stop(); systemClean.stopScan()
     }
 
     func refreshHistory() async {

@@ -18,7 +18,10 @@ final class OrphansModel {
         let canUndo: Bool
     }
 
-    private(set) var items: [Orphan] = []
+    private var data = OrphanDataset() { didSet { presentationRevision &+= 1; chosenSummary = nil } }
+    var items: [Orphan] { data.items }
+    private(set) var presentationRevision: UInt64 = 0
+    @ObservationIgnored private var chosenSummary: (paths: Set<String>, bytes: Int64)?
     private(set) var loading = false
     private(set) var loadedAt: Date?
     private(set) var searchProblem: String?
@@ -32,7 +35,7 @@ final class OrphansModel {
     /// What the user keeps elsewhere: Deep Clean's keep list and the paths
     /// kept in Projects. Tests use lists of their own.
     var protections: UserProtections = .live { didSet { keep = SharedKeep(protections: protections) } }
-    private(set) var keep = SharedKeep(protections: .live)
+    private(set) var keep = SharedKeep(protections: .live) { didSet { presentationRevision &+= 1 } }
 
     private struct Run: UndoableRun {
         let id: UUID
@@ -90,7 +93,7 @@ final class OrphansModel {
         keepWatch = NotificationCenter.default.addObserver(forName: KeepChanges.name, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
-                self.keep = await self.keep.reloaded()
+                self.applyKeep(await self.keep.reloaded())
                 self.chosen = self.chosen.filter { !self.keep.protects($0) }
             }
         }
@@ -159,10 +162,13 @@ final class OrphansModel {
             }
             let found = listing.orphans
             unreadable = listing.unreadable
-            keep = refreshedKeep
+            applyKeep(refreshedKeep)
             self.installed = owners
             let firstResult = loadedAt == nil
-            items = found
+            let prepared = await Task.detached(priority: .userInitiated) { OrphanDataset(found) }.value
+            guard progress === p else { return }
+            guard !p.isCancelled else { loading = false; progress = nil; stopped = true; return }
+            replaceData(prepared)
             loadedAt = .now
             loading = false
             progress = nil
@@ -172,19 +178,42 @@ final class OrphansModel {
         }
     }
 
+    func loadIfNeeded(now: Date = .now) {
+        guard !loading, !stopped, !trashing else { return }
+        if let loadedAt, now.timeIntervalSince(loadedAt) < 60 { return }
+        load()
+    }
+
     func stop() { progress?.cancel() }
 
-    var totalBytes: Int64 { items.reduce(0) { $0 + $1.bytes } }
-    var chosenItems: [Orphan] { items.filter { chosen.contains($0.path) } }
-    var chosenBytes: Int64 { chosenItems.reduce(0) { $0 + $1.bytes } }
+    private func replaceData(_ replacement: OrphanDataset) {
+        let previous = RetiredValue(data)
+        data = replacement
+        previous.releaseLater()
+    }
+
+    private func applyKeep(_ refreshed: SharedKeep) {
+        guard keep.kept != refreshed.kept || keep.ownPaths != refreshed.ownPaths || keep.problem != refreshed.problem else { return }
+        keep = refreshed
+    }
+
+    var totalBytes: Int64 { data.totalBytes }
+    var chosenItems: [Orphan] { data.selected(chosen) }
+    var chosenBytes: Int64 {
+        if let cached = chosenSummary, cached.paths == chosen { return cached.bytes }
+        let bytes = data.bytes(in: chosen)
+        chosenSummary = (chosen, bytes)
+        return bytes
+    }
 
     // MARK: Choosing
 
     func toggle(_ path: String) {
+        guard data.index[path] != nil else { return }
         if chosen.contains(path) { chosen.remove(path) } else if !keep.protects(path) { chosen.insert(path) }
     }
 
-    func choose(_ paths: some Sequence<String>) { chosen.formUnion(paths.filter { !keep.protects($0) }) }
+    func choose(_ paths: some Sequence<String>) { chosen.formUnion(paths.filter { data.index[$0] != nil && !keep.protects($0) }) }
 
     func keepAlways(_ paths: [String]) { changeKeep(keep: paths, stop: []) }
     func stopKeeping(_ paths: [String]) { changeKeep(keep: [], stop: paths) }
@@ -223,14 +252,29 @@ final class OrphansModel {
     /// move's turn has come, since apps may have been installed or opened
     /// while it waited; when the apps can't be read, nothing moves.
     func trashChosen() {
-        keep.reload()
-        chosen = chosen.filter { !keep.protects($0) }
-        if let why = keep.blocker { show(Notice(text: why, canUndo: false)) }
         guard trashBlocker == nil else { return }
-        let picked = chosenItems
-        let (home, backend, listed, known, kept, installedNow, readers) = (home, trash, installed, known, keep.gate, installedNow, identityReaders)
+        // Publish feedback before any disk read, decoding or large selection work.
         trashing = true
+        let requested = chosen
+        let input = data
+        let keepSnapshot = keep
+        let (home, backend, listed, known, installedNow, readers) = (home, trash, installed, known, installedNow, identityReaders)
         job = Task {
+            let prepared = await Task.detached(priority: .userInitiated) {
+                var refreshed = keepSnapshot
+                refreshed.reload()
+                let allowed = Set(requested.filter { !refreshed.protects($0) })
+                return (refreshed, input.selected(allowed))
+            }.value
+            applyKeep(prepared.0)
+            chosen = chosen.filter { !keep.protects($0) }
+            guard prepared.0.blocker == nil, !prepared.1.isEmpty else {
+                trashing = false
+                if let why = prepared.0.blocker { show(Notice(text: why, canUndo: false)) }
+                return
+            }
+            let picked = prepared.1
+            let kept = prepared.0.gate
             let job = await jobs.begin(.moveToTrash)
             let current = await Task.detached(priority: .userInitiated) { () -> Owners? in
                 guard let apps = installedNow(), let ids = Orphans.claimedIDs(of: apps, readers: readers) else { return nil }
@@ -247,17 +291,20 @@ final class OrphansModel {
                     canUndo: false))
                 return
             }
-            let installed = listed + current.apps
             let outcome = await Task.detached(priority: .userInitiated) {
-                job.moveToTrash(picked.map(\.path), through: TrashGate(still: { p in
-                    Orphans.isStillOrphan(p, home: home, installed: installed, known: known, running: runningNow, claimedIDs: current.ids)
+                let owners = Orphans.Owners(installed: listed + current.apps, running: runningNow, claimedIDs: current.ids)
+                return job.moveToTrash(picked.map(\.path), through: TrashGate(still: { p in
+                    Orphans.isStillOrphan(p, home: home, owners: owners, known: known)
                 }, protections: kept), backend: backend)
             }.value
             jobs.end(job)
-            trashing = false
             let moved = Set(outcome.moved.map(\.original.path))
             let gone = picked.filter { moved.contains($0.path) }
-            items.removeAll { moved.contains($0.path) }
+            let remaining = await Task.detached(priority: .userInitiated) {
+                OrphanDataset(input.items.filter { !moved.contains($0.path) })
+            }.value
+            replaceData(remaining)
+            trashing = false
             chosen.subtract(picked.map(\.path))
             let record = CleanupRecord(source: Self.source, items: gone.count, bytes: gone.reduce(0) { $0 + $1.bytes }, failed: outcome.failed.count)
             if !outcome.moved.isEmpty { shelf.add(Run(id: record.id, records: outcome.moved, items: gone)) }
@@ -276,7 +323,6 @@ final class OrphansModel {
         trashing = true
         job = Task {
             let failedRecords = await jobs.perform(.putBack) { $0.putBack(run.records) }
-            trashing = false
             let failed = Set(failedRecords.map(\.original.path))
             let back = run.items.filter { !failed.contains($0.path) }
             CleanupLog.submitRestore(run.id, restored: back.count, bytes: back.reduce(0) { $0 + $1.bytes }, failed: failed.count, in: logURL)
@@ -288,7 +334,12 @@ final class OrphansModel {
                     $0.items = run.items.filter { failed.contains($0.path) }
                 }
             }
-            items = (items + back).sorted { $0.bytes != $1.bytes ? $0.bytes > $1.bytes : $0.path < $1.path }
+            let previous = items
+            let restored = await Task.detached(priority: .userInitiated) {
+                OrphanDataset((previous + back).sorted { $0.bytes != $1.bytes ? $0.bytes > $1.bytes : $0.path < $1.path })
+            }.value
+            replaceData(restored)
+            trashing = false
             show(Notice(
                 text: failed.isEmpty
                     ? String(localized: "Restored \(back.count) leftover\(back.count == 1 ? "" : "s")")

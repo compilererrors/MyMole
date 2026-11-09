@@ -58,6 +58,45 @@ import Testing
         #expect(box.exists(cache) && model.items.contains { $0.path == cache })
     }
 
+    @Test func reopeningReusesRecentResultsAndRefreshesOlderOnes() async throws {
+        let box = Box()
+        let calls = Mutex(0)
+        let model = box.model(installedNow: { calls.withLock { $0 += 1 }; return [] })
+        _ = try box.file("Library/Caches/com.absent.Editor/blob")
+        model.loadIfNeeded()
+        await model.job?.value
+        #expect(model.items.count == 1 && calls.withLock { $0 } == 1)
+        let previousRevision = model.presentationRevision
+        _ = try box.file("Library/Caches/com.absent.Viewer/blob")
+        model.loadIfNeeded()
+        #expect(!model.loading && model.items.count == 1)
+        #expect(model.presentationRevision == previousRevision && calls.withLock { $0 } == 1)
+        model.loadIfNeeded(now: try #require(model.loadedAt).addingTimeInterval(61))
+        await model.job?.value
+        #expect(model.items.count == 2 && calls.withLock { $0 } == 2)
+        _ = try box.file("Library/Caches/com.absent.Player/blob")
+        model.load()
+        await model.job?.value
+        #expect(model.items.count == 3 && calls.withLock { $0 } == 3)
+        #expect(model.totalBytes == model.items.reduce(0) { $0 + $1.bytes })
+        #expect(model.chosenBytes == model.chosenItems.reduce(0) { $0 + $1.bytes })
+    }
+
+    @Test func trashPublishesBusyBeforeItsBackgroundPreflightAndKeepsNewProtections() async throws {
+        let box = Box()
+        let cache = try box.file("Library/Caches/com.absent.Editor/blob")
+        let model = box.model()
+        model.load()
+        await model.job?.value
+        let revision = model.presentationRevision
+        _ = try CleanKeepList.update(at: model.protections.keepList) { $0.paths.insert(cache) }
+        model.trashChosen()
+        #expect(model.trashing)
+        await model.job?.value
+        #expect(!model.trashing && box.exists(cache))
+        #expect(model.chosen.isEmpty && model.presentationRevision > revision)
+    }
+
     @Test func anAppStartedSinceTheSearchKeepsItsData() async throws {
         let box = Box()
         let cache = try box.file("Library/Caches/com.gone.Editor/blob")
@@ -166,6 +205,8 @@ import Testing
         #expect(model.stopped && !model.loading && model.loadedAt == date)
         #expect(model.items.map(\.path) == [cache] && model.chosen == [cache])
         #expect(budget.running == 1 && budget.waiting == 0)
+        model.loadIfNeeded()
+        #expect(!model.loading && budget.waiting == 0)
         release.yield(()); release.finish()
         _ = await hold.value
         model.load()

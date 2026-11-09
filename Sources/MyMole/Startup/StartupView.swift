@@ -61,6 +61,7 @@ struct StartupView: View {
             message: String(localized: "\(model.chosenItems.map(\.label).sorted().joined(separator: ", ")). They stop starting from the next login; one that's running now keeps running until then, or until you quit its app. You can undo right after, or put them back from the Trash later.")
         ) { model.trashChosen() }
         .onAppear { model.load() }
+        .liveRefresh(every: .seconds(3)) { await model.refreshLive() }
     }
 
     private var header: some View {
@@ -75,7 +76,7 @@ struct StartupView: View {
         } actions: {
             DSControlField("Filter startup items and plug-ins") {
                 DSFilterField(String(localized: "Filter by name or program"), text: $query)
-                    .frame(width: 280)
+                    .frame(minWidth: 180, idealWidth: 280, maxWidth: .infinity)
                     .disabled(model.items.isEmpty)
             }
             DSControlField("Choose for removal") {
@@ -207,9 +208,9 @@ struct StartupView: View {
 
     private func menu(_ picked: [StartupItem]) -> [TableMenuEntry] {
         let removable = picked.filter(model.isRemovable).map(\.path)
-        var out: [TableMenuEntry] = [.action(String(localized: "Show in Finder")) { FileActions.reveal(picked.map(\.path)) }]
+        var out = FileActions.menu(picked.map(\.path), canOpen: false)
         let programs = picked.compactMap(\.program).filter { $0.hasPrefix("/") }
-        if !programs.isEmpty { out.append(.action(String(localized: "Show Program in Finder")) { FileActions.reveal(programs) }) }
+        if !programs.isEmpty { out.append(.submenu(String(localized: "Program"), FileActions.menu(programs, canOpen: false))) }
         if !removable.isEmpty {
             out.append(.divider)
             if removable.contains(where: { !model.chosen.contains($0) }) {

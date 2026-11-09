@@ -80,7 +80,8 @@ struct ProjectsView: View {
                 Section("Looking in") {
                     ForEach(model.roots, id: \.self) { root in
                         Menu(Breakable.path(root).replacingOccurrences(of: "\u{200B}", with: "")) {
-                            Button("Reveal in Finder") { FileActions.reveal([root]) }
+                            FileMenuItems(paths: [root], canOpen: false)
+                            Divider()
                             Button("Stop Looking Here") { model.removeRoot(root) }
                         }
                     }
@@ -130,9 +131,7 @@ struct ProjectsView: View {
                 chips
                 Spacer(minLength: 0)
             }
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: DS.Space.sm) { chips }
-            }
+            DSFlow(spacing: DS.Space.sm) { chips }
         }
         .padding(.horizontal, DS.Space.page)
         .padding(.vertical, DS.Space.md)
@@ -178,27 +177,41 @@ struct ProjectsView: View {
     private var list: some View {
         let shown = shownFootprints
         return VStack(spacing: 0) {
-            DSControlBar("Find a project", detail: "Search by name, project type or folder, and narrow the list by recent activity.") {
-                DSControlField("Filter projects") {
-                    DSFilterField(String(localized: "Filter by name, type or folder"), text: $query)
-                        .frame(width: 180)
+            VStack(alignment: .leading, spacing: DS.Space.sm) {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: DS.Space.sm) { projectSearch; projectFilterActions }
+                    VStack(alignment: .leading, spacing: DS.Space.sm) { projectSearch; projectFilterActions }
                 }
-                DSControlField("Last active") {
-                    Picker("Last Active", selection: $active) {
-                        ForEach(ProjectActivity.allCases) { Text($0.title).tag($0) }
-                    }
-                    .labelsHidden()
-                    .fixedSize()
-                    .help("Projects by when anything in them last changed")
+                if active != .any {
+                    DSFilterChip(title: String(localized: "Last active: \(active.title)")) { active = .any }
                 }
                 if !query.isEmpty || active != .any {
-                    DSText(String(localized: "\(shown.count) of \(model.footprints.count)"), .metadata).keepWhole()
+                    DSText(String(localized: "\(shown.count) of \(model.footprints.count) projects"), .metadata)
                 }
             }
             .padding(.horizontal, DS.Space.md)
-            .padding(.vertical, DS.Space.md)
+            .padding(.vertical, DS.Space.sm)
             Divider()
             projectTable(shown)
+        }
+    }
+
+    private var projectSearch: some View {
+        DSFilterField(String(localized: "Filter by name, type or folder"), text: $query).frame(minWidth: 140, maxWidth: .infinity)
+    }
+
+    private var projectFilterActions: some View {
+        HStack(spacing: DS.Space.sm) {
+            DSFilterButton("Filter projects", detail: "Narrow the project list by recent activity. The project scans and your removal choices stay the same.",
+                           count: (query.isEmpty ? 0 : 1) + (active == .any ? 0 : 1), clear: { query = ""; active = .any }) {
+                DSControlField("Last active") {
+                    Picker("Last Active", selection: $active) {
+                        ForEach(ProjectActivity.allCases) { Text($0.title).tag($0) }
+                    }.labelsHidden().frame(maxWidth: .infinity, alignment: .leading)
+                    DSText("Uses the newest change found in each project, not the last time you opened its app.", .metadata)
+                }
+            }
+            TableColumnsButton(scope: "projects.list.5").fixedSize()
         }
     }
 
@@ -506,7 +519,7 @@ struct ProjectDetail: View {
     private var more: some View {
         Menu {
             Button("Show in Disk Map", action: showInDiskMap)
-            Button("Reveal in Finder") { FileActions.reveal([footprint.id]) }
+            FileMenuItems(paths: [footprint.id], canOpen: false)
             Divider()
             Button("Add Folder for Cleanup…") { model.addFolderForCleanup(to: footprint.id) }
         } label: {

@@ -27,7 +27,7 @@ final class DeepCleanModel {
     /// changed since it was measured.
     private(set) var isStale = false
     private(set) var notice: Notice?
-    /// Bundle IDs of apps running at the last scan; their caches start unticked.
+    /// Current activity while visible; newly active caches lose their old choices.
     private(set) var running: Set<String> = []
     /// Places the last scan couldn't read, such as app containers without
     /// Full Disk Access: what's there isn't listed.
@@ -66,6 +66,7 @@ final class DeepCleanModel {
     private let runningApps: @MainActor () -> Set<String>
     /// Names of command-line tools running, nil when they can't be read.
     private let runningTools: @Sendable () -> Set<String>?
+    @ObservationIgnored private var activityRevision: UInt64 = 0
     private var tools: Set<String>? = []
     private var progress: ScanProgress?
     /// A move that can still be put back: what moved, the entries it
@@ -186,6 +187,7 @@ final class DeepCleanModel {
         progress = p
         scannedThisLaunch = true
         scanning = true
+        activityRevision &+= 1
         startedAt = .now
         scanFraction = 0
         preview = []
@@ -271,6 +273,28 @@ final class DeepCleanModel {
         Self.inUse(c, home: home, apps: running, tools: tools)
     }
 
+    func refreshActivity() async {
+        guard !trashing else { return }
+        let before = Set(candidates.filter(isRunning).map(\.path))
+        let current = runningApps()
+        if running != current { running = current }
+        unchooseNewlyActive(before: before)
+        guard !scanning else { return }
+        let revision = activityRevision
+        let read = runningTools
+        let found = await Task.detached(priority: .utility) { read() }.value
+        guard !Task.isCancelled, revision == activityRevision, !scanning, !trashing else { return }
+        let beforeTools = Set(candidates.filter(isRunning).map(\.path))
+        if tools != found { tools = found }
+        unchooseNewlyActive(before: beforeTools)
+    }
+
+    private func unchooseNewlyActive(before: Set<String>) {
+        let active = Set(candidates.filter(isRunning).map(\.path))
+        let opening = active.subtracting(before)
+        if !opening.isDisjoint(with: chosen) { chosen.subtract(opening) }
+    }
+
     nonisolated static func inUse(_ c: CleanCandidate, home: String, apps: Set<String>, tools: Set<String>?) -> Bool {
         (c.owner.map(apps.contains) ?? false) || CleanRules.inUse(c.path, home: home, running: tools)
     }
@@ -309,7 +333,7 @@ final class DeepCleanModel {
     func reloadKeepList() { keepFile.reload() }
 
     /// Gives up a change to the keep list that couldn't be saved.
-    func discardKeepChange() { keepFile.discardChange() }
+    func discardKeepChange() { guard !trashing else { return }; keepFile.discardChange() }
 
     /// Never offers these for cleaning again. Not saved means nothing is
     /// moved until it is.
@@ -353,32 +377,41 @@ final class DeepCleanModel {
     /// the rules again; a list that can't be read stops the whole run. Caches
     /// of apps running at that moment are left alone.
     func trashChosen() {
-        keepFile.reload()
-        if let why = keepFile.blocker {
-            show(Notice(text: String(localized: "Nothing was moved: \(why.prefix(1).lowercased() + why.dropFirst())"), canUndo: false))
-            return
-        }
-        // What's kept by path in Projects stays here too; rules that can't
-        // be read stop the run, as an unreadable keep list does.
+        guard !trashing, !scanning, !chosen.isEmpty else { return }
+        trashing = true
+        activityRevision &+= 1
+        let savedKeep = keepFile
         let projectRules = projectRules
-        do {
-            keptInProjects = CleanKeepList(paths: try ProjectStore.loadRules(base: projectRules).keepPaths)
-        } catch {
-            show(Notice(text: String(localized: "Nothing was moved: your project rules couldn't be read."), canUndo: false))
-            return
-        }
-        guard trashBlocker == nil else { return }
-        let fresh = CleanKeepList(paths: keepFile.list.paths.union(keptInProjects.paths))
         let lookUpTools = runningTools
         let all = chosenCandidates
         let home = home
         let keepURL = keepURL
         let backend = trash
         let jobs = jobs
-        trashing = true
         Task {
             let job = await jobs.begin(.moveToTrash)
             defer { jobs.end(job) }
+            let (reloaded, projects) = await Task.detached(priority: .userInitiated) {
+                var reloaded = savedKeep
+                reloaded.reload()
+                let projects = try? ProjectStore.loadRules(base: projectRules)
+                return (reloaded, projects)
+            }.value
+            keepFile = reloaded
+            if let why = reloaded.blocker {
+                trashing = false
+                show(Notice(text: String(localized: "Nothing was moved: \(why.prefix(1).lowercased() + why.dropFirst())"), canUndo: false))
+                startScanAfterTrash()
+                return
+            }
+            guard let projects else {
+                trashing = false
+                show(Notice(text: String(localized: "Nothing was moved: your project rules couldn't be read."), canUndo: false))
+                startScanAfterTrash()
+                return
+            }
+            keptInProjects = CleanKeepList(paths: projects.keepPaths)
+            let fresh = CleanKeepList(paths: reloaded.list.paths.union(keptInProjects.paths))
             var plan: [(CleanCandidate, [String])] = []
             var moved: [TrashRecord] = []
             var failed: [(path: String, reason: String)] = []
@@ -465,6 +498,7 @@ final class DeepCleanModel {
         }
         let records = undoRecords
         trashing = true
+        activityRevision &+= 1
         let jobs = jobs
         undoJob = Task {
             let failed = await jobs.perform(.putBack) { $0.putBack(records) }

@@ -22,23 +22,29 @@ final class AppsModel {
         var remove: @MainActor (_ paths: [String], _ appID: String, _ ids: [String]) async throws -> RemovalReport
         /// Why the tool can't be asked now, such as another system task.
         var blocker: @MainActor () -> String? = { nil }
+        var trashApp: (@MainActor (AppBundle, RemovedApp.Source) async throws -> ApplicationTrash.Receipt?)? = nil
+        var restoreApp: (@MainActor (ApplicationTrash.Receipt) async throws -> Bool)? = nil
 
         static func live(_ privileged: PrivilegedClient) -> SystemSide {
             SystemSide(
                 base: "", isReady: { privileged.isAvailable },
                 remove: { try await privileged.removeLeftovers($0, appID: $1, ids: $2) },
-                blocker: { privileged.blocker })
+                blocker: { privileged.blocker },
+                trashApp: { try await privileged.trashApplication($0, source: $1) },
+                restoreApp: { try await privileged.restoreApplication($0) })
         }
 
         /// Looked for in the real system, never removed.
         static let unavailable = SystemSide(base: "", isReady: { false }, remove: { _, _, _ in RemovalReport() })
     }
 
-    private(set) var apps: [AppBundle] = []
+    private(set) var apps: [AppBundle] = [] { didSet { appListRevision &+= 1 } }
+    private(set) var appListRevision: UInt64 = 0
     private(set) var loading = false
     private(set) var scannedAt: Date?
     private(set) var isStale = false
     private(set) var uninstalling = false
+    private(set) var authorizingApp: String?
     private(set) var notice: Notice?
     /// System-wide items the last uninstall couldn't delete, and why.
     private(set) var systemProblems: [SystemProblem] = []
@@ -57,6 +63,8 @@ final class AppsModel {
     /// Only the app coordinator can prepare removal of this running copy.
     var prepareSelfRemoval: (@MainActor () async -> String?)?
     private(set) var leftoverProblems: [SystemProblem] = []
+    private(set) var appMoveFailures: [String: TrashOutcome.FailureInfo] = [:]
+    private(set) var appMoveNeedsAdministrator = Set<String>()
 
     static var ownBundlePath: String? {
         let url = Bundle.main.bundleURL
@@ -67,10 +75,14 @@ final class AppsModel {
     func sharesOwnIdentity(_ app: AppBundle) -> Bool { ownAppPath != nil && ownAppID != nil && ownAppID == app.bundleID }
     private let base: URL
     private let logURL: URL
-    /// Moves an app bundle to the Trash; the live one goes through Finder,
-    /// which asks for an administrator's password for apps owned by root.
-    private let recycle: @MainActor ([String]) async -> TrashOutcome
+    /// Uses macOS's Trash operation; authorization UI is at AppKit's discretion.
+    private let recycle: @MainActor (URL) async -> TrashOutcome
+    private let fallbackRecycle: (@MainActor (URL) async -> TrashOutcome)?
+    private let appAccess: AppBundleAccess?
+    /// Owned by the dedicated self-removal coordinator until it resumes or quits.
+    var selfRemovalURL: URL?
     private let isRunning: @MainActor (AppBundle) -> Bool
+    private let runningSet: @MainActor ([AppBundle]) -> Set<String>
     /// Other copies and editions of the app, wherever they are, so data a
     /// copy outside the Applications folders uses is never offered. Nil when
     /// they couldn't be looked up.
@@ -78,10 +90,59 @@ final class AppsModel {
     private let system: SystemSide
     private let scanBudget: ScanBudget
     private let identityReaders: AppIdentity.Readers
+    private let runtimeRoots: [RuntimeLeftovers.Root]
     /// App copies discovered outside the usual folders. Paths are evidence to
     /// re-read, never cached ownership approval. Missing copies are ignored;
     /// unreadable or redirected copies stop attribution.
     let knownCopies: KnownAppCopies
+    @ObservationIgnored private var warmup: ReviewWarmup?
+    @ObservationIgnored private let reviewBudget = ScanBudget(slots: 1)
+    private var reviewWarmup: ReviewWarmup {
+        if let warmup { return warmup }
+        let prepared = ReviewWarmup { [weak self] app in
+            guard let self else { return ReviewWarmup.Value() }
+            return await self.readReviewHints(app)
+        }
+        warmup = prepared
+        return prepared
+    }
+
+    private func readReviewHints(_ app: AppBundle) async -> ReviewWarmup.Value {
+        async let uninstaller = ownUninstaller(of: app)
+        async let mentions = mentions(of: app)
+        let result = await (uninstaller, mentions)
+        return ReviewWarmup.Value(uninstaller: result.0, mentions: result.1)
+    }
+
+    func prepareReview(_ app: AppBundle) {
+        guard !app.sizePending, !uninstalling else { return }
+        reviewWarmup.prepare(.init(app: app, revision: appListRevision))
+    }
+
+    func reviewHints(for app: AppBundle) async -> ReviewWarmup.Value {
+        await reviewWarmup.value(for: .init(app: app, revision: appListRevision))
+    }
+
+    func cancelReviewHints(for app: AppBundle) {
+        reviewWarmup.cancel(.init(app: app, revision: appListRevision))
+    }
+
+    func reviewPreview(for app: AppBundle) async -> [LeftoverPreview] {
+        let home = home
+        let progress = ScanProgress()
+        return await withTaskCancellationHandler {
+            await Task.detached(priority: .userInitiated) { AppLeftovers.preview(for: app, home: home, progress: progress) }.value
+        } onCancel: { progress.cancel() }
+    }
+
+    func appMoveSource(for app: AppBundle) async -> RemovedApp.Source? {
+        await Task.detached(priority: .userInitiated) { RemovedApp.Source.capture(app) }.value
+    }
+
+    func movedInFinder(_ source: RemovedApp.Source) async -> RemovedApp? {
+        let home = home
+        return await Task.detached(priority: .utility) { source.movedToTrash(home: home) }.value
+    }
 
     func rememberOtherCopies(_ copies: [AppBundle], unreadable: [String] = []) {
         knownCopies.remember(copies)
@@ -104,6 +165,7 @@ final class AppsModel {
         var app: AppBundle?
         var deleted: Int
         var sizes: [String: Int64]
+        var administratorMove: ApplicationTrash.Receipt? = nil
     }
 
     private var shelf = UndoShelf<Run>()
@@ -139,8 +201,11 @@ final class AppsModel {
     init(
         home: String = Home.path, folders: [String]? = nil, base: URL = AppStore.defaultBase,
         logURL: URL = CleanupLog.defaultURL,
-        recycle: @escaping @MainActor ([String]) async -> TrashOutcome = AppsModel.finderRecycle,
-        isRunning: @escaping @MainActor (AppBundle) -> Bool = AppsModel.liveIsRunning,
+        recycle: (@MainActor ([String]) async -> TrashOutcome)? = nil,
+        recycleURL: (@MainActor (URL) async -> TrashOutcome)? = nil,
+        fallbackRecycle: (@MainActor (URL) async -> TrashOutcome)? = nil,
+        appAccess: AppBundleAccess? = nil,
+        isRunning: (@MainActor (AppBundle) -> Bool)? = nil,
         otherCopies: @escaping @Sendable (AppBundle) -> [AppBundle]? = AppsModel.liveOtherCopies,
         system: SystemSide = .unavailable,
         trash: TrashBackend = .live,
@@ -151,8 +216,9 @@ final class AppsModel {
         ownAppPath: String? = AppsModel.ownBundlePath,
         ownAppID: String? = Bundle.main.bundleIdentifier,
         identityReaders: AppIdentity.Readers = .live,
-        knownCopies: KnownAppCopies = KnownAppCopies()
+        knownCopies: KnownAppCopies = KnownAppCopies(), runtimeRoots: [RuntimeLeftovers.Root] = []
     ) {
+        self.runtimeRoots = runtimeRoots
         self.knownCopies = knownCopies
         self.identityReaders = identityReaders
         self.imageOf = imageOf
@@ -163,8 +229,19 @@ final class AppsModel {
         self.folders = folders ?? AppFinder.defaultFolders(home: home)
         self.base = base
         self.logURL = logURL
-        self.recycle = recycle
-        self.isRunning = isRunning
+        if let recycleURL { self.recycle = recycleURL }
+        else if let recycle { self.recycle = { await recycle([$0.path]) } }
+        else { self.recycle = { await Self.finderRecycleURLs([$0]) } }
+        self.fallbackRecycle = fallbackRecycle ?? (recycle == nil && recycleURL == nil ? Self.foundationRecycle : nil)
+        // Injected movers own their access lifecycle. The shipping Store mover
+        // obtains an exact-file capability rather than relying on folder access.
+        self.appAccess = appAccess ?? (recycle == nil && recycleURL == nil && Edition.current.isSandboxed ? AppBundleAccess() : nil)
+        self.isRunning = isRunning ?? AppsModel.liveIsRunning
+        if let isRunning {
+            runningSet = { apps in Set(apps.filter(isRunning).map(\.path)) }
+        } else {
+            runningSet = { RunningAppSnapshot.read().matchingPaths(in: $0) }
+        }
         self.otherCopies = otherCopies
         self.system = system
         self.scanBudget = scanBudget
@@ -191,9 +268,47 @@ final class AppsModel {
     // MARK: Listing
 
     private(set) var loadJob: Task<Void, Never>?
+    private var listingStopped = false
 
     /// Stops the listing under way; what's listed now stays.
-    func stop() { progress?.cancel() }
+    func stop() { listingStopped = true; progress?.cancel() }
+
+    /// Live inventory is metadata-only. Existing scans remain timestamped snapshots;
+    /// a real install, removal or version change requests one bounded background load.
+    func refreshInventoryIfChanged() async {
+        guard !loading, !uninstalling, !listingStopped, scannedAt != nil else { return }
+        let revision = appListRevision
+        let folders = folders
+        let previous = apps
+        let unreadable = unreadableFolders
+        let p = ScanProgress()
+        let changed = await withTaskCancellationHandler {
+            await Task.detached(priority: .utility) { () -> Bool in
+                let current = AppFinder.inventory(in: folders, progress: p)
+                guard !p.isCancelled, !current.cancelled else { return false }
+                return Self.inventoryMetadata(previous) != Self.inventoryMetadata(current.apps) || current.unreadable != unreadable
+            }.value
+        } onCancel: { p.cancel() }
+        guard !Task.isCancelled, !p.isCancelled, revision == appListRevision,
+              !loading, !uninstalling, !listingStopped else { return }
+        if changed {
+            isStale = true
+            load(background: true)
+        }
+    }
+
+    private struct InventoryMetadata: Equatable, Sendable {
+        let path: String
+        let name: String
+        let id: String?
+        let version: String?
+        let store: Bool
+    }
+
+    nonisolated private static func inventoryMetadata(_ apps: [AppBundle]) -> [InventoryMetadata] {
+        apps.map { InventoryMetadata(path: $0.path, name: $0.name, id: $0.bundleID, version: $0.version, store: $0.fromAppStore) }
+            .sorted { $0.path < $1.path }
+    }
 
     func loadIfNeeded() {
         guard !loading, apps.isEmpty || isStale else { return }
@@ -207,6 +322,7 @@ final class AppsModel {
             return
         }
         progress?.cancel()
+        listingStopped = false
         let p = ScanProgress()
         progress = p
         loading = true
@@ -295,10 +411,16 @@ final class AppsModel {
         let folders = folders
         let discovered = knownCopies
         return await Task.detached(priority: .userInitiated) { () -> [AppBundle]? in
-            guard let copies = otherCopies(app) else { return nil }
+            guard let foundCopies = otherCopies(app) else { return nil }
+            let target = URL(fileURLWithPath: app.path).resolvingSymlinksInPath().path
+            let copies = foundCopies.filter { URL(fileURLWithPath: $0.path).resolvingSymlinksInPath().path != target }
+            // Preserve positive evidence even if another inventory source fails.
+            discovered.remember(copies)
             // Metadata only, never sizes. A cached inventory cannot authorize removal.
             guard let fresh = AppFinder.installedNow(in: folders) else { return nil }
-            var listed = fresh
+            // Foundation and POSIX can spell the same app's parent path
+            // differently. Identity comparisons must not invent a second copy.
+            var listed = fresh.map { URL(fileURLWithPath: $0.path).resolvingSymlinksInPath().path == target ? app : $0 }
             for copy in copies where !listed.contains(where: { $0.path == copy.path }) {
                 guard let metadata = AppFinder.metadata(copy.path), metadata.bundleID != nil else { return nil }
                 listed.append(metadata)
@@ -311,16 +433,34 @@ final class AppsModel {
         let installed: [AppBundle]
         let identity: AppIdentity
         let systemIDs: [String]
+        let verified: Bool
     }
 
-    private func ownership(of app: AppBundle) async -> Ownership? {
-        guard let installed = await installed(besides: app) else { return nil }
+    private func ownership(of app: AppBundle, discovery: Bool = false, manual: Bool = false) async -> Ownership? {
+        let installed = await installed(besides: app)
+        guard installed != nil || discovery else { return nil }
         let readers = identityReaders
+        let folders = folders
+        let discovered = knownCopies
         return await Task.detached(priority: .userInitiated) {
-            guard Self.isSameApp(app.path, as: app),
-                  let identity = AppIdentity.owned(for: app, installed: installed, readers: readers) else { return nil as Ownership? }
-            let ids = Self.systemIDs(of: app, installed: installed, identity: identity)
-            return Ownership(installed: installed, identity: identity, systemIDs: ids)
+            guard Self.isSameApp(app.path, as: app), !Task.isCancelled else { return nil as Ownership? }
+            if let installed, var identity = AppIdentity.owned(for: app, installed: installed, readers: readers) {
+                if manual {
+                    identity.otherGroupIDs = AppIdentity.possible(for: app, installed: installed, readers: readers).otherGroupIDs
+                }
+                let ids = Self.systemIDs(of: app, installed: installed, identity: identity)
+                return Ownership(installed: installed, identity: identity, systemIDs: ids, verified: true)
+            }
+            guard discovery else { return nil }
+            let listed = installed ?? {
+                let target = URL(fileURLWithPath: app.path).resolvingSymlinksInPath().path
+                let partial = AppFinder.inventory(in: folders).apps.map {
+                    URL(fileURLWithPath: $0.path).resolvingSymlinksInPath().path == target ? app : $0
+                }
+                return discovered.listing(alongside: partial).apps
+            }()
+            return Ownership(installed: listed, identity: AppIdentity.possible(for: app, installed: listed, readers: readers),
+                             systemIDs: [], verified: false)
         }.value
     }
 
@@ -342,30 +482,94 @@ final class AppsModel {
 
     /// What `app` left in the Library, or nil when other copies of it
     /// couldn't be looked up: then nothing is offered.
-    func leftovers(for app: AppBundle, deep: Bool = UserDefaults.standard.bool(forKey: AppsModel.deepKey)) async -> [Leftover]? {
-        let home = home
-        guard let ownership = await ownership(of: app) else { return nil }
-        guard !Task.isCancelled else { return nil }
+    func leftovers(for app: AppBundle, deep: Bool = true) async -> [Leftover]? {
+        guard let report = await leftoverReport(for: app, deep: deep), report.ownershipVerified else { return nil }
+        return report.items
+    }
+
+    func leftoverReport(for app: AppBundle, deep: Bool = true) async -> LeftoverListing? {
+        guard let ownership = await ownership(of: app, discovery: true) else { return nil }
+        return await scanLeftovers(for: app, ownership: ownership, deep: deep)
+    }
+
+    struct ReviewReport: Sendable {
+        let leftovers: LeftoverListing?
+        let system: [SystemLeftover]
+    }
+
+    /// User and system discovery share one fresh ownership inventory.
+    func reviewReport(for app: AppBundle, onStep: (@Sendable ([Leftover]) -> Void)? = nil) async -> ReviewReport {
         let progress = ScanProgress()
-        let budget = scanBudget
+        let budget = reviewBudget
         return await withTaskCancellationHandler {
             let result = await Task.detached(priority: .userInitiated) {
                 await budget.run(background: false, progress: progress) {
-                    AppLeftovers.find(for: app, home: home, installed: ownership.installed, identity: ownership.identity, deep: deep, progress: progress)
+                    await self.runReviewReport(for: app, progress: progress, onStep: onStep)
+                }
+            }.value
+            return progress.isCancelled ? ReviewReport(leftovers: nil, system: []) : result ?? ReviewReport(leftovers: nil, system: [])
+        } onCancel: { progress.cancel() }
+    }
+
+    private func runReviewReport(for app: AppBundle, progress: ScanProgress,
+                                 onStep: (@Sendable ([Leftover]) -> Void)?) async -> ReviewReport {
+        guard !progress.isCancelled, let owner = await ownership(of: app, discovery: true),
+              !Task.isCancelled, !progress.isCancelled else {
+            return ReviewReport(leftovers: nil, system: [])
+        }
+        async let shared = owner.verified ? findSystemLeftovers(for: app, ownership: owner) : []
+        let report = await scanLeftovers(for: app, ownership: owner, deep: true, parent: progress, onStep: onStep)
+        return await ReviewReport(leftovers: report, system: shared)
+    }
+
+    private func scanLeftovers(for app: AppBundle, ownership: Ownership, deep: Bool, parent: ScanProgress? = nil,
+                              onStep: (@Sendable ([Leftover]) -> Void)? = nil) async -> LeftoverListing? {
+        let home = home
+        let identityReaders = identityReaders
+        guard !Task.isCancelled else { return nil }
+        let progress = parent ?? ScanProgress()
+        let budget = scanBudget
+        let runtimeRoots = runtimeRoots
+        return await withTaskCancellationHandler {
+            let result = await Task.detached(priority: .userInitiated) {
+                await budget.run(background: false, progress: progress) {
+                    var report = AppLeftovers.list(for: app, home: home, installed: ownership.installed, identity: ownership.identity, deep: deep, progress: progress, runtimeRoots: runtimeRoots, onStep: { items in
+                        let display = ownership.verified ? items : items.map { item in
+                            var item = item; item.evidence = .unverified; return item
+                        }
+                        onStep?(display)
+                    })
+                    if !ownership.verified {
+                        report = LeftoverListing(items: report.items.map { item in
+                            var item = item
+                            item.evidence = .unverified
+                            return item
+                        }, unreadable: report.unreadable, limited: report.limited, cancelled: report.cancelled, ownershipVerified: false)
+                    }
+                    if !progress.isCancelled, report.items.contains(where: { !$0.canRemove }) {
+                        let partial = ownership.verified
+                            ? AppIdentity.possible(for: app, installed: ownership.installed, readers: identityReaders)
+                            : ownership.identity
+                        report.manualReview = ManualLeftoverReview.capture(for: app, home: home, leftovers: report.items,
+                            installed: ownership.installed, identity: partial, runtimeRoots: runtimeRoots, stop: { progress.isCancelled })
+                    }
+                    return report
                 }
             }.value
             return progress.isCancelled || Task.isCancelled ? nil : result
         } onCancel: { progress.cancel() }
     }
 
-    func leftovers(for removed: RemovedApp, deep: Bool) async -> [Leftover]? {
-        let home = home
-        guard await Task.detached(operation: { removed.isCurrent(home: home) }).value else { return nil }
-        return await leftovers(for: removed.app, deep: deep)
+    func leftovers(for removed: RemovedApp, deep: Bool = true) async -> [Leftover]? {
+        guard let report = await leftoverReport(for: removed, deep: deep), report.ownershipVerified else { return nil }
+        return report.items
     }
 
-    /// Whether Uninstall searches deeper (`DeepLeftovers`), as last chosen.
-    static let deepKey = "uninstall.searchDeeper"
+    func leftoverReport(for removed: RemovedApp, deep: Bool = true) async -> LeftoverListing? {
+        let home = home
+        guard await Task.detached(operation: { removed.isCurrent(home: home) }).value else { return nil }
+        return await leftoverReport(for: removed.app, deep: deep)
+    }
 
     /// Bounded metadata discovery; these paths never enter a removal request.
     func relatedComponents(for app: AppBundle) async -> RelatedComponents.Report {
@@ -395,6 +599,11 @@ final class AppsModel {
     func systemLeftovers(for app: AppBundle) async -> [SystemLeftover] {
         // macOS's own parts outside the Library are the system's.
         guard !app.isProtected, let ownership = await ownership(of: app) else { return [] }
+        return await findSystemLeftovers(for: app, ownership: ownership)
+    }
+
+    private func findSystemLeftovers(for app: AppBundle, ownership: Ownership) async -> [SystemLeftover] {
+        guard !app.isProtected, !Task.isCancelled else { return [] }
         let base = system.base
         return await Task.detached(priority: .userInitiated) {
             let others = ownership.identity.otherOwnerIDs
@@ -412,7 +621,46 @@ final class AppsModel {
         return [id] + identity.helperIDs.filter { !taken.contains($0) }
     }
 
+    /// Manual consent is scoped to the discovery snapshot. Refresh all known
+    /// owners after the queue wait too; it never authorizes system deletion.
+    private func selectionApproval(of app: AppBundle, leftovers: [Leftover], hasSystem: Bool,
+                                   manualReview: ManualLeftoverReview?, identityAt movedApp: AppBundle? = nil) async -> Ownership? {
+        let uncertain = leftovers.filter { !$0.canRemove }
+        let manual = !uncertain.isEmpty
+        guard !manual || (manualReview != nil && !hasSystem && !app.isProtected && !isSelf(app)) else { return nil }
+        guard let approved = await ownership(of: movedApp ?? app, discovery: manual, manual: manual),
+              approved.verified || (leftovers.allSatisfy { !$0.canRemove } && !hasSystem) else { return nil }
+        guard manual else { return approved }
+        let home = home
+        let roots = runtimeRoots
+        let relocated = movedApp?.path
+        let valid = await Task.detached(priority: .userInitiated) {
+            guard let manualReview, manualReview.matches(app: app, home: home, relocatedTo: relocated) else { return false }
+            return uncertain.allSatisfy {
+                manualReview.containsUnchanged($0.path)
+                    && ManualLeftoverReview.isReviewable($0.path, of: app, home: home, installed: approved.installed, identity: approved.identity, runtimeRoots: roots)
+            }
+        }.value
+        return valid ? approved : nil
+    }
+
     func running(_ app: AppBundle) -> Bool { isRunning(app) }
+    func runningPaths(in apps: [AppBundle]) -> Set<String> { runningSet(apps) }
+
+    func refreshedForReview(_ app: AppBundle) async -> AppBundle? {
+        let progress = ScanProgress()
+        return await withTaskCancellationHandler {
+            await Task.detached(priority: .userInitiated) { () -> AppBundle? in
+                guard !progress.isCancelled, Self.isSameApp(app.path, as: app),
+                      let metadata = AppFinder.metadata(app.path), metadata.bundleID == app.bundleID else { return nil }
+                var fresh = AppBundle(path: metadata.path, name: metadata.name, bundleID: metadata.bundleID,
+                                      version: metadata.version, bytes: app.bytes, fromAppStore: metadata.fromAppStore)
+                fresh.incomplete = app.incomplete
+                fresh.sizePending = app.sizePending
+                return progress.isCancelled ? nil : fresh
+            }.value
+        } onCancel: { progress.cancel() }
+    }
 
     func quit(_ app: AppBundle) {
         guard let id = app.bundleID else { return }
@@ -429,7 +677,10 @@ final class AppsModel {
     /// privileged tool delete the chosen system-wide ones. A running app is refused;
     /// leftovers only go once the app itself has, and each is checked again
     /// first, the system-wide ones by the tool itself.
-    func uninstall(_ app: AppBundle, leftovers: [Leftover], system chosenSystem: [SystemLeftover] = []) async -> Result {
+    func uninstall(_ app: AppBundle, leftovers: [Leftover], system chosenSystem: [SystemLeftover] = [], manualReview: ManualLeftoverReview? = nil) async -> Result {
+        appMoveFailures.removeValue(forKey: app.path)
+        appMoveNeedsAdministrator.remove(app.path)
+        guard leftovers.allSatisfy(\.canRemove) || manualReview != nil else { return .refused(String(localized: "Unverified matches are for inspection only. Search again before choosing data to remove.")) }
         // Taken before the first wait, so a second request can't slip in
         // while this one looks things up, and released however it ends.
         guard !uninstalling else { return .refused(String(localized: "Another uninstall is running.")) }
@@ -452,8 +703,13 @@ final class AppsModel {
         // The app goes to Finder's Trash, so it's cleared through the gate
         // first: still the same app, and not kept in another pane.
         if let why = await refusal(for: app) { return .refused(why) }
+        let access = itself ? nil : appAccess
+        if let access, !access.acquire(path: app.path) {
+            return .refused(String(localized: "App access wasn't granted. Choose the same app in the file dialog to continue. Nothing was moved."))
+        }
+        defer { access?.release() }
         let needsOwnership = !leftovers.isEmpty || !chosenSystem.isEmpty
-        if needsOwnership, await ownership(of: app) == nil {
+        if needsOwnership, await selectionApproval(of: app, leftovers: leftovers, hasSystem: !chosenSystem.isEmpty, manualReview: manualReview) == nil {
             return .refused(String(localized: "Ownership of \(app.name)'s leftovers couldn't be verified. Untick them to move only the app."))
         }
         if !chosenSystem.isEmpty && !system.isReady() {
@@ -477,38 +733,104 @@ final class AppsModel {
         if let why = await refusal(for: app) { return .refused(why) }
         if !itself, isRunning(app) { return .refused(String(localized: "\(app.name) is open. Quit it first.")) }
         // Read identities while the app is still present, after the queue wait.
-        let approved = needsOwnership ? await ownership(of: app) : nil
+        var approved = needsOwnership ? await selectionApproval(of: app, leftovers: leftovers, hasSystem: !chosenSystem.isEmpty, manualReview: manualReview) : nil
         if needsOwnership, approved == nil {
             return .refused(String(localized: "Ownership changed or couldn't be verified while waiting. Nothing was uninstalled."))
         }
         if needsOwnership, let why = await refusal(for: app) { return .refused(why) }
         if job.isStopped { return .refused(String(localized: "Stopped before anything was moved.")) }
         if !itself, isRunning(app) { return .refused(String(localized: "\(app.name) is open. Quit it first.")) }
+        let sourceProof = await appMoveSource(for: app)
+        if let why = await refusal(for: app) { return .refused(why) }
+        if job.isStopped || (!itself && isRunning(app)) { return .refused(String(localized: "The move was stopped or the app started. Nothing was moved.")) }
         // Locked in Finder: unlocked to move, locked again if it stays.
         let appLocked = Locks.isLocked(app.path)
+        if appLocked, sourceProof == nil { return .refused(String(localized: "The app changed before it could be unlocked. Refresh the review.")) }
         if appLocked, !Locks.unlock(app.path) {
             return .failed(String(localized: "\(app.name) is locked, and MyMole couldn't unlock it."))
         }
-        let appOutcome = await recycle([app.path])
-        if appLocked, appOutcome.moved.isEmpty { Locks.lock(app.path) }
+        let source = itself ? selfRemovalURL : access?.url
+        let sourceURL = source ?? URL(fileURLWithPath: app.path)
+        var appOutcome = await recycle(sourceURL)
+        var administratorMove: ApplicationTrash.Receipt?
+        // Both APIs use the user's Trash and normal permissions. An AppKit
+        // denial can be retried through Foundation only for the same object,
+        // after fresh protections, ownership, running-state and stop checks.
+        if let fallbackRecycle, appOutcome.moved.isEmpty,
+           appOutcome.failureInfo[app.path]?.permissionDenied == true, let sourceProof,
+           await sourceIsCurrent(sourceProof), await refusal(for: app) == nil {
+            let refreshed = needsOwnership ? await selectionApproval(of: app, leftovers: leftovers, hasSystem: !chosenSystem.isEmpty, manualReview: manualReview) : nil
+            if (!needsOwnership || refreshed != nil), !job.isStopped,
+               (itself || !isRunning(app)), await refusal(for: app) == nil,
+               await sourceIsCurrent(sourceProof), !job.isStopped, (itself || !isRunning(app)) {
+                approved = refreshed
+                appOutcome = await fallbackRecycle(sourceURL)
+            }
+        }
+        if !itself, appOutcome.moved.isEmpty, appOutcome.failureInfo[app.path]?.permissionDenied == true,
+           let sourceProof, let trashApp = system.trashApp, system.isReady(), system.blocker() == nil,
+           await sourceIsCurrent(sourceProof), await refusal(for: app) == nil {
+            let refreshed = needsOwnership ? await selectionApproval(of: app, leftovers: leftovers, hasSystem: !chosenSystem.isEmpty, manualReview: manualReview) : nil
+            if (!needsOwnership || refreshed != nil), !job.isStopped, !isRunning(app),
+               await refusal(for: app) == nil, await sourceIsCurrent(sourceProof), !job.isStopped, !isRunning(app) {
+                authorizingApp = app.path
+                defer { authorizingApp = nil }
+                do {
+                    administratorMove = try await trashApp(app, sourceProof)
+                    authorizingApp = nil
+                    if let receipt = administratorMove {
+                        guard receipt.request.path == app.path, receipt.request.bundleID == app.bundleID,
+                              receipt.request.identity == sourceProof.originalIdentity,
+                              receipt.record.original.path == app.path,
+                              receipt.record.trashed.path == home + "/.Trash/" + receipt.request.trashName,
+                              await Task.detached(priority: .userInitiated, operation: { [home] in receipt.isInTrash(home: home) }).value else {
+                            return .failed(String(localized: "The administrator move could not be verified. No app data was moved."))
+                        }
+                        appOutcome = TrashOutcome(moved: [receipt.record], failed: [])
+                        if needsOwnership {
+                            let movedApp = AppBundle(path: receipt.record.trashed.path, name: app.name,
+                                bundleID: app.bundleID, version: app.version, bytes: app.bytes, fromAppStore: app.fromAppStore)
+                            approved = await selectionApproval(of: app, leftovers: leftovers, hasSystem: !chosenSystem.isEmpty,
+                                                               manualReview: manualReview, identityAt: movedApp)
+                        }
+                    }
+                } catch {
+                    job.record(.moveToTrash, done: [], failed: [app.path: error.localizedDescription], refused: [])
+                    appMoveFailures[app.path] = .init(error, area: .uninstall)
+                    return .failed(error.localizedDescription)
+                }
+            }
+        }
+        if appLocked, appOutcome.moved.isEmpty, let sourceProof, await sourceIsCurrent(sourceProof) { Locks.lock(app.path) }
         job.record(.moveToTrash, done: appOutcome.moved.map(\.original.path),
                    failed: Dictionary(appOutcome.failed.map { ($0.path, $0.reason) }, uniquingKeysWith: { a, _ in a }), refused: [])
         guard let appRecord = appOutcome.moved.first else {
+            appMoveFailures[app.path] = appOutcome.failureInfo[app.path]
+            if appOutcome.failureInfo[app.path]?.permissionDenied == true, let sourceProof,
+               await Task.detached(priority: .userInitiated, operation: { ApplicationTrash.Request.capture(app, source: sourceProof) != nil }).value {
+                appMoveNeedsAdministrator.insert(app.path)
+            }
             return .failed(
                 appOutcome.failed.first.map { String(localized: "\(app.name) wasn't moved: \($0.reason)") }
                     ?? String(localized: "\(app.name) wasn't moved."))
         }
         let home = home
         let backend = trash.unlockingLocked()
+        let runtimeRoots = runtimeRoots
         let protections = protections
         // What the deeper search found is checked again by its own rules; the rest by the usual ones.
         let loose = Set(leftovers.filter { $0.evidence == .loose }.map(\.path))
+        let uncertain = Set(leftovers.filter { !$0.canRemove }.map(\.path))
+        let movingApproval = approved
         let rest = await Task.detached(priority: .userInitiated) {
             // A leftover kept in Deep Clean or in Projects stays, as it would there.
             job.moveToTrash(leftovers.map(\.path), through: TrashGate(still: { path in
-                approved.map {
-                    AppLeftovers.isStillLeftover(path, of: app, home: home, installed: $0.installed, identity: $0.identity, deep: loose.contains(path))
-                } ?? false
+                guard let approved = movingApproval else { return false }
+                if uncertain.contains(path) {
+                    return manualReview?.containsUnchanged(path) == true
+                        && ManualLeftoverReview.isReviewable(path, of: app, home: home, installed: approved.installed, identity: approved.identity, runtimeRoots: runtimeRoots)
+                }
+                return AppLeftovers.isStillLeftover(path, of: app, home: home, installed: approved.installed, identity: approved.identity, deep: loose.contains(path), runtimeRoots: runtimeRoots)
             }, protections: { try protections.read() }), backend: backend)
         }.value
 
@@ -517,7 +839,9 @@ final class AppsModel {
         var systemReport = RemovalReport()
         var systemError: String?
         var systemKept: [String] = []
-        if !chosenSystem.isEmpty, let id = app.bundleID {
+        if !chosenSystem.isEmpty, approved == nil {
+            systemError = String(localized: "App ownership could not be revalidated after the move. System files stayed in place.")
+        } else if !chosenSystem.isEmpty, let id = app.bundleID {
             // What System Clean's keep list protects is never sent to the
             // tool; a list that can't be read stops the system part whole.
             let keeps = await Task.detached(priority: .userInitiated) { try? protections.readSystem() }.value
@@ -559,7 +883,7 @@ final class AppsModel {
             id: record.id, records: [appRecord] + rest.moved, app: app, deleted: systemReport.removed.count,
             sizes: Dictionary(
                 [(app.path, app.bytes)] + leftovers.filter { moved.contains($0.path) }.map { ($0.path, $0.bytes) },
-                uniquingKeysWith: { a, _ in a })))
+                uniquingKeysWith: { a, _ in a }), administratorMove: administratorMove))
         var text = rest.moved.isEmpty
             ? String(localized: "Moved \(app.name) (\(fmt(bytes))) to the Trash")
             : String(localized: "Moved \(app.name) and \(rest.moved.count) leftover\(rest.moved.count == 1 ? "" : "s") (\(fmt(bytes))) to the Trash")
@@ -575,15 +899,17 @@ final class AppsModel {
     /// Trash and the app stays, so it starts over as on its first launch.
     /// Refused while it runs; each leftover is checked again first, as for
     /// an uninstall, and Undo puts them back.
-    func reset(_ app: AppBundle, leftovers: [Leftover]) async -> Result {
-        await moveLeftovers(of: app, leftovers: leftovers, removed: nil)
+    func reset(_ app: AppBundle, leftovers: [Leftover], manualReview: ManualLeftoverReview? = nil) async -> Result {
+        appMoveFailures.removeValue(forKey: app.path)
+        return await moveLeftovers(of: app, leftovers: leftovers, removed: nil, manualReview: manualReview)
     }
 
-    func cleanRemovedApp(_ removed: RemovedApp, leftovers: [Leftover]) async -> Result {
-        await moveLeftovers(of: removed.app, leftovers: leftovers, removed: removed)
+    func cleanRemovedApp(_ removed: RemovedApp, leftovers: [Leftover], manualReview: ManualLeftoverReview? = nil) async -> Result {
+        await moveLeftovers(of: removed.app, leftovers: leftovers, removed: removed, manualReview: manualReview)
     }
 
-    private func moveLeftovers(of app: AppBundle, leftovers: [Leftover], removed: RemovedApp?) async -> Result {
+    private func moveLeftovers(of app: AppBundle, leftovers: [Leftover], removed: RemovedApp?, manualReview: ManualLeftoverReview?) async -> Result {
+        guard leftovers.allSatisfy(\.canRemove) || manualReview != nil else { return .refused(String(localized: "Unverified matches are for inspection only. Search again before choosing data to remove.")) }
         guard !uninstalling else { return .refused(String(localized: "Another uninstall is running.")) }
         beginUninstall()
         defer {
@@ -611,7 +937,7 @@ final class AppsModel {
                 return .refused(String(localized: "The app in the Trash changed or was restored. Choose it again before cleaning its leftovers."))
             }
         }
-        guard let approved = await ownership(of: app) else {
+        guard let approved = await selectionApproval(of: app, leftovers: leftovers, hasSystem: false, manualReview: manualReview) else {
             return .refused(removed == nil
                 ? String(localized: "Ownership of \(app.name)'s leftovers couldn't be verified, so nothing was reset.")
                 : String(localized: "Ownership of \(app.name)'s leftovers couldn't be verified, so nothing was moved."))
@@ -623,11 +949,17 @@ final class AppsModel {
         if job.isStopped { return .refused(String(localized: "Stopped before anything was moved.")) }
         if isRunning(app) { return .refused(String(localized: "\(app.name) is open. Quit it first.")) }
         let (backend, protections) = (trash.unlockingLocked(), protections)
+        let runtimeRoots = runtimeRoots
         let loose = Set(leftovers.filter { $0.evidence == .loose }.map(\.path))
+        let uncertain = Set(leftovers.filter { !$0.canRemove }.map(\.path))
         let rest = await Task.detached(priority: .userInitiated) {
             job.moveToTrash(leftovers.map(\.path), through: TrashGate(still: { path in
-                (removed?.isCurrent(home: home) ?? true)
-                    && AppLeftovers.isStillLeftover(path, of: app, home: home, installed: approved.installed, identity: approved.identity, deep: loose.contains(path))
+                guard removed?.isCurrent(home: home) ?? true else { return false }
+                if uncertain.contains(path) {
+                    return manualReview?.containsUnchanged(path) == true
+                        && ManualLeftoverReview.isReviewable(path, of: app, home: home, installed: approved.installed, identity: approved.identity, runtimeRoots: runtimeRoots)
+                }
+                return AppLeftovers.isStillLeftover(path, of: app, home: home, installed: approved.installed, identity: approved.identity, deep: loose.contains(path), runtimeRoots: runtimeRoots)
             }, protections: { try protections.read() }), backend: backend)
         }.value
         let moved = Set(rest.moved.map(\.original.path))
@@ -697,7 +1029,18 @@ final class AppsModel {
         defer { target = nil }
         let records = undoRecords
         guard !records.isEmpty else { return (0, 0) }
-        let failed = await jobs.perform(.putBack) { $0.putBack(records) }
+        let administratorMove = undone?.administratorMove
+        let job = await jobs.begin(.putBack)
+        defer { jobs.end(job) }
+        var failed = await Task.detached(priority: .userInitiated) { job.putBack(records) }.value
+        if let receipt = administratorMove, failed.contains(receipt.record), let restore = system.restoreApp {
+            do {
+                if try await restore(receipt) {
+                    failed.removeAll { $0 == receipt.record }
+                    job.record(.putBack, done: [receipt.record.original.path], failed: [:], refused: [])
+                }
+            } catch { /* Keep the verified receipt available for another explicit Undo. */ }
+        }
         return applyUndo(failed, announce: announce)
     }
 
@@ -942,9 +1285,7 @@ final class AppsModel {
     }
 
     static func liveIsRunning(_ app: AppBundle) -> Bool {
-        NSWorkspace.shared.runningApplications.contains {
-            $0.bundleURL?.standardizedFileURL.path == app.path || (app.bundleID != nil && $0.bundleIdentifier == app.bundleID)
-        }
+        RunningAppSnapshot.read().contains(app)
     }
 
     /// Copies Launch Services knows by the exact ID, and copies and
@@ -960,15 +1301,49 @@ final class AppsModel {
     }
 
     static func finderRecycle(_ paths: [String]) async -> TrashOutcome {
-        let urls = paths.map { URL(fileURLWithPath: $0) }
-        do {
-            let map = try await NSWorkspace.shared.recycle(urls)
-            let moved = urls.compactMap { u in map[u].map { TrashRecord(original: u, trashed: $0) } }
-            let failed = urls.filter { map[$0] == nil }.map { (path: $0.path, reason: String(localized: "Not moved")) }
-            return TrashOutcome(moved: moved, failed: failed)
-        } catch {
-            return TrashOutcome(moved: [], failed: paths.map { (path: $0, reason: error.localizedDescription) })
+        await finderRecycleURLs(paths.map { URL(fileURLWithPath: $0) })
+    }
+
+    private func sourceIsCurrent(_ source: RemovedApp.Source) async -> Bool {
+        await Task.detached(priority: .userInitiated) { source.isAtOriginalPath }.value
+    }
+
+    static func foundationRecycle(_ source: URL) async -> TrashOutcome {
+        await Task.detached(priority: .userInitiated) {
+            TrashBackend.systemOutcome(for: source, area: .uninstall)
+        }.value
+    }
+
+    static func finderRecycleURLs(_ sources: [URL]) async -> TrashOutcome {
+        var seen = Set<URL>()
+        let urls = sources.filter { seen.insert($0).inserted }
+        return await withCheckedContinuation { continuation in
+            // AppKit can return successful moves alongside an error. Keep the
+            // map instead of losing it through the throwing async overlay.
+            NSWorkspace.shared.recycle(urls) { map, error in
+                continuation.resume(returning: recycleOutcome(urls: urls, map: map, error: error))
+            }
         }
+    }
+
+    nonisolated static func recycleOutcome(urls: [URL], map: [URL: URL], error: (any Error)?) -> TrashOutcome {
+        // A file URL's directory hint can change after a move. Match AppKit's
+        // successful originals by exact local path, without resolving links or
+        // inferring directory-ness from a source that no longer exists.
+        let destinations = Dictionary(grouping: map.filter { $0.key.isFileURL && $0.value.isFileURL }, by: { $0.key.path })
+        var moved: [TrashRecord] = []
+        var failed: [(path: String, reason: String)] = []
+        for url in urls {
+            let targets = destinations[url.path] ?? []
+            if let target = targets.first?.value, targets.allSatisfy({ $0.value.path == target.path }) {
+                moved.append(TrashRecord(original: url, trashed: target))
+            } else {
+                failed.append((url.path, error?.localizedDescription ?? String(localized: "Not moved")))
+            }
+        }
+        let info = error.map { TrashOutcome.FailureInfo($0, area: .uninstall) }
+        return TrashOutcome(moved: moved, failed: failed,
+                            failureInfo: Dictionary(failed.compactMap { failure in info.map { (failure.path, $0) } }, uniquingKeysWith: { first, _ in first }))
     }
 }
 

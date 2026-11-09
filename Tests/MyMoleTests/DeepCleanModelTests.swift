@@ -105,6 +105,28 @@ private final class ToolNames: @unchecked Sendable {
         #expect(model.candidates.count == 4)
     }
 
+    @Test func visibleActivityChangesUpdateBadgesAndUnchooseNewlyActiveDataWithoutRescanningOrRechoosing() async throws {
+        let home = try Home()
+        let model = home.model()
+        model.scan()
+        await model.scanJob?.value
+        let date = model.scannedAt
+        let editor = try #require(model.candidates.first { $0.path.hasSuffix("com.vendor.Editor") })
+        let npm = try #require(model.candidates.first { $0.path.hasSuffix("_cacache") })
+        #expect(model.chosen.contains(editor.path) && model.chosen.contains(npm.path))
+        home.running = ["com.vendor.Editor"]
+        home.tools = ["npm"]
+        await model.refreshActivity()
+        #expect(model.isRunning(editor) && model.isRunning(npm))
+        #expect(!model.chosen.contains(editor.path) && !model.chosen.contains(npm.path))
+        home.running = []
+        home.tools = []
+        await model.refreshActivity()
+        #expect(!model.isRunning(editor) && !model.isRunning(npm))
+        #expect(!model.chosen.contains(editor.path) && !model.chosen.contains(npm.path))
+        #expect(model.scannedAt == date)
+    }
+
     @Test func movesToTheTrashKeepsWhatIsKeptAndUndoes() async throws {
         let home = try Home()
         let model = home.model()
@@ -212,7 +234,8 @@ private final class ToolNames: @unchecked Sendable {
         try Data("broken".utf8).write(to: home.url.appending(path: "keep.json"))
         model.chosen = [home.path + "/Library/Caches/com.vendor.Editor"]
         model.trashChosen()
-        #expect(!model.trashing)
+        #expect(model.trashing)
+        while model.trashing { try await Task.sleep(for: .milliseconds(5)) }
         #expect(model.keepError != nil)
         // The code names the keep list and the error, never the file.
         let code = try #require(model.keepError?.code).description
@@ -319,7 +342,8 @@ private final class ToolNames: @unchecked Sendable {
         try Data("broken".utf8).write(to: home.projectRules.appending(path: "rules.json"))
         model.chosen = [home.path + "/Library/Caches/com.vendor.Editor"]
         model.trashChosen()
-        #expect(!model.trashing)
+        #expect(model.trashing)
+        while model.trashing { try await Task.sleep(for: .milliseconds(5)) }
         #expect(model.notice?.text == "Nothing was moved: your project rules couldn't be read.")
         #expect(home.exists("Library/Caches/com.vendor.Editor/blob"))
     }

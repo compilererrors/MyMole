@@ -123,11 +123,30 @@ import Testing
         let fixture = try Fixture()
         let model = fixture.model(copiesUnavailable: true)
         await model.load()
-        #expect(model.dataUnavailable && model.leftovers.isEmpty)
+        #expect(model.dataUnavailable && !model.leftovers.isEmpty)
+        #expect(model.leftovers.allSatisfy { !$0.canRemove && !$0.chosenByDefault })
+        // Even a stale/programmatic choice cannot include inspection-only data.
+        model.chosen = Set(model.leftovers.map(\.path))
+        #expect(model.chosenLeftovers.isEmpty)
         await model.remove()
         #expect(model.removed && fixture.events.last == "quit")
         #expect(!fixture.exists("Applications/Cleaner.app"))
         #expect(fixture.exists("Library/Application Support/Cleaner/history.json"))
         #expect(fixture.exists("Library/Caches/org.example.Cleaner"))
+    }
+
+    @Test func selfRemovalReportsAnUninspectedLinkedLocation() async throws {
+        let fixture = try Fixture()
+        let cache = fixture.root.appending(path: "Library/Caches")
+        let elsewhere = fixture.root.appending(path: "ElsewhereCaches")
+        try FileManager.default.moveItem(at: cache, to: elsewhere)
+        try FileManager.default.createSymbolicLink(at: cache, withDestinationURL: elsewhere)
+        let model = fixture.model()
+        await model.load()
+        #expect(model.dataIncomplete && !model.dataUnavailable)
+        #expect(model.canRemove)
+        #expect(!model.leftovers.contains { $0.place == "Caches" })
+        #expect(fixture.exists("ElsewhereCaches/org.example.Cleaner/cache"))
+        #expect(fixture.events.isEmpty)
     }
 }

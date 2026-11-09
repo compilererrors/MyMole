@@ -72,6 +72,35 @@ private final class IdentityCodeFixture: NSObject {}
         #expect(AppIdentity.carried(atPath: app.path) == nil)
     }
 
+    @Test func pluginContainersAndVersionedFrameworkMetadataAreInspected() throws {
+        let fixture = try Fixture()
+        let app = try fixture.app("Example.app", id: "com.example.Editor")
+        let collection = "Example.app/Contents/PlugIns/Collection"
+        try fixture.put(collection + "/Info.plist", data: PropertyListSerialization.data(
+            fromPropertyList: ["ExampleResourceVersion": "1"], format: .xml, options: 0))
+        _ = try fixture.app(collection + "/Helper.app", id: "com.example.Editor.Helper")
+        let framework = "Example.app/Contents/PlugIns/Engine.framework"
+        try fixture.put(framework + "/Versions/A/Resources/Info.plist", data: PropertyListSerialization.data(
+            fromPropertyList: ["CFBundleIdentifier": "com.example.Editor.Engine"], format: .xml, options: 0))
+        let frameworkPath = fixture.root.appending(path: framework).path
+        try FileManager.default.createSymbolicLink(atPath: frameworkPath + "/Resources", withDestinationPath: "Versions/A/Resources")
+        #expect(AppIdentity.carried(atPath: app.path) == ["com.example.Editor.Helper", "com.example.Editor.Engine"])
+        #expect(AppIdentity.groupClaims(app.path, reader: { $0.hasSuffix("Helper.app") ? ["group.com.example.Editor"] : [] }) == ["group.com.example.Editor"])
+        try fixture.put(collection + "/Broken.app/Contents/Info.plist", data: Data("broken".utf8))
+        #expect(AppIdentity.carried(atPath: app.path) == nil)
+    }
+
+    @Test func appAliasesCountAsOwnersAndBrokenAliasesRemainUnknown() throws {
+        let fixture = try Fixture()
+        let owner = try fixture.app("Installed/Editor.app", id: "com.example.Editor")
+        let folder = fixture.root.appending(path: "Applications").path
+        try FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(atPath: folder + "/Editor.app", withDestinationPath: owner.path)
+        #expect(AppFinder.installedNow(in: [folder])?.map(\.path) == [owner.path])
+        try FileManager.default.removeItem(atPath: owner.path)
+        #expect(AppFinder.installedNow(in: [folder]) == nil)
+    }
+
     @Test func ownershipInventoryIncludesHiddenAppsAndRejectsBrokenMetadata() throws {
         let fixture = try Fixture()
         let hidden = try fixture.app("Applications/.Hidden.APP", id: "org.other.Hidden")

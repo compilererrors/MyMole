@@ -21,7 +21,7 @@ struct DSControlBar<Content: View>: View {
                 Text(detail).font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            DSFlow(spacing: DS.Space.lg, alignsToTop: true) { content }
+            DSControlGrid(spacing: DS.Space.lg) { content }
                 .controlSize(.regular)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -46,14 +46,20 @@ struct DSControlField<Content: View>: View {
     var body: some View {
         Group {
             if inline {
-                HStack(spacing: DS.Space.sm) {
-                    label.frame(width: 72, alignment: .leading)
-                    content.frame(minHeight: 28, alignment: .leading)
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: DS.Space.sm) {
+                        label.frame(width: 72, alignment: .leading)
+                        content.frame(maxWidth: .infinity, minHeight: 28, alignment: .leading)
+                    }
+                    VStack(alignment: .leading, spacing: DS.Space.xs) {
+                        label
+                        content.frame(maxWidth: .infinity, minHeight: 28, alignment: .leading)
+                    }
                 }
             } else {
                 VStack(alignment: .leading, spacing: DS.Space.xs) {
                     label
-                    content.frame(minHeight: 28, alignment: .leading)
+                    content.frame(maxWidth: .infinity, minHeight: 28, alignment: .leading)
                 }
             }
         }
@@ -63,6 +69,7 @@ struct DSControlField<Content: View>: View {
 
     private var label: some View {
         Text(title).font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
     }
 }
 

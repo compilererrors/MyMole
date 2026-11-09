@@ -8,7 +8,7 @@ import StorageKit
 /// move's gate reads it once more as it runs; a list that can't be read
 /// stops the move. Always Keep adds to Deep Clean's list, the one Deep
 /// Clean and Settings show.
-struct SharedKeep {
+struct SharedKeep: Sendable {
     var protections: UserProtections
     private(set) var kept = CleanKeepList()
     /// The paths on Deep Clean's own list, which Stop Keeping can take off.

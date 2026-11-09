@@ -3,8 +3,8 @@ import StorageKit
 import SwiftUI
 
 /// Several apps uninstalled together: each with what it left in the
-/// Library, caches and parts of the app chosen, settings and data only when
-/// chosen. An app that's open, ships its own uninstaller or is kept stays.
+/// Library, only identity-linked caches and logs initially chosen. All other
+/// data needs an explicit choice. An app that's open, has an uninstaller or is kept stays.
 /// System-wide leftovers are offered when an app is uninstalled on its own.
 struct BatchUninstallSheet: View {
     let model: AppsModel
@@ -16,6 +16,7 @@ struct BatchUninstallSheet: View {
     @State private var found: [String: [Leftover]]?
     /// Why an app stays, by its path.
     @State private var blocked: [String: String] = [:]
+    @State private var runningPaths = Set<String>()
     /// Chosen apps and leftovers, by path.
     @State private var chosen = Set<String>()
     @State private var selection = Set<String>()
@@ -23,16 +24,55 @@ struct BatchUninstallSheet: View {
     @State private var locked = Set<String>()
     @State private var keepsUnreadable = false
     @State private var unchecked: [String] = []
+    @State private var incomplete: [String] = []
     @State private var systemCount = 0
     @State private var confirm = false
     @State private var problems: [(name: String, reason: String)] = []
     @State private var ran = false
 
-    private var chosenApps: [AppBundle] { apps.filter { chosen.contains($0.path) && blocked[$0.path] == nil } }
+    @State private var pendingItems: [AppsModel.BatchItem] = []
+    @State private var pendingMessage = ""
+    @State private var choiceCommitted = false
+    @State private var submitted = false
+    @State private var searchRequest = UUID()
+    @State private var searchFinished = false
+
+    init(model: AppsModel, apps: [AppBundle], finished: @escaping () -> Void) {
+        self.model = model
+        self.apps = apps
+        self.finished = finished
+        let running = model.runningPaths(in: apps)
+        _chosen = State(initialValue: Set(apps.filter { !$0.isProtected && !model.isSelf($0) }.map(\.path)).subtracting(running))
+        _runningPaths = State(initialValue: running)
+        _blocked = State(initialValue: Dictionary(apps.compactMap { app -> (String, String)? in
+            if model.isSelf(app) { return (app.path, String(localized: "Uninstall MyMole on its own from Settings.")) }
+            if app.isProtected { return (app.path, String(localized: "Part of macOS")) }
+            return nil
+        }, uniquingKeysWith: { first, _ in first }))
+    }
+
+    private var chosenApps: [AppBundle] { apps.filter { chosen.contains($0.path) && reason($0.path) == nil } }
+
+    private func reason(_ path: String) -> String? {
+        if kept.contains(path) { return String(localized: "Kept") }
+        return blocked[path] ?? (runningPaths.contains(path) ? String(localized: "Open") : nil)
+    }
+
+    private func refreshRunning() {
+        let current = model.runningPaths(in: apps)
+        guard current != runningPaths else { return }
+        let opening = current.subtracting(runningPaths)
+        runningPaths = current
+        if !opening.isEmpty {
+            confirm = false
+            chosen.subtract(opening)
+            chosen.subtract(opening.flatMap { (found?[$0] ?? []).map(\.path) })
+        }
+    }
 
     private func chosenLeftovers(of app: AppBundle) -> [Leftover] {
         guard chosen.contains(app.path) else { return [] }
-        return (found?[app.path] ?? []).filter { chosen.contains($0.path) }
+        return (found?[app.path] ?? []).filter { $0.canRemove && chosen.contains($0.path) }
     }
 
     private var total: Int64 {
@@ -43,10 +83,15 @@ struct BatchUninstallSheet: View {
         VStack(alignment: .leading, spacing: DS.Space.md) {
             Text("Uninstall \(apps.count) Apps").font(.title2.bold())
             DSText(
-                "Each app goes to the Trash with what it left in your Library. Caches and parts of the apps are chosen; settings and data stay unless you choose them.",
+                "Each app goes to the Trash with the leftovers you choose. Only caches and logs tied by identity start chosen; settings, website data, scripts, launch configuration and name matches stay unless you choose them.",
                 .metadata)
             if !problems.isEmpty {
                 DSNotice(.warning, problems.map { "\($0.name): \($0.reason)" }.joined(separator: "\n"))
+                let denied = chosenApps.filter { model.appMoveFailures[$0.path]?.permissionDenied == true }
+                if !denied.isEmpty {
+                    AppMoveAccessNotice(paths: denied.map(\.path), code: model.appMoveFailures[denied[0].path]?.code,
+                                        administratorMayBeNeeded: denied.contains { model.appMoveNeedsAdministrator.contains($0.path) })
+                }
             }
             if keepsUnreadable {
                 DSNotice(
@@ -57,8 +102,11 @@ struct BatchUninstallSheet: View {
             if !unchecked.isEmpty {
                 DSNotice(
                     .warning,
-                    "MyMole couldn't look up other copies of \(unchecked.joined(separator: ", ")), so their leftovers aren't offered. The apps themselves can still go."
+                    "Ownership couldn't be fully verified for \(unchecked.joined(separator: ", ")). Possible leftovers are shown for inspection only. The apps themselves can still go."
                 )
+            }
+            if !incomplete.isEmpty {
+                DSNotice(.warning, "The search was limited or partly unreadable for \(incomplete.joined(separator: ", ")). Only completely measured candidates are offered; additional app data may remain.")
             }
             if systemCount > 0 {
                 DSNotice(
@@ -66,21 +114,23 @@ struct BatchUninstallSheet: View {
                     "\(systemCount) item\(systemCount == 1 ? "" : "s") outside your Library, such as launch jobs, \(systemCount == 1 ? "is" : "are") offered when you uninstall the app on its own."
                 )
             }
-            if found != nil {
-                FileTable(
-                    rows: rows,
-                    columns: [.name, .size, .kind, .location],
-                    titles: [.kind: String(localized: "What")],
-                    autosave: "uninstall.batch",
-                    selection: $selection,
-                    marks: chosen,
-                    onToggleMark: toggle,
-                    onOpen: { FileActions.reveal($0) }
-                )
-                .frame(height: 320)
-            } else {
-                DSLoading("Finding everything \(apps.count) apps left behind…").frame(height: 320)
+            if !searchFinished, !submitted, !ran {
+                HStack(spacing: DS.Space.sm) {
+                    PulseDot()
+                    DSText("Finding related files…", .metadata)
+                }
             }
+            FileTable(
+                rows: rows,
+                columns: [.name, .size, .kind, .location],
+                titles: [.kind: String(localized: "What")],
+                autosave: "uninstall.batch",
+                selection: $selection,
+                marks: chosen,
+                onToggleMark: toggle,
+                onOpen: { FileActions.reveal($0) }
+            )
+            .frame(height: 320)
             DSActionGroup {
                 DSText(
                     String(
@@ -90,23 +140,33 @@ struct BatchUninstallSheet: View {
                 Button(ran ? "Done" : "Cancel") { dismiss() }
                     .controlSize(.large)
                     .keyboardShortcut(.cancelAction)
+                    .disabled(model.uninstalling)
                 if !ran {
                     Button(
                         model.uninstalling ? String(localized: "Uninstalling…") : String(localized: "Uninstall \(chosenApps.count)"),
                         role: .destructive
-                    ) { confirm = true }
+                    ) {
+                        choiceCommitted = true
+                        pendingItems = chosenApps.map { AppsModel.BatchItem(app: $0, leftovers: chosenLeftovers(of: $0)) }
+                        pendingMessage = confirmText
+                        confirm = true
+                    }
                     .primaryAction()
                     .tint(.red)
-                    .disabled(found == nil || chosenApps.isEmpty || model.uninstalling || keepsUnreadable)
+                    .disabled(chosenApps.isEmpty || model.uninstalling || submitted || keepsUnreadable)
                 }
             }
         }
         .padding(DS.Space.xl)
         .frame(width: DS.Size.reviewWidth)
-        .task { await load() }
+        .dialogControls()
+        .dialogKeyboard(canClose: !model.uninstalling)
+        .task(id: searchRequest) { if !submitted { await load() } }
+        .liveRefresh { refreshRunning() }
+        .liveRefresh(every: .seconds(10), events: .protections) { await refreshProtections() }
         .actionConfirmation(
-            String(localized: "Uninstall \(chosenApps.count) apps?"), isPresented: $confirm,
-            action: .uninstall, message: confirmText
+            String(localized: "Uninstall \(pendingItems.count) apps?"), isPresented: $confirm,
+            action: .uninstall, message: pendingMessage
         ) { run() }
     }
 
@@ -124,9 +184,10 @@ struct BatchUninstallSheet: View {
             var head = FileRow(
                 id: app.path, name: app.name, size: app.bytes, kind: String(localized: "App"),
                 location: (app.path as NSString).deletingLastPathComponent, symbol: "macwindow")
-            if let why = blocked[app.path] {
+            if let why = reason(app.path) {
                 head.badge = why
                 head.badgeTint = .systemOrange
+                head.canChoose = false
             } else {
                 head = marked(head)
             }
@@ -134,9 +195,11 @@ struct BatchUninstallSheet: View {
                 marked(FileRow(
                     id: $0.path, name: $0.name, size: $0.bytes, kind: "\(app.name): \($0.kind.title) · \($0.place)",
                     location: ($0.path as NSString).deletingLastPathComponent, symbol: "folder",
-                    subtitle: String(localized: "Found \($0.evidence.title)")))
+                    subtitle: String(localized: "Found \($0.evidence.title)"),
+                    badge: $0.canRemove ? nil : String(localized: "Inspection only"),
+                    canChoose: $0.canRemove))
             }
-            return [head] + (blocked[app.path] == nil ? leftovers : [])
+            return [head] + (reason(app.path) == nil ? leftovers : [])
         }
     }
 
@@ -159,9 +222,10 @@ struct BatchUninstallSheet: View {
     /// An app's tick takes its leftovers along; a leftover can be ticked
     /// only while its app is.
     private func toggle(_ id: String) {
-        guard !ran, !kept.contains(id) else { return }
+        guard !ran, !model.uninstalling, !submitted, !kept.contains(id) else { return }
+        choiceCommitted = true
         if apps.contains(where: { $0.path == id }) {
-            guard blocked[id] == nil else { return }
+            guard reason(id) == nil else { return }
             let leftovers = found?[id] ?? []
             if chosen.contains(id) {
                 chosen.remove(id)
@@ -170,7 +234,8 @@ struct BatchUninstallSheet: View {
                 chosen.insert(id)
                 chosen.formUnion(leftovers.filter { $0.chosenByDefault && !kept.contains($0.path) }.map(\.path))
             }
-        } else if let owner = apps.first(where: { (found?[$0.path] ?? []).contains { $0.path == id } }), chosen.contains(owner.path) {
+        } else if let owner = apps.first(where: { (found?[$0.path] ?? []).contains { $0.path == id } }), chosen.contains(owner.path), reason(owner.path) == nil {
+            guard (found?[owner.path] ?? []).contains(where: { $0.path == id && $0.canRemove }) else { return }
             if chosen.contains(id) { chosen.remove(id) } else { chosen.insert(id) }
         }
     }
@@ -179,44 +244,73 @@ struct BatchUninstallSheet: View {
         var map: [String: [Leftover]] = [:]
         var why: [String: String] = [:]
         var notChecked: [String] = []
+        var notComplete: [String] = []
         var system = 0
         for app in apps {
+            guard !Task.isCancelled else { return }
             if model.isSelf(app) {
                 why[app.path] = String(localized: "Uninstall MyMole on its own from Settings.")
             } else if app.isProtected {
                 why[app.path] = String(localized: "Part of macOS")
-            } else if model.running(app) {
-                why[app.path] = String(localized: "Open")
             } else if await model.ownUninstaller(of: app) != nil {
                 why[app.path] = String(localized: "Has its own uninstaller")
             }
-            if let leftovers = await model.leftovers(for: app) {
-                map[app.path] = leftovers
+            if let report = await model.leftoverReport(for: app) {
+                map[app.path] = report.items
+                if !report.ownershipVerified { notChecked.append(app.name) }
+                if report.limited || !report.unreadable.isEmpty { notComplete.append(app.name) }
             } else {
                 map[app.path] = []
                 notChecked.append(app.name)
             }
+            let all = [app.path] + (map[app.path] ?? []).map(\.path)
+            let keptHere = await model.kept(among: all)
+            let foundLocked = await Task.detached(priority: .userInitiated) { Set(all.filter(Locks.isLocked)) }.value
+            guard !Task.isCancelled, !submitted else { return }
+            keepsUnreadable = keepsUnreadable || keptHere == nil
+            kept.formUnion(keptHere ?? [])
+            locked.formUnion(foundLocked)
+            blocked.merge(why) { _, fresh in fresh }
+            refreshRunning()
+            unchecked = notChecked
+            incomplete = notComplete
+            found = map
+            if !choiceCommitted, chosen.contains(app.path), reason(app.path) == nil {
+                chosen.formUnion((map[app.path] ?? []).filter(\.chosenByDefault).map(\.path))
+            }
+            chosen.subtract(kept)
+            if reason(app.path) != nil { chosen.subtract(all) }
             system += await model.systemLeftovers(for: app).count
+            guard !Task.isCancelled, !submitted else { return }
+            systemCount = system
         }
-        let all = apps.map(\.path) + map.values.flatMap { $0.map(\.path) }
-        let keptHere = await model.kept(among: all)
-        keepsUnreadable = keptHere == nil
-        kept = keptHere ?? []
-        for app in apps where kept.contains(app.path) && why[app.path] == nil { why[app.path] = String(localized: "Kept") }
-        locked = await Task.detached(priority: .userInitiated) { Set(all.filter(Locks.isLocked)) }.value
-        blocked = why
-        unchecked = notChecked
-        systemCount = system
-        chosen = Set(apps.filter { why[$0.path] == nil }.flatMap { app in
-            [app.path] + (map[app.path] ?? []).filter(\.chosenByDefault).map(\.path)
-        }).subtracting(kept)
-        found = map
+        if !Task.isCancelled, !submitted { searchFinished = true }
+    }
+
+    private func refreshProtections() async {
+        guard let found, !model.uninstalling else { return }
+        let current = await model.kept(among: apps.map(\.path) + found.values.flatMap { $0.map(\.path) })
+        let paths = apps.map(\.path) + found.values.flatMap { $0.map(\.path) }
+        let currentLocks = await Task.detached(priority: .utility) { Set(paths.filter(Locks.isLocked)) }.value
+        guard !Task.isCancelled, !model.uninstalling else { return }
+        let unreadable = current == nil
+        let protected = current ?? []
+        guard protected != kept || unreadable != keepsUnreadable || currentLocks != locked else { return }
+        confirm = false
+        keepsUnreadable = unreadable
+        kept = protected
+        locked = currentLocks
+        chosen.subtract(kept)
     }
 
     private func run() {
-        let items = chosenApps.map { AppsModel.BatchItem(app: $0, leftovers: chosenLeftovers(of: $0)) }
+        guard !submitted, !pendingItems.isEmpty else { return }
+        let items = pendingItems
+        submitted = true
+        searchRequest = UUID()
         Task {
             problems = await model.uninstall(batch: items)
+            submitted = false
             ran = true
             finished()
             if problems.isEmpty { dismiss() }
@@ -260,10 +354,6 @@ struct DiskImageSheet: View {
                 DSNotice(.warning, "\(item.app.name) is open. Quit it first.") {
                     Button("Quit App") {
                         model.quit(item.app)
-                        Task {
-                            try? await Task.sleep(for: .seconds(1.5))
-                            running = model.running(item.app)
-                        }
                     }
                     .help("Quit \(item.app.name) before continuing")
                 }
@@ -275,6 +365,7 @@ struct DiskImageSheet: View {
                 Button("Cancel") { dismiss() }
                     .controlSize(.large)
                     .keyboardShortcut(.cancelAction)
+                    .disabled(model.uninstalling)
                 if item.image != nil {
                     Button("Eject and Move to Trash…", role: .destructive) { confirm = true }
                         .primaryAction()
@@ -288,8 +379,17 @@ struct DiskImageSheet: View {
         }
         .padding(DS.Space.xl)
         .frame(width: 560)
-        .task { running = model.running(item.app) }
+        .dialogControls()
+        .dialogKeyboard(canClose: !model.uninstalling)
+        .liveRefresh {
+            let current = model.running(item.app)
+            if current != running {
+                running = current
+                if current { confirm = false }
+            }
+        }
         .confirmationDialog("Eject and move \(item.image?.name ?? "") to the Trash?", isPresented: $confirm) {
+            Button("Cancel", role: .cancel) { confirm = false }
             Button("Move to Trash", role: .destructive) {
                 Task {
                     switch await model.removeImage(item) {
@@ -303,5 +403,6 @@ struct DiskImageSheet: View {
         } message: {
             Text("The disk image is ejected, then moved to the Trash. You can undo right after.")
         }
+        .confirmationKeyboard(isPresented: $confirm)
     }
 }

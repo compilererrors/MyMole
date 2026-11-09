@@ -30,7 +30,11 @@ struct SettingsView: View {
     private var level: PerformanceLevel { PerformanceLevel(saved: performance) }
 
     private var diskAccessText: String {
-        switch app.diskAccessState {
+        if !app.access.has(.home) {
+            return String(localized: "Choose your home folder in Folder Access before MyMole can check Full Disk Access.")
+        }
+        if !app.diskAccess.hasResult { return String(localized: "Checking Full Disk Access…") }
+        return switch app.diskAccessState {
         case .granted: String(localized: "MyMole has Full Disk Access.")
         case .denied: String(localized: "MyMole doesn't have Full Disk Access, so the folders macOS protects stay closed to it.")
         case .unknown: String(localized: "MyMole couldn't tell whether it has Full Disk Access: none of the folders it checks are on this Mac. It goes on as if it has; a folder it can't read is said where it shows up.")
@@ -50,7 +54,7 @@ struct SettingsView: View {
             } actions: {
                 DSControlField("Search settings") {
                     DSFilterField(String(localized: "Search by name or purpose"), text: $app.settingsQuery)
-                        .frame(width: 280)
+                        .frame(minWidth: 180, idealWidth: 280, maxWidth: .infinity)
                         .accessibilityIdentifier("settings.search")
                 }
             } strip: {
@@ -84,6 +88,7 @@ struct SettingsView: View {
         case .diskMap: DiskMapSkipsSection()
         case .confirmations: ConfirmationsSection()
         case .diskAccess: diskAccessSection
+        case .appManagement: appManagementSection
         case .timings: TimingsSection()
         case .folderAccess: folderAccessSection
         case .systemTasks: systemTasksSection
@@ -96,10 +101,10 @@ struct SettingsView: View {
 
     private var selfUninstallSection: some View {
         DSSection("Uninstall MyMole", footer: "Remove this copy whenever you want. Review its caches and settings, turn off Open at Login and move the app to the Trash. Nothing is deleted permanently.") {
-            HStack(spacing: DS.Space.md) {
+            DSActionGroup {
                 DSText(app.selfRemoval.available ? String(localized: "MyMole can uninstall itself, including the data you choose.")
                        : String(localized: "Self-uninstall is available when running the installed MyMole app."), .metadata)
-                Spacer()
+            } trailing: {
                 Button("Uninstall MyMole…", role: .destructive) { showingSelfRemoval = true }
                     .fixedSize()
                     .disabled(!app.selfRemoval.available)
@@ -164,17 +169,18 @@ struct SettingsView: View {
             }
             .disabled(loginItem == .unavailable)
             if loginItem == .needsApproval {
-                HStack {
+                DSActionGroup {
                     Text("macOS is waiting for you to allow MyMole in System Settings → General → Login Items.")
                         .foregroundStyle(.secondary)
-                    Spacer()
+                } trailing: {
                     Button("Open Login Items") { SMAppService.openSystemSettingsLoginItems() }
                 }
             }
             if let loginItemProblem { Text(loginItemProblem).foregroundStyle(.red) }
         }
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            loginItem = LoginItem.state
+        .liveRefresh(every: .seconds(5), events: []) {
+            let current = LoginItem.state
+            if loginItem != current { loginItem = current }
         }
     }
 
@@ -207,6 +213,11 @@ struct SettingsView: View {
                 Text("Notifications are turned off for MyMole in System Settings → Notifications.")
                     .foregroundStyle(.red)
             }
+        }
+        .liveRefresh(every: .seconds(5), events: []) {
+            let denied = await Notifier.notificationsDenied()
+            guard !Task.isCancelled else { return }
+            if denied != notificationsRefused { notificationsRefused = denied }
         }
     }
 
@@ -254,13 +265,13 @@ struct SettingsView: View {
                 Text("Disk map history: \(LoadingSettings.history()) scans per folder")
                 Text("What Changes compares against. Fewer keep less on disk; older scans go as new ones are saved.")
             }
-            HStack {
+            DSActionGroup {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Saved results")
                     Text("Each pane's last scan and the disk map's history, shown at once after a launch: \(savedBytes.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? "…").")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                Spacer()
+            } trailing: {
                 Button("Clear…") { confirmingClear = true }
                     .disabled(savedBytes == 0)
             }
@@ -279,11 +290,24 @@ struct SettingsView: View {
 
     private var diskAccessSection: some View {
         DSSection("Full Disk Access") {
-            HStack {
+            DSActionGroup {
                 Text(diskAccessText)
                     .foregroundStyle(.secondary)
-                Spacer()
+            } trailing: {
                 Button("Open Privacy Settings") { FullDiskAccess.openSettings() }
+            }
+        }
+    }
+
+    private var appManagementSection: some View {
+        DSSection("App Management") {
+            DSActionGroup {
+                Text("macOS can require App Management permission to remove other apps. Full Disk Access is a separate permission. Allow the copy of MyMole you're using in Privacy & Security → App Management; file permissions or administrator approval can also affect a move.")
+                    .foregroundStyle(.secondary)
+            } trailing: {
+                DSFlow(spacing: DS.Space.sm) {
+                    AppManagementButton()
+                }
             }
         }
     }
@@ -291,12 +315,12 @@ struct SettingsView: View {
     private var folderAccessSection: some View {
         DSSection("Folder Access", footer: "The App Store edition works only in the folders you choose here. Full Disk Access in System Settings also lets it into the folders macOS protects inside them.") {
             ForEach(FolderAccess.Place.allCases) { place in
-                HStack {
+                DSActionGroup {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(place.title)
                         Text(place.why).font(.caption).foregroundStyle(.secondary)
                     }
-                    Spacer()
+                } trailing: {
                     if app.access.has(place) {
                         Button("Take Back") { Task { await app.takeBack(place) } }
                             .disabled(app.takeBackBlocker != nil)
@@ -336,6 +360,7 @@ struct SettingsView: View {
                         Text((path as NSString).abbreviatingWithTildeInPath)
                             .font(.callout.monospaced()).lineLimit(1).truncationMode(.middle)
                             .help(path)
+                            .contextMenu { FileMenuItems(paths: [path], canOpen: false) }
                         Spacer()
                         Button("Stop Keeping") { app.deepClean.stopKeeping([path]) }
                             .fixedSize()
@@ -360,6 +385,7 @@ struct SettingsView: View {
                         Text((path as NSString).abbreviatingWithTildeInPath)
                             .font(.callout.monospaced()).lineLimit(1).truncationMode(.middle)
                             .help(path)
+                            .contextMenu { FileMenuItems(paths: [path], canOpen: false) }
                         Spacer()
                         Button("Stop Keeping") { app.systemClean.stopKeeping([path]) }
                             .fixedSize()
@@ -376,10 +402,9 @@ struct SettingsView: View {
                 .foregroundStyle(.secondary)
             Text("MyMole is a native Mac cleaner. Everything it removes is chosen by you; your own files go to the Trash, with Undo. In the direct edition, system caches are deleted after macOS asks for an administrator's password.")
                 .foregroundStyle(.secondary)
-            HStack {
+            DSFlow(spacing: DS.Space.md) {
                 Link(destination: Links.website) { Text(verbatim: "mymole.viktornyberg.com") }
                 Link("Support", destination: Links.support)
-                Spacer()
             }
             HStack {
                 if let url = Bundle.main.url(forResource: "MyMole-LICENSE", withExtension: "txt", subdirectory: "Licenses") {

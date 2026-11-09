@@ -22,10 +22,13 @@ enum Timings {
         case firstApps
         /// The complete app inventory and all its sizes.
         case appListing
+        /// Duplicate search queue, metadata walk, first UI results and full run.
+        case duplicateQueue, duplicateListing, firstDuplicates, duplicateSearch
         /// Preparing an AppKit table's context or column menu.
         case menu
         /// From asking a Disk Map scan to stop to it having stopped.
         case stop
+        case confirmation, removalPreparation
 
         var title: String {
             switch self {
@@ -36,8 +39,14 @@ enum Timings {
             case .firstMap: String(localized: "First map of a scan")
             case .firstApps: String(localized: "First apps in a listing")
             case .appListing: String(localized: "Complete app listing")
+            case .duplicateQueue: String(localized: "Duplicate search queue")
+            case .duplicateListing: String(localized: "List duplicate candidates")
+            case .firstDuplicates: String(localized: "First duplicate results")
+            case .duplicateSearch: String(localized: "Complete duplicate search")
             case .menu: String(localized: "Prepare a table menu")
             case .stop: String(localized: "Stop a scan")
+            case .confirmation: String(localized: "Open a confirmation")
+            case .removalPreparation: String(localized: "Prepare removal details")
             }
         }
     }

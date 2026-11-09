@@ -1,5 +1,6 @@
 import Foundation
 import StorageKit
+import Synchronization
 import Testing
 
 @testable import MyMole
@@ -22,12 +23,129 @@ import Testing
 
         func exists(_ rel: String) -> Bool { FileManager.default.fileExists(atPath: home + "/" + rel) }
 
-        @MainActor func model() -> DuplicatesModel {
-            let m = DuplicatesModel(home: home, roots: [home + "/Documents", home + "/Downloads"], minimum: 10_000, logURL: log, trash: testBin(root))
+        @MainActor func model(standardRoots: Bool = false, budget: ScanBudget = ScanBudget(slots: 1), search: @escaping DuplicatesModel.Search = DuplicatesModel.liveSearch) -> DuplicatesModel {
+            let roots = standardRoots ? DuplicateFinder.standardRoots(home: home) : [home + "/Documents", home + "/Downloads"]
+            let m = DuplicatesModel(home: home, roots: roots, minimum: 10_000, logURL: log, trash: testBin(root), scanBudget: budget, search: search)
             m.jobs = TrashJobs()
             m.protections = UserProtections(root: root.appending(path: "lists"))
             return m
         }
+    }
+
+    private func waitUntil(_ ready: () -> Bool) async -> Bool {
+        for _ in 0..<300 {
+            if ready() { return true }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return ready()
+    }
+
+    @Test func firstOpeningSearchesFoldersCreatedAfterInitializationAndDoesNotRestart() async throws {
+        let box = Box()
+        let model = box.model(standardRoots: true)
+        try box.file("Documents/example.bin", fill: 2)
+        try box.file("Downloads/example.bin", fill: 2)
+        model.scanIfNeeded()
+        await model.scanJob?.value
+        #expect(model.groups.count == 1 && model.attempted && model.chosen.isEmpty)
+        let completed = model.scannedAt
+        model.scanIfNeeded()
+        #expect(!model.scanning && model.scannedAt == completed)
+    }
+
+    @Test func stoppedQueuedSearchDoesNotBorrowAnotherScansSlotOrRestartOnOpening() async throws {
+        let box = Box()
+        let budget = ScanBudget(slots: 1)
+        let (stream, release) = AsyncStream<Void>.makeStream()
+        defer { release.yield(()); release.finish() }
+        let hold = Task.detached {
+            await budget.run(background: true) { for await _ in stream { break } }
+        }
+        try #require(await waitUntil { budget.running == 1 })
+        let model = box.model(budget: budget)
+        model.scanIfNeeded()
+        try #require(await waitUntil { budget.waiting == 1 })
+        #expect(model.step?.phase == .waiting)
+        model.stop()
+        await model.scanJob?.value
+        #expect(!model.scanning && budget.waiting == 0 && budget.running == 1)
+        model.scanIfNeeded()
+        #expect(!model.scanning && model.scannedAt == nil && model.attempted)
+        release.yield(()); release.finish()
+        await hold.value
+    }
+
+    @Test func verifiedGroupsAppearBeforeCompletionButCannotBeChosenAndStopDiscardsThem() async throws {
+        let box = Box()
+        try box.file("Documents/example.bin", fill: 2)
+        try box.file("Downloads/example.bin", fill: 2)
+        let model = box.model(search: { roots, minimum, progress, workers, step, group in
+            let found = DuplicatesModel.liveSearch(roots, minimum, progress, workers, step, group)
+            let end = ContinuousClock.now + .seconds(5)
+            while !progress.isCancelled && ContinuousClock.now < end { Thread.sleep(forTimeInterval: 0.01) }
+            return found
+        })
+        model.scan()
+        defer { model.stop() }
+        try #require(await waitUntil { !model.preview.isEmpty })
+        #expect(model.scanning && model.groups.isEmpty && model.displayGroups.count == 1)
+        model.toggle(try #require(model.preview.first?.files.first?.path))
+        model.chooseAll(keeping: .oldest)
+        #expect(model.chosen.isEmpty)
+        model.stop()
+        await model.scanJob?.value
+        #expect(model.preview.isEmpty && model.displayGroups.isEmpty && model.scannedAt == nil)
+    }
+
+    @Test func aLateSearchCannotReplaceANewerResult() async throws {
+        let box = Box()
+        try box.file("Documents/example.bin", fill: 2)
+        try box.file("Downloads/example.bin", fill: 2)
+        let state = Mutex((calls: 0, release: false))
+        let model = box.model(budget: ScanBudget(slots: 2), search: { roots, minimum, progress, workers, step, group in
+            let first = state.withLock { s in s.calls += 1; return s.calls == 1 }
+            let found = DuplicatesModel.liveSearch(roots, minimum, progress, workers, step, group)
+            if first {
+                let end = ContinuousClock.now + .seconds(10)
+                while !state.withLock({ $0.release }), ContinuousClock.now < end { Thread.sleep(forTimeInterval: 0.01) }
+            }
+            return found
+        })
+        defer { state.withLock { $0.release = true }; model.stop() }
+        model.scan()
+        let old = model.scanJob
+        try #require(await waitUntil { !model.preview.isEmpty })
+        try box.file("Downloads/example.bin", fill: 9)
+        model.scan()
+        await model.scanJob?.value
+        let completed = try #require(model.scannedAt)
+        #expect(model.groups.isEmpty && !model.scanning)
+        state.withLock { $0.release = true }
+        await old?.value
+        #expect(model.groups.isEmpty && model.preview.isEmpty && model.scannedAt == completed)
+    }
+
+    @Test func aRescanCannotPreserveChoicesThatWouldSelectEveryMemberOfANewGroup() async throws {
+        let box = Box()
+        for (name, fill) in [("first", UInt8(1)), ("second", UInt8(2))] {
+            try box.file("Documents/\(name).bin", fill: fill)
+            try box.file("Downloads/\(name).bin", fill: fill)
+        }
+        let model = box.model()
+        model.scan()
+        await model.scanJob?.value
+        #expect(model.groups.count == 2)
+        model.selection = []
+        model.chooseAll(keeping: .oldest)
+        let picked = model.chosen
+        try #require(picked.count == 2)
+        for path in picked { try Data(repeating: 9, count: 40_000).write(to: URL(fileURLWithPath: path)) }
+        model.scan()
+        await model.scanJob?.value
+        let group = try #require(model.groups.first)
+        #expect(model.groups.count == 1 && Set(group.files.map(\.path)) == picked)
+        #expect(model.chosen.count == 1)
+        #expect(group.files.contains { !model.chosen.contains($0.path) })
     }
 
     private func searched(_ box: Box) async throws -> DuplicatesModel {

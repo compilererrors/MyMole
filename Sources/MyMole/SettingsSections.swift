@@ -3,7 +3,7 @@ import Foundation
 /// Search describes controls, rather than indexing private paths in their values.
 enum SettingsSection: String, CaseIterable, Identifiable {
     case appearance, menuBar, background, performance, loading, diskMap, confirmations
-    case diskAccess, timings, folderAccess, systemTasks, keep, systemKeep, about, uninstall
+    case diskAccess, appManagement, timings, folderAccess, systemTasks, keep, systemKeep, about, uninstall
 
     var id: String { rawValue }
 
@@ -17,6 +17,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .diskMap: String(localized: "Disk Map")
         case .confirmations: String(localized: "Confirmations")
         case .diskAccess: String(localized: "Full Disk Access")
+        case .appManagement: String(localized: "App Management")
         case .timings: String(localized: "Timings")
         case .folderAccess: String(localized: "Folder Access")
         case .systemTasks: String(localized: "System Tasks")
@@ -37,6 +38,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .diskMap: String(localized: "excluded skipped folders scan again browse")
         case .confirmations: String(localized: "ask again dialogs warnings trash delete safety restore reset remember")
         case .diskAccess: String(localized: "permissions privacy protected folders settings")
+        case .appManagement: String(localized: "permissions privacy uninstall cannot move Trash administrator approval delete other apps Finder")
         case .timings: String(localized: "Keep timings of the interface Copy Timings Clear benchmark slow speed median p95 filter sort redraw menus first content")
         case .folderAccess: String(localized: "Your home folder Applications The startup disk Give Access Take Back permissions bookmarks sandbox")
         case .systemTasks: String(localized: "administrator password root helper privileged")
