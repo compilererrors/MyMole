@@ -51,6 +51,13 @@ public final class Folder: Identifiable, @unchecked Sendable {
     /// Newest change among the files directly in this folder (not below).
     public internal(set) var ownLatestChange = Date.distantPast
     public internal(set) var isFinished = false
+    var ownRiskCode: Int8 = -1
+    var riskCode: Int8 = -1
+    var riskListed = false
+    public private(set) var riskComplete = false
+    /// Computed during the existing walk, including names of small files.
+    /// Reading this never lists directories or performs another disk walk.
+    public var scannedRisk: PathRisk? { PathRisk.decoded(riskCode) }
 
     public var id: ObjectIdentifier { ObjectIdentifier(self) }
 
@@ -99,15 +106,21 @@ public final class Folder: Identifiable, @unchecked Sendable {
             var total = f.ownBytes
             var count = f.listedFiles.count + f.smallFileCount
             var latest = f.latestChange
+            var risk = f.ownRiskCode
+            var complete = f.riskListed && !f.unreadable
             for s in f.subfolders {
                 total.add(s.totalBytes)
                 count += s.fileCount
                 latest = max(latest, s.latestChange)
+                risk = PathRisk.merging(risk, s.riskCode)
+                complete = complete && s.riskComplete
             }
             f.totalBytes = total
             f.size = total.total
             f.fileCount = count
             f.latestChange = latest
+            f.riskCode = risk
+            f.riskComplete = complete
             f.subfolders.sort { $0.size > $1.size }
             f.listedFiles.sort { $0.size > $1.size }
             f.isFinished = true

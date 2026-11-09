@@ -22,7 +22,7 @@ public enum TrashAction: String, Sendable {
 public struct TrashPlan: Sendable, Identifiable {
     /// Raised when the checks a plan relies on change meaning, so a plan
     /// made under other rules is never carried out.
-    public static let policyVersion = 1
+    public static let policyVersion = 2
 
     public struct Item: Sendable, Equatable {
         public enum Status: Sendable, Equatable {

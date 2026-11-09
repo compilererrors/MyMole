@@ -80,35 +80,39 @@ extension View {
     }
 }
 
-/// Empty, progress and finished states, built on the system's own
-/// `ContentUnavailableView` so they look like the rest of macOS. A nil
-/// symbol shows a spinner.
+/// Setup and empty states share a readable card with the page's margins.
+/// Short windows scroll the complete content, including its actions.
 struct CenterCard<Actions: View>: View {
     let symbol: String?
     let title: LocalizedStringResource
     let subtitle: LocalizedStringResource
     @ViewBuilder var actions: Actions
+    @Environment(\.palette) private var palette
 
     var body: some View {
-        ContentUnavailableView {
-            if let symbol {
-                Label {
-                    Text(title)
-                } icon: {
-                    Image(systemName: symbol)
+        GeometryReader { geometry in
+            ScrollView {
+                VStack(alignment: .leading, spacing: DS.Space.lg) {
+                    Group {
+                        if let symbol { Image(systemName: symbol).font(.system(size: 30, weight: .medium)).foregroundStyle(palette.accent.color) }
+                        else { PulseDot(size: 16) }
+                    }.accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: DS.Space.sm) {
+                        Text(title).font(.title2.weight(.semibold))
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityAddTraits(.isHeader)
+                        Text(subtitle).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    actions
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
-            } else {
-                VStack(spacing: 12) {
-                    PulseDot(size: 16)
-                    Text(title).font(.title2.bold())
-                }
+                .padding(DS.Space.xl)
+                .frame(maxWidth: 600, alignment: .leading)
+                .dsCard()
+                .padding(DS.Space.page)
+                .frame(maxWidth: .infinity, minHeight: geometry.size.height, alignment: .center)
             }
-        } description: {
-            Text(subtitle).fixedSize(horizontal: false, vertical: true)
-        } actions: {
-            // Buttons side by side keep their whole labels; the system view
-            // would otherwise squeeze them to "Open System S…".
-            actions.fixedSize(horizontal: false, vertical: true)
         }
     }
 }
@@ -156,16 +160,18 @@ struct Metric: View {
 
 struct UsageBar: View {
     let fraction: Double
+    var tint: Color? = nil
+    var height: CGFloat = 6
 
     var body: some View {
         GeometryReader { g in
             ZStack(alignment: .leading) {
                 Capsule().fill(.quaternary)
                 Capsule()
-                    .fill(Theme.load(fraction * 100))
+                    .fill(tint ?? Theme.load(fraction * 100))
                     .frame(width: g.size.width * min(max(fraction, 0), 1))
             }
         }
-        .frame(height: 6)
+        .frame(height: height)
     }
 }

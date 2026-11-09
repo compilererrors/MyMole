@@ -96,6 +96,11 @@ public struct Leftover: Sendable, Hashable, Codable, Identifiable {
         /// What the deeper search found: the app's name inside a longer
         /// name, or a hidden folder in the home folder. Never chosen.
         case loose
+        /// Exact app/helper identity in a scoped runtime root; temporary data needs review.
+        case runtimeID
+        /// Discovery can continue with partial owner information. These
+        /// rows require separate manual review, never automatic selection.
+        case unverified
 
         public var title: String {
             switch self {
@@ -106,18 +111,21 @@ public struct Leftover: Sendable, Hashable, Codable, Identifiable {
             case .vendorFolder: "in its maker's folder, by its name"
             case .vendor: "its maker's, and no other app of the maker is left"
             case .loose: "by a looser match of its name; look before choosing"
+            case .runtimeID: "by an app or helper ID in a per-user runtime folder; review its contents"
+            case .unverified: "a possible app match; ownership couldn't be verified"
             }
         }
     }
 
-    /// Starts chosen: what's rebuilt or part of the app, tied by more than a name.
-    public var chosenByDefault: Bool { kind.chosenByDefault && ![.name, .vendor, .loose].contains(evidence) }
+    /// Only rebuildable caches/logs with identity evidence start chosen.
+    public var canRemove: Bool { evidence != .unverified }
+    public var chosenByDefault: Bool { canRemove && kind.chosenByDefault && ![.name, .vendorFolder, .vendor, .loose, .runtimeID].contains(evidence) }
 
     /// What a leftover holds, which decides whether it starts chosen.
     public enum Kind: Int, Sendable, Comparable {
-        /// Caches, logs and window states the app rebuilds. Chosen.
+        /// Caches and logs the app rebuilds. Chosen with identity evidence.
         case rebuildable
-        /// Parts of the app itself, such as a login item. Chosen.
+        /// Parts of the app, such as launch configuration. Reviewed explicitly.
         case appPart
         /// Settings. Kept unless chosen: a reinstall would start over.
         case settings
@@ -128,7 +136,7 @@ public struct Leftover: Sendable, Hashable, Codable, Identifiable {
 
         public static func < (a: Self, b: Self) -> Bool { a.rawValue < b.rawValue }
 
-        public var chosenByDefault: Bool { self == .rebuildable || self == .appPart }
+        public var chosenByDefault: Bool { self == .rebuildable }
 
         public var title: String {
             switch self {
@@ -143,11 +151,10 @@ public struct Leftover: Sendable, Hashable, Codable, Identifiable {
 
     public var kind: Kind {
         switch place {
-        case "Caches", "Logs", "Saved Application State", "HTTPStorages", "WebKit", "Cookies", "Logs/DiagnosticReports",
-            "Application Support/CrashReporter", AppLeftovers.recentDocuments:
+        case "Caches", "Logs", "Logs/DiagnosticReports", "Application Support/CrashReporter":
             .rebuildable
-        case "LaunchAgents", "Application Scripts": .appPart
-        case "Preferences", "Preferences/ByHost": .settings
+        case "LaunchAgents": .appPart
+        case "Preferences", "Preferences/ByHost", AppLeftovers.recentDocuments: .settings
         case "Group Containers": .shared
         case "~/.cache": .rebuildable
         case "~/.config": .settings
@@ -264,11 +271,18 @@ public enum AppFinder {
         var seen = Set<String>()
         func names(_ dir: String) -> [String]? { DirectoryListing.names(dir) }
         func add(_ path: String) -> Bool {
+            // An Applications alias still represents an installed owner
+            // (including macOS's Safari alias). It never authorizes moving
+            // the alias or its target; removal retains its separate path gate.
+            var entry = stat()
+            guard lstat(path, &entry) == 0 else { return false }
+            let path = entry.st_mode & S_IFMT == S_IFLNK ? URL(fileURLWithPath: path).resolvingSymlinksInPath().path : path
             guard isRealFolder(path), Trasher.noLinksBetween(path, and: path + "/Contents"),
                   let app = metadata(path), let id = app.bundleID, AppLeftovers.isWellFormed(id) else { return false }
             var st = stat()
             guard lstat(path + "/Contents/Info.plist", &st) == 0, st.st_mode & S_IFMT == S_IFREG else { return false }
-            if seen.insert(path).inserted { out.append(app) }
+            guard let physical = Trasher.realPath(path) else { return false }
+            if seen.insert(physical).inserted { out.append(app) }
             return true
         }
         for folder in folders {
@@ -420,33 +434,72 @@ public enum AppLeftovers {
     /// `deep`: also what a looser match finds (`DeepLeftovers`), never chosen.
     public static func find(
         for app: AppBundle, home: String = Home.path, installed: [AppBundle], identity: AppIdentity = AppIdentity(),
-        deep: Bool = false, progress: ScanProgress = ScanProgress()
+        deep: Bool = false, progress: ScanProgress = ScanProgress(), runtimeRoots: [RuntimeLeftovers.Root] = []
     ) -> [Leftover] {
+        list(for: app, home: home, installed: installed, identity: identity, deep: deep, progress: progress, runtimeRoots: runtimeRoots).items
+    }
+
+    public static func list(
+        for app: AppBundle, home: String = Home.path, installed: [AppBundle], identity: AppIdentity = AppIdentity(),
+        deep: Bool = false, progress: ScanProgress = ScanProgress(), runtimeRoots: [RuntimeLeftovers.Root] = [], limits: LeftoverScanLimits = .init(),
+        onStep: (([Leftover]) -> Void)? = nil
+    ) -> LeftoverListing {
+        let scan = LeftoverScan(progress: progress, limits: limits)
+        let items = collect(for: app, home: home, installed: installed, identity: identity, deep: deep, runtimeRoots: runtimeRoots, scan: scan, onStep: onStep)
+        return LeftoverListing(items: items, unreadable: scan.unreadable.sorted(), limited: scan.limited, cancelled: progress.isCancelled)
+    }
+
+    /// Direct exact-ID probes only: no directory listing, ownership read or size walk.
+    public static func preview(for app: AppBundle, home: String, progress: ScanProgress = ScanProgress()) -> [LeftoverPreview] {
+        guard let id = app.bundleID, isWellFormed(id) else { return [] }
+        var found: [LeftoverPreview] = []
+        for place in places {
+            guard !progress.isCancelled else { return [] }
+            guard mayOffer(place.folder, of: app) else { continue }
+            let suffix = place.folder.hasPrefix("Preferences") ? ".plist" : place.folder == "Saved Application State" ? ".savedState" : ""
+            let path = home + "/Library/" + place.folder + "/" + id + suffix
+            var info = stat()
+            guard Trasher.noLinksBetween(home, and: path), lstat(path, &info) == 0,
+                  [S_IFREG, S_IFDIR].contains(info.st_mode & S_IFMT) else { continue }
+            found.append(LeftoverPreview(path: path, place: place.folder,
+                bytes: info.st_mode & S_IFMT == S_IFREG ? Int64(info.st_blocks) * 512 : nil))
+        }
+        return found
+    }
+
+    private static func collect(for app: AppBundle, home: String, installed: [AppBundle], identity: AppIdentity,
+                                deep: Bool, runtimeRoots: [RuntimeLeftovers.Root], scan: LeftoverScan, onStep: (([Leftover]) -> Void)?) -> [Leftover] {
         guard let id = app.bundleID, isWellFormed(id) else { return [] }
         if installed.contains(where: { $0.path != app.path && $0.bundleID?.caseInsensitiveCompare(id) == .orderedSame }) { return [] }
+        if identity.otherOwnerIDs.contains(where: { $0.caseInsensitiveCompare(id) == .orderedSame }) { return [] }
         let lib = home + "/Library"
         var out: [Leftover] = []
-        for place in places where !progress.isCancelled {
+        // Small configuration records surface before potentially huge cache/support trees.
+        let ordered = places.sorted { ($0.folder.hasPrefix("Preferences") ? 0 : 1) < ($1.folder.hasPrefix("Preferences") ? 0 : 1) }
+        for place in ordered where !scan.shouldStop {
             let dir = lib + "/" + place.folder
-            guard Trasher.noLinksBetween(home, and: dir) else { continue }
-            for entry in AppFinder.contents(dir) where !progress.isCancelled {
+            for entry in scan.names(dir, within: home) where !scan.shouldStop {
                 guard let why = evidence(entry, rules: place.matches, to: app, installed: installed, identity: identity) else { continue }
                 let p = dir + "/" + entry
                 guard mayOffer(place.folder, of: app), Trasher.noLinksBetween(home, and: p) else { continue }
-                if let m = measure(p, progress: progress) {
+                if let m = scan.measure(p) {
                     var l = Leftover(path: p, bytes: m, place: place.folder)
                     l.evidence = why
                     out.append(l)
+                    onStep?(out)
                 }
             }
         }
-        if !app.isProtected && !progress.isCancelled && Trasher.noLinksBetween(home, and: lib) {
-            out += vendorFolders(of: app, lib: lib, installed: installed, progress: progress)
-            out += vendorShared(of: app, lib: lib, installed: installed, progress: progress)
-            if deep && !progress.isCancelled {
-                let known = Set(out.map(\.path))
-                out += DeepLeftovers.find(for: app, home: home, installed: installed, progress: progress).filter { !known.contains($0.path) }
-            }
+        if !app.isProtected && !scan.shouldStop && Trasher.noLinksBetween(home, and: lib) {
+            out += vendorFolders(of: app, lib: lib, installed: installed, scan: scan)
+            out += vendorShared(of: app, lib: lib, installed: installed, scan: scan)
+        }
+        if deep && !app.isProtected && !scan.shouldStop {
+            var known = Set(out.map(\.path))
+            out += DeepLeftovers.find(for: app, home: home, installed: installed, scan: scan).filter { !known.contains($0.path) }
+            known.formUnion(out.map(\.path))
+            out += RuntimeLeftovers.find(for: app, installed: installed, identity: identity, roots: runtimeRoots, scan: scan)
+                .filter { !known.contains($0.path) }
         }
         out.removeAll { claimedByOtherApp($0.path, of: app, home: home, identity: identity) }
         // One leftover inside another goes with it.
@@ -502,17 +555,15 @@ public enum AppLeftovers {
         }
     }
 
-    static func vendorFolders(of app: AppBundle, lib: String, installed: [AppBundle], progress: ScanProgress = ScanProgress()) -> [Leftover] {
+    static func vendorFolders(of app: AppBundle, lib: String, installed: [AppBundle], scan: LeftoverScan) -> [Leftover] {
         guard let id = app.bundleID else { return [] }
         var out: [Leftover] = []
-        for place in vendorPlaces where !progress.isCancelled {
-            guard Trasher.noLinksBetween(lib, and: lib + "/" + place) else { continue }
-            for vendor in AppFinder.contents(lib + "/" + place) where isVendorFolder(vendor, of: id) {
+        for place in vendorPlaces where !scan.shouldStop {
+            for vendor in scan.names(lib + "/" + place, within: lib) where isVendorFolder(vendor, of: id) {
                 let dir = lib + "/" + place + "/" + vendor
-                guard AppFinder.isRealFolder(dir), Trasher.noLinksBetween(lib, and: dir), !progress.isCancelled else { continue }
-                for entry in AppFinder.contents(dir) where !progress.isCancelled && isAppsVendorEntry(entry, vendor: vendor, of: app, installed: installed) {
+                for entry in scan.names(dir, within: lib) where !scan.shouldStop && isAppsVendorEntry(entry, vendor: vendor, of: app, installed: installed) {
                     let p = dir + "/" + entry
-                    if let m = measure(p, progress: progress) {
+                    if let m = scan.measure(p) {
                         var l = Leftover(path: p, bytes: m, place: place)
                         l.evidence = .vendorFolder
                         out.append(l)
@@ -526,7 +577,7 @@ public enum AppLeftovers {
     /// The maker's own entries, for the last of its apps: named by the
     /// maker's ID and by no installed app's, or the maker's folder in the
     /// Library itself ("~/Library/Google", which holds Google's updater).
-    static func vendorShared(of app: AppBundle, lib: String, installed: [AppBundle], progress: ScanProgress = ScanProgress()) -> [Leftover] {
+    static func vendorShared(of app: AppBundle, lib: String, installed: [AppBundle], scan: LeftoverScan) -> [Leftover] {
         guard let id = app.bundleID, let company = company(of: id) else { return [] }
         let prefix = id.split(separator: ".").prefix(2).joined(separator: ".").lowercased() + "."
         let others = installed.filter { $0.path != app.path }
@@ -534,24 +585,23 @@ public enum AppLeftovers {
         guard !others.contains(where: { ($0.bundleID?.lowercased().hasPrefix(prefix)) ?? false }) else { return [] }
         let otherIDs = others.compactMap { $0.bundleID?.lowercased() }
         var out: [Leftover] = []
-        for place in vendorIDPlaces where !progress.isCancelled {
-            guard Trasher.noLinksBetween(lib, and: lib + "/" + place) else { continue }
-            for entry in AppFinder.contents(lib + "/" + place) where !progress.isCancelled {
+        for place in vendorIDPlaces where !scan.shouldStop {
+            for entry in scan.names(lib + "/" + place, within: lib) where !scan.shouldStop {
                 let lower = entry.lowercased()
                 guard lower.hasPrefix(prefix), !lower.hasPrefix(id.lowercased()),
                     !otherIDs.contains(where: { lower == $0 || lower.hasPrefix($0 + ".") })
                 else { continue }
                 let p = lib + "/" + place + "/" + entry
-                if let m = measure(p, progress: progress) {
+                if let m = scan.measure(p) {
                     var l = Leftover(path: p, bytes: m, place: place)
                     l.evidence = .vendor
                     out.append(l)
                 }
             }
         }
-        for entry in AppFinder.contents(lib) where !progress.isCancelled && letters(entry) == company && AppFinder.isRealFolder(lib + "/" + entry) {
+        for entry in scan.names(lib, within: lib) where !scan.shouldStop && letters(entry) == company && AppFinder.isRealFolder(lib + "/" + entry) {
             let p = lib + "/" + entry
-            if let m = measure(p, progress: progress) {
+            if let m = scan.measure(p) {
                 var l = Leftover(path: p, bytes: m, place: "Library")
                 l.evidence = .vendor
                 out.append(l)
@@ -616,9 +666,9 @@ public enum AppLeftovers {
         guard let id = app.bundleID, isWellFormed(id) else { return nil }
         let others = installed.filter { $0.path != app.path }
         let name = app.name
-        let nameUsable = name.count >= 3 && !genericNames.contains(name.lowercased()) && !others.contains { $0.name == name }
+        let nameUsable = name.count >= 3 && !genericNames.contains(name.lowercased()) && !others.contains { $0.name.caseInsensitiveCompare(name) == .orderedSame }
         // An app group is matched exactly, by the name the signature gives it.
-        if rules.contains(.groupContainer), identity.groups.contains(entry) { return .group }
+        if rules.contains(.groupContainer), identity.groups.contains(where: { $0.caseInsensitiveCompare(entry) == .orderedSame }) { return .group }
         // The app's own ID and name, then each helper's ID by the same rules.
         let idRules = rules.filter { $0 != .name && $0 != .report }
         var matched: [String] = []
@@ -663,10 +713,9 @@ public enum AppLeftovers {
                 // "com.vendor.app.sfl3": the ID in lower case.
                 ["sfl", "sfl2", "sfl3"].contains { entry == id.lowercased() + "." + $0 }
             case .groupContainer:
-                // "group.<id>" or "<TEAMID>.<id>", where a team ID is ten letters and digits.
-                entry == "group." + id
-                    || (entry.hasSuffix("." + id) && entry.dropLast(id.count + 1).count == 10
-                        && entry.dropLast(id.count + 1).allSatisfy { $0.isLetter || $0.isNumber })
+                // Only the exclusive signed claims above may authorize a group.
+                // An ID-derived guess could reintroduce a shared group removed by ownership checks.
+                false
             }
         }
     }
@@ -690,12 +739,14 @@ public enum AppLeftovers {
     /// `deep`: the path was found by the deeper search, and is checked by its rules.
     public static func isStillLeftover(
         _ path: String, of app: AppBundle, home: String = Home.path, installed: [AppBundle],
-        identity: AppIdentity = AppIdentity(), deep: Bool = false
+        identity: AppIdentity = AppIdentity(), deep: Bool = false, runtimeRoots: [RuntimeLeftovers.Root] = []
     ) -> Bool {
-        guard let id = app.bundleID, Trasher.isPlainPath(path), !claimedByOtherApp(path, of: app, home: home, identity: identity),
+        guard let id = app.bundleID, !identity.otherOwnerIDs.contains(where: { $0.caseInsensitiveCompare(id) == .orderedSame }),
+            Trasher.isPlainPath(path), !claimedByOtherApp(path, of: app, home: home, identity: identity),
             !installed.contains(where: { $0.path != app.path && $0.bundleID?.caseInsensitiveCompare(id) == .orderedSame })
         else { return false }
         let lib = home + "/Library/"
+        if RuntimeLeftovers.isStill(path, of: app, installed: installed, identity: identity, roots: runtimeRoots) { return true }
         // What the deeper search offered, checked again by its own rules.
         if deep { return DeepLeftovers.isStill(path, of: app, home: home, installed: installed) }
         guard path.hasPrefix(lib), Trasher.noLinksBetween(home, and: path) else { return false }
@@ -714,7 +765,7 @@ public enum AppLeftovers {
     }
 
     /// A vendor/name/deep fallback cannot override another app's helper ID.
-    private static func claimedByOtherApp(_ path: String, of app: AppBundle, home: String, identity: AppIdentity) -> Bool {
+    static func claimedByOtherApp(_ path: String, of app: AppBundle, home: String, identity: AppIdentity) -> Bool {
         let leaf = (path as NSString).lastPathComponent.lowercased()
         let name = leaf.hasPrefix(".") ? String(leaf.dropFirst()) : leaf
         if identity.otherOwnerIDs.contains(where: { id in

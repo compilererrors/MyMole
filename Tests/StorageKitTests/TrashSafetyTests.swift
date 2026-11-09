@@ -21,6 +21,32 @@ final class TrashSafetyFixture {
 }
 
 @Suite struct TrashSafetyTests {
+ @Test func permissionDiagnosticsUseTypedErrorsAndNeverIncludeMessageOrPathsInTheCode() {
+  let inner = NSError(domain: NSPOSIXErrorDomain, code: Int(EACCES), userInfo: [NSLocalizedDescriptionKey: "Synthetic private message /synthetic/private/item"])
+  let wrapped = NSError(domain: NSCocoaErrorDomain, code: NSFileWriteUnknownError, userInfo: [NSUnderlyingErrorKey: inner])
+  let info = TrashOutcome.FailureInfo(wrapped, area: .uninstall)
+  #expect(info.permissionDenied)
+  #expect(info.code.description == "MM-UNINST-C512.P13")
+  for code in [NSFileWriteNoPermissionError, NSFileReadNoPermissionError] {
+   #expect(TrashOutcome.FailureInfo(NSError(domain: NSCocoaErrorDomain, code: code), area: .uninstall).permissionDenied)
+  }
+  #expect(!TrashOutcome.FailureInfo(NSError(domain: NSCocoaErrorDomain, code: NSFileNoSuchFileError, userInfo: [NSLocalizedDescriptionKey: "permission denied"]), area: .uninstall).permissionDenied)
+  #expect(!TrashOutcome.FailureInfo(NSError(domain: NSCocoaErrorDomain, code: NSFileWriteVolumeReadOnlyError), area: .uninstall).permissionDenied)
+  for code in [-54, -5000] {
+   #expect(TrashOutcome.FailureInfo(NSError(domain: NSOSStatusErrorDomain, code: code), area: .uninstall).permissionDenied)
+  }
+  let reported = NSError(domain: NSCocoaErrorDomain, code: 513,
+    userInfo: [NSUnderlyingErrorKey: NSError(domain: NSOSStatusErrorDomain, code: -5000)])
+  #expect(TrashOutcome.FailureInfo(reported, area: .uninstall).code.description == "MM-UNINST-C513.S-5000")
+  #expect(!TrashOutcome.FailureInfo(NSError(domain: NSOSStatusErrorDomain, code: -43), area: .uninstall).permissionDenied)
+ }
+ @Test func trashDiagnosticsApplyOnlyToFailedItemsThatWereNotMoved() {
+  let info = TrashOutcome.FailureInfo(NSError(domain: NSPOSIXErrorDomain, code: Int(EPERM)), area: .uninstall)
+  let moved = TrashRecord(original: URL(fileURLWithPath: "/synthetic/moved"), trashed: URL(fileURLWithPath: "/synthetic/Trash/moved"))
+  let result = TrashOutcome(moved: [moved], failed: [("/synthetic/stayed", "denied"), ("/synthetic/moved", "inconsistent")],
+    failureInfo: ["/synthetic/stayed": info, "/synthetic/moved": info, "/synthetic/unrelated": info])
+  #expect(Set(result.failureInfo.keys) == ["/synthetic/stayed"])
+ }
  @Test func unreadableKeepParentMustStopCleanup() throws {
   let box = try TrashSafetyFixture()
   let url = box.root.appending(path: "protected/keep.json")

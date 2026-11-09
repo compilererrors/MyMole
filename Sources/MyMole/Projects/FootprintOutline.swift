@@ -457,7 +457,11 @@ struct FootprintOutline: NSViewRepresentable {
         }
 
         @objc func doubleClicked() {
-            guard let outline, let n = outline.item(atRow: outline.clickedRow) as? Node else { return }
+            open(row: outline?.clickedRow ?? -1)
+        }
+
+        func open(row: Int) {
+            guard let outline, let n = outline.item(atRow: row) as? Node else { return }
             if outline.isExpandable(n) {
                 outline.isItemExpanded(n) ? outline.collapseItem(n) : outline.expandItem(n)
             } else if let p = n.path {
@@ -467,20 +471,34 @@ struct FootprintOutline: NSViewRepresentable {
 
         // Menu
 
+        var selectedPaths: [String] {
+            guard let outline else { return [] }
+            return outline.selectedRowIndexes.compactMap { outline.item(atRow: $0) as? Node }.flatMap { node in
+                node.path.map { [$0] } ?? node.item?.entries.map(\.path) ?? []
+            }
+        }
+
+        func keyboardMenu() -> NSMenu {
+            let menu = NSMenu()
+            if let outline, let node = outline.item(atRow: outline.selectedRow) as? Node { addActions(for: node, to: menu) }
+            outline?.addColumnSubmenu(to: menu)
+            return menu
+        }
+
         func menuNeedsUpdate(_ menu: NSMenu) {
             if menu === headerMenu, let outline {
                 menu.removeAllItems()
-                for column in outline.tableColumns {
-                    let item = ClosureMenuItem(column.title) { column.isHidden.toggle(); outline.fitFlexibleColumn("name") }
-                    item.state = column.isHidden ? .off : .on
-                    item.isEnabled = column !== outline.outlineTableColumn
-                    menu.addItem(item)
-                }
-                outline.addColumnWidthActions(to: menu)
+                outline.populateColumnHeader(menu)
                 return
             }
             menu.removeAllItems()
-            guard let outline, let n = outline.item(atRow: outline.clickedRow) as? Node, let item = n.item else { return }
+            guard let outline else { return }
+            if let n = outline.item(atRow: outline.clickedRow) as? Node { addActions(for: n, to: menu) }
+            outline.addColumnSubmenu(to: menu)
+        }
+
+        private func addActions(for n: Node, to menu: NSMenu) {
+            guard let item = n.item else { return }
             let target: Target
             if case .item = n.kind {
                 target = .item(item)
@@ -559,7 +577,8 @@ extension NSMenu {
 }
 
 /// The outline itself: Space ticks the selected rows.
-final class FootprintOutlineView: NSOutlineView, LinedTable {
+final class FootprintOutlineView: NSOutlineView, LinedTable, UserColumnTable {
+    var defaultHiddenColumns = Set<String>()
     weak var coordinator: FootprintOutline.Coordinator?
     var lines = TableLines.none
     var lineColor = NSColor.separatorColor
@@ -596,11 +615,28 @@ final class FootprintOutlineView: NSOutlineView, LinedTable {
     }
 
     override func keyDown(with event: NSEvent) {
-        if event.charactersIgnoringModifiers == " " {
+        if handleFileKey(event) { return }
+        let plain = event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty
+        if plain, event.charactersIgnoringModifiers == " " {
             coordinator?.toggleSelection()
+        } else if plain, [36, 76].contains(event.keyCode) {
+            coordinator?.open(row: selectedRow)
         } else {
             super.keyDown(with: event)
         }
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        handleFileKey(event) || super.performKeyEquivalent(with: event)
+    }
+
+    private func handleFileKey(_ event: NSEvent) -> Bool {
+        guard window?.firstResponder === self, let action = FileKeyboard.action(event) else { return false }
+        switch action {
+        case .menu: if let menu = coordinator?.keyboardMenu() { showKeyboardMenu(menu) }
+        case .copyAbsolutePath: FileActions.copy(coordinator?.selectedPaths ?? [], as: .absolutePath)
+        }
+        return true
     }
 }
 

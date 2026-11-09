@@ -47,9 +47,10 @@ only 'trashItem\(' Sources/StorageKit/Trash.swift
 only '\.recycle\(' Sources/MyMole/Uninstall/AppsModel.swift
 only '(removeItem|moveItem|replaceItem)\(at(Path)?:|replaceItemAt\(|(^|[^a-zA-Z_.])(unlink|unlinkat|rmdir|removefile)\(' Sources/StorageKit/Trash.swift Sources/StorageKit/Snapshot.swift \
   Sources/StorageKit/TrashEmpty.swift \
-  Sources/PrivilegedKit/SystemCleanup.swift Sources/PrivilegedKit/SecureRemove.swift Sources/PrivilegedKit/Staging.swift Sources/PrivilegedKit/SystemLeftovers.swift
-# Renames move things too: only Undo and the helper's staging rename.
-only '(^|[^a-zA-Z_.])(rename|renamex_np|renameat|renameatx_np)\(' Sources/StorageKit/Trash.swift Sources/PrivilegedKit/Staging.swift
+  Sources/PrivilegedKit/SystemCleanup.swift Sources/PrivilegedKit/SecureRemove.swift Sources/PrivilegedKit/Staging.swift Sources/PrivilegedKit/SystemLeftovers.swift \
+  Sources/PrivilegedKit/ApplicationTrash.swift
+# Renames move things too: Undo, staging, and the helper's exact app/Trash move.
+only '(^|[^a-zA-Z_.])(rename|renamex_np|renameat|renameatx_np)\(' Sources/StorageKit/Trash.swift Sources/PrivilegedKit/Staging.swift Sources/PrivilegedKit/ApplicationTrash.swift
 # Root is asked for in one place only, and never in the App Store edition.
 only 'administrator privileges|/usr/bin/osascript|NSAppleScript' Sources/MyMole/Privileged/PrivilegedClient.swift
 grep -q '#if !APPSTORE' Sources/MyMole/Privileged/PrivilegedClient.swift ||

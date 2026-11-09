@@ -5,7 +5,7 @@ import StorageKit
 /// user's that couldn't be saved yet. The unsaved change protects in the
 /// app right away, but nothing is removed until it's saved or given up,
 /// and nothing is removed while the file can't be read.
-struct KeepListFile {
+struct KeepListFile: Sendable {
     let url: URL
     /// What applies now: the saved list with the unsaved change.
     private(set) var list = CleanKeepList()

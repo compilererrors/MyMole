@@ -272,6 +272,8 @@ struct DSPath: View {
             .fixedSize(horizontal: false, vertical: true)
             .help(path)
             .accessibilityLabel(path)
+            .focusable(interactions: .activate)
+            .contextMenu { FileMenuItems(paths: [path], canOpen: false) }
     }
 }
 
@@ -370,6 +372,7 @@ extension View {
 /// The filter field above a list: magnifying glass, placeholder, and a
 /// clear button once there's text. Looks like the system search field.
 struct DSFilterField: View {
+    @Environment(\.closeDialog) private var closeDialog
     /// Whether a row with these texts (name, folder…) passes `query`: every
     /// word typed appears in one of them, in any case.
     nonisolated static func matches(_ query: String, _ texts: String...) -> Bool {
@@ -399,8 +402,12 @@ struct DSFilterField: View {
             TextField(prompt, text: $text, prompt: Text(prompt))
                 .textFieldStyle(.plain)
                 .focused($focused)
-                // Escape clears what's typed, then leaves the field.
-                .onExitCommand { if text.isEmpty { focused = false } else { text = "" } }
+                // A dialog closes first; main-pane search clears its query.
+                .onExitCommand {
+                    if let closeDialog { closeDialog() }
+                    else if text.isEmpty { focused = false }
+                    else { text = "" }
+                }
                 .onChange(of: findRequest) { focused = true }
                 .accessibilityLabel(prompt)
             if !text.isEmpty {

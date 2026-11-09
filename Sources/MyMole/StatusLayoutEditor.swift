@@ -10,6 +10,7 @@ struct StatusLayoutEditor: View {
             DSText(
                 "Choose visible cards and their size. Drag rows or use the arrows to change order. Your layout is saved on this Mac.",
                 .metadata)
+            DSText("You can also use Edit Layout on the page. Row heights stay aligned, and hidden cards remain available from the hidden-cards menu.", .metadata)
             List {
                 ForEach(layout.cards) { card in
                     HStack(spacing: DS.Space.md) {
@@ -44,12 +45,16 @@ struct StatusLayoutEditor: View {
             }
             .frame(height: 380)
             DSActionGroup {
-                Button("Restore Default Layout") { layout = StatusLayout() }
+                DSFlow(spacing: DS.Space.sm) {
+                    Button("Show All Cards") { layout.showAll() }.disabled(layout.hidden.isEmpty)
+                    Button("Restore Default Layout") { layout = StatusLayout() }
+                }
             } trailing: {
                 Button("Done") { dismiss() }.primaryAction().keyboardShortcut(.cancelAction)
             }
         }
         .padding(DS.Space.xl)
         .frame(width: DS.Size.reviewWidth)
+        .dialogKeyboard()
     }
 }

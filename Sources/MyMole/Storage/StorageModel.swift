@@ -23,6 +23,12 @@ struct BrowseFilter: Hashable, Codable {
     var wholeScan = false
 
     var isActive: Bool { !query.isEmpty || kind != nil || date.isActive }
+    var criteriaCount: Int { (query.isEmpty ? 0 : 1) + (kind == nil ? 0 : 1) + (date.isActive ? 1 : 0) }
+    mutating func clearCriteria() {
+        query = ""
+        kind = nil
+        date = DateFilter()
+    }
 
     func matches(_ e: DiskEntry) -> Bool {
         guard isActive else { return true }
@@ -34,11 +40,13 @@ struct BrowseFilter: Hashable, Codable {
 }
 
 /// Something marked for removal.
-struct Marked: Hashable {
+struct Marked: Hashable, Sendable {
     let path: String
     let name: String
     let size: Int64
     let isFolder: Bool
+    var needsRefresh = false
+    var proof: FolderContents.Item?
 
     static func parent(of path: String, in paths: Set<String>) -> String? {
         var parent = (path as NSString).deletingLastPathComponent
@@ -57,6 +65,11 @@ struct Marked: Hashable {
 @MainActor
 @Observable
 final class StorageModel {
+    typealias Scan = @Sendable (String, ScanProgress, Int, @escaping @Sendable (Folder) -> Void, @Sendable (Folder) -> Void, Set<String>) -> ScanResult
+    @ObservationIgnored var scanFolder: Scan = { path, progress, workers, root, subtree, skip in
+        StorageScanner.scan(path: path, progress: progress, workers: workers, onRoot: root, onSubtree: subtree, skip: skip)
+    }
+    @ObservationIgnored var scanBudget = ScanBudget.shared
     /// The ways the disk map can be drawn, picked from the toolbar menu.
     enum Chart: String, CaseIterable, Identifiable {
         case rings, wheel, pie, boxes, columns, bars
@@ -164,6 +177,7 @@ final class StorageModel {
             }
             showNotice(Notice(text: String(localized: "\(url.lastPathComponent) couldn't be opened: \(why)"), canUndo: false))
         case .success(let (export, tree, index, large)):
+            guard !trashing else { return }
             progress?.cancel()
             epoch += 1
             refreshing = false
@@ -223,6 +237,7 @@ final class StorageModel {
     private(set) var comparing = false
     private(set) var largeFiles: [LargeFile] = []
     private(set) var lastDuration: TimeInterval?
+    private(set) var incomplete = false
     /// Bumped whenever the tree's shape changes (streamed subtree, prune,
     /// undo) so charts re-lay out exactly then and not on every hover.
     private(set) var revision = 0
@@ -241,8 +256,23 @@ final class StorageModel {
     var browseFilter = BrowseFilter()
     /// Open branches survive pane changes and replacement of a completed map.
     var treeExpanded = Set<String>()
-    var marked: [String: Marked] = [:]
-    var showReview = false
+    var marked: [String: Marked] = [:] { didSet { markRevision &+= 1 } }
+    private(set) var markRevision: UInt64 = 0
+    private var protectionRevision: UInt64 = 0
+    let removalHints = RemovalHints()
+    var removalHintKey: RemovalHints.Key { .init(selection: markRevision, scope: epoch, protections: protectionRevision, busy: trashing) }
+    var currentRemovalHints: RemovalHints.Value? { removalHints.value(for: removalHintKey) }
+    func invalidateRemovalHints() { protectionRevision &+= 1 }
+    func warmRemovalHints() async {
+        guard !marked.isEmpty, !trashing, opened == nil else { return }
+        await removalHints.update(.init(key: removalHintKey, items: Array(marked.values), protections: protections,
+                                       inspectOpenFiles: !Edition.current.isSandboxed))
+    }
+    var showReview = false {
+        didSet { if !showReview { reviewScan = nil } }
+    }
+    private var reviewScan: Int?
+    var browseSort: FileSortRequest?
     private(set) var notice: Notice?
 
     struct Notice: Equatable {
@@ -266,6 +296,7 @@ final class StorageModel {
         let id: UUID
         var records: [TrashRecord]
         var pruned: [Pruned]
+        var refreshAfterUndo = false
     }
 
     private var shelf = UndoShelf<Run>()
@@ -315,6 +346,7 @@ final class StorageModel {
             scanAfterTrash = (path, background)
             return
         }
+        showReview = false
         progress?.cancel()
         epoch += 1
         let run = epoch
@@ -327,6 +359,7 @@ final class StorageModel {
         opened = nil
         rootPath = path
         if !keepsMap {
+            incomplete = false
             index = nil
             root = nil
             current = nil
@@ -370,15 +403,14 @@ final class StorageModel {
 
         let level = PerformanceLevel.current()
         let workers = level.workers(background: background)
+        let (budget, scanFolder) = (scanBudget, scanFolder)
         let skips = DiskMapSkips.under(path)
         skipped = skips.full.sorted()
         scanJob = Task.detached(priority: level.priority(background: background)) { [weak self] in
-            let result = await ScanBudget.shared.run(background: background, progress: p) {
-                StorageScanner.scan(
-                    path: path, progress: p, workers: workers,
-                    onRoot: { r in Task { @MainActor in self?.installRoot(r, run: run) } },
-                    onSubtree: { f in Task { @MainActor in self?.subtreeDone(f, run: run) } },
-                    skip: skips.full)
+            let result = await budget.run(background: background, progress: p) {
+                scanFolder(path, p, workers,
+                           { r in Task { @MainActor in self?.installRoot(r, run: run) } },
+                           { f in Task { @MainActor in self?.subtreeDone(f, run: run) } }, skips.full)
             }
             guard let result else {
                 await self?.finish(nil, large: [], snapshot: nil, index: nil, run: run)
@@ -510,9 +542,10 @@ final class StorageModel {
         root = r.root
         current = keep.flatMap { r.root.find(path: $0) } ?? r.root
         hovered = nil
-        marked.removeAll()
+        if !trashing && (!showReview || reviewScan != run) { marked.removeAll() }
         if let current { selection = selected.filter { Self.holds(current, $0) } }
         denied = r.deniedPaths
+        incomplete = r.cancelled || !r.deniedPaths.isEmpty || r.root.unreadable
         largeFiles = large
         lastDuration = r.duration
         liveFiles = r.root.fileCount
@@ -703,13 +736,13 @@ final class StorageModel {
     func isMarked(_ path: String) -> Bool { marked[path] != nil }
 
     func toggle(_ m: Marked) {
-        guard opened == nil else { return }
+        guard opened == nil, !trashing else { return }
         if marked[m.path] != nil { marked[m.path] = nil }
         else { mark([m]) }
     }
 
     func mark(_ items: [Marked]) {
-        guard opened == nil else { return }
+        guard opened == nil, !trashing else { return }
         var chosen = marked
         for m in items { chosen[m.path] = m }
         let outer = Set(Trasher.outermost(chosen.keys))
@@ -717,6 +750,7 @@ final class StorageModel {
     }
 
     func unmark(_ paths: some Sequence<String>) {
+        guard !trashing else { return }
         for p in paths { marked[p] = nil }
     }
 
@@ -739,18 +773,73 @@ final class StorageModel {
         }
     }
 
+    private(set) var choosingContents = false
+    @ObservationIgnored private var contentsChoice: UUID?
+
+    func chooseAllContents() async {
+        guard let current, opened == nil, !trashing, !choosingContents else { return }
+        let run = epoch
+        let path = current.path
+        let id = UUID()
+        contentsChoice = id
+        choosingContents = true
+        defer {
+            if contentsChoice == id { choosingContents = false; contentsChoice = nil }
+        }
+        let base = path == "/" ? "" : path
+        let knownFiles = Set(current.listedFiles.map { base + "/" + $0.name })
+        let sizes = Dictionary(current.subfolders.filter { !isPending($0) }.map { ($0.path, $0.size) }, uniquingKeysWith: { a, _ in a })
+        let progress = ScanProgress()
+        let listed = await withTaskCancellationHandler {
+            await Task.detached(priority: .userInitiated) { FolderContents.read(path, progress: progress) }.value
+        } onCancel: { progress.cancel() }
+        guard !Task.isCancelled, run == epoch, self.current === current, opened == nil, !trashing else { return }
+        guard let listed else {
+            showNotice(Notice(text: String(localized: "The complete folder contents couldn't be selected. Nothing was added. Check access or choose smaller groups."), canUndo: false))
+            return
+        }
+        mark(listed.map { item in
+            Marked(path: item.path, name: (item.path as NSString).lastPathComponent,
+                   size: item.isFolder ? (sizes[item.path] ?? 0) : item.bytes, isFolder: item.isFolder,
+                   needsRefresh: !item.isFolder && !knownFiles.contains(item.path), proof: item)
+        })
+    }
+
     // MARK: Trash
 
-    /// Trashing prunes the tree, which a running scan is still reading.
-    var canTrash: Bool { !scanning && !trashing && !marked.isEmpty && opened == nil }
+    func beginTrashReview() {
+        guard opened == nil, !trashing, !marked.isEmpty else { return }
+        reviewScan = epoch
+        showReview = true
+        confirmationStarted = .now
+    }
+
+    @ObservationIgnored private var confirmationStarted: ContinuousClock.Instant?
+    func confirmationPresented() {
+        if let started = confirmationStarted { Timings.record(.confirmation, since: started) }
+        confirmationStarted = nil
+    }
+
+    func scannedRisk(for item: Marked) -> PathRisk? {
+        if let risk = PathRisk.of(item.path) { return risk }
+        guard item.isFolder else { return nil }
+        guard let folder = root?.find(path: item.path), !isPending(folder), !(showingLive && folder === root) else { return .incomplete }
+        return folder.scannedRisk ?? (folder.riskComplete ? nil : .incomplete)
+    }
+
+    /// Accept the confirmation immediately; the worker joins the scanner.
+    var canTrash: Bool { !trashing && !marked.isEmpty && opened == nil }
     private(set) var trashing = false
+    enum RemovalPhase { case preparing, waiting, moving, restoring }
+    private(set) var removalPhase: RemovalPhase?
+    private(set) var trashJob: Task<Void, Never>?
     /// Where moved items go; tests use a folder of their own.
     var trashBackend: TrashBackend = .live
     /// Where its moves and Undos wait their turn among every pane's.
     var jobs: TrashJobs = .shared
     /// What the user keeps in other panes: Deep Clean's keep list and the
     /// paths kept in Projects. Tests use lists of their own.
-    var protections: UserProtections = .live
+    var protections: UserProtections = .live { didSet { invalidateRemovalHints() } }
     /// Where its moves and Undos are written to the history.
     var logURL: URL = CleanupLog.defaultURL
 
@@ -758,9 +847,11 @@ final class StorageModel {
     /// kind of item that was marked, and nothing the user keeps in another
     /// pane is it, is inside it or holds it. The lists are read again as the
     /// move runs; one that can't be read stops it.
-    nonisolated static func gate(folders: Set<String>, protections: UserProtections) -> TrashGate {
+    nonisolated static func gate(folders: Set<String>, protections: UserProtections, proofs: [String: FolderContents.Item] = [:], requireProof: Bool = false) -> TrashGate {
         TrashGate(
             still: { p in
+                guard !requireProof || proofs[p] != nil else { return false }
+                guard proofs[p]?.isCurrent != false else { return false }
                 var st = stat()
                 guard lstat(p, &st) == 0 else { return false }
                 return (st.st_mode & S_IFMT == S_IFDIR) == folders.contains(p)
@@ -773,23 +864,41 @@ final class StorageModel {
     func trashMarked() {
         // A scan opened from a file names paths it gives no right to.
         guard canTrash, opened == nil else { return }
-        // A folder and something inside it can both be marked; moving only
-        // the outer one keeps sizes counted once and undo in a valid order.
-        let top = Set(Trasher.outermost(marked.keys))
-        let items = marked.values.filter { top.contains($0.path) }
-        // Each goes only while it's still the kind of item that was marked.
-        let folders = Set(items.filter(\.isFolder).map(\.path))
-        let paths = items.map(\.path)
-        let backend = trashBackend
-        let gate = Self.gate(folders: folders, protections: protections)
         trashing = true
-        Task {
-            let outcome = await jobs.perform(.moveToTrash) { job in
-                job.moveToTrash(paths, through: gate, backend: backend)
+        removalPhase = .preparing
+        let selected = marked
+        let run = epoch
+        cancelScan()
+        let scanner = scanJob
+        let backend = trashBackend
+        let protections = protections
+        trashJob = Task {
+            defer { trashing = false; removalPhase = nil; startScanAfterTrash() }
+            let preparing = Task.detached(priority: .userInitiated) {
+                let top = Set(Trasher.outermost(selected.keys))
+                let items = selected.values.filter { top.contains($0.path) }
+                let proofs = Dictionary(items.compactMap { item -> (String, FolderContents.Item)? in
+                    guard item.proof?.isCurrent != false, let fresh = FolderContents.capture(item.path) else { return nil }
+                    return (item.path, fresh)
+                }, uniquingKeysWith: { a, _ in a })
+                return (items, proofs)
             }
+            removalPhase = .waiting
+            let job = await jobs.begin(.moveToTrash)
+            defer { jobs.end(job) }
+            removalPhase = .preparing
+            let prepared = await preparing.value
+            await scanner?.value
+            guard run == epoch, opened == nil else { return }
+            let items = prepared.0
+            let gate = Self.gate(folders: Set(items.filter(\.isFolder).map(\.path)), protections: protections, proofs: prepared.1, requireProof: true)
+            removalPhase = .moving
+            let outcome = await Task.detached(priority: .userInitiated) {
+                job.moveToTrash(items.map(\.path), through: gate, backend: backend)
+            }.value
             trashing = false
+            removalPhase = nil
             applyTrash(outcome, items: items)
-            startScanAfterTrash()
         }
     }
 
@@ -824,7 +933,9 @@ final class StorageModel {
         }
         largeFiles.removeAll { lf in movedPaths.contains(lf.path) || movedPaths.contains { lf.path.hasPrefix($0 + "/") } }
         let record = CleanupRecord(source: "Disk Map", items: outcome.moved.count, bytes: freed, failed: outcome.failed.count)
-        if !outcome.moved.isEmpty { shelf.add(Run(id: record.id, records: outcome.moved, pruned: pruned)) }
+        let needsRefresh = items.contains { $0.needsRefresh && movedPaths.contains($0.path) }
+        if !outcome.moved.isEmpty { shelf.add(Run(id: record.id, records: outcome.moved, pruned: pruned, refreshAfterUndo: needsRefresh)) }
+        if needsRefresh, scanAfterTrash == nil { scanAfterTrash = (rootPath, false) }
         CleanupLog.submit(record, to: logURL)
         // If the open folder went to the Trash, step out to its parent.
         if let c = current, movedPaths.contains(where: { c.path == $0 || c.path.hasPrefix($0 + "/") }) {
@@ -848,12 +959,19 @@ final class StorageModel {
             return
         }
         let records = undoRecords
+        let refresh = undone?.refreshAfterUndo == true
         trashing = true
+        removalPhase = .restoring
+        cancelScan()
+        let scanningJob = scanJob
         Task {
+            await scanningJob?.value
             let failedRecords = await jobs.perform(.putBack) { $0.putBack(records) }
             trashing = false
+            removalPhase = nil
             applyUndo(failedRecords)
             target = nil
+            if refresh, scanAfterTrash == nil { scanAfterTrash = (rootPath, false) }
             startScanAfterTrash()
         }
     }

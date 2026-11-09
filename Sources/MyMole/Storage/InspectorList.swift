@@ -30,7 +30,6 @@ struct InspectorList: View {
     /// The folder whose smaller files are being listed.
     @State private var smallFilesOf: String?
     @State private var treeState = DiskOutline.State()
-    @State private var filtersExpanded = false
 
     var body: some View {
         if let cur = model.current {
@@ -38,7 +37,7 @@ struct InspectorList: View {
                 header(cur)
                 filterBar
                 Divider()
-                if model.browseFilter.wholeScan, model.browseFilter.isActive, let index = model.index {
+                if model.browseFilter.wholeScan, let index = model.index {
                     WholeScanSearch(model: model, index: index)
                 } else if folderView == .tree, !model.browseFilter.isActive {
                     tree(cur)
@@ -46,6 +45,13 @@ struct InspectorList: View {
                     let all = entries(cur)
                     let rows = all.filter(model.browseFilter.matches)
                     table(rows)
+                        .overlay {
+                            if rows.isEmpty, !all.isEmpty, !model.scanning {
+                                ContentUnavailableView("No Matching Items", systemImage: "line.3.horizontal.decrease",
+                                    description: Text("Adjust or clear the filters above to see more files and folders."))
+                                    .allowsHitTesting(false)
+                            }
+                        }
                     Divider()
                     footer(cur, rows: rows, all: all)
                 }
@@ -122,83 +128,117 @@ struct InspectorList: View {
         .padding(.bottom, DS.Space.sm)
     }
 
-    @ViewBuilder private var filterBar: some View {
-        DSControlBar("Browse options", detail: "Choose how folders are shown and which part of the map to filter.") {
-            DSControlField("Folder view", inline: true) {
-                Picker("Folder View", selection: $folderView) {
-                    Label("Tree", systemImage: "list.bullet.indent").tag(DiskFolderView.tree)
-                    Label("List", systemImage: "list.bullet").tag(DiskFolderView.list)
+    private var searchingWholeScan: Bool { model.browseFilter.wholeScan && model.index != nil }
+    private var columnScope: String {
+        if searchingWholeScan { return "diskMap.search" }
+        return folderView == .tree && !model.browseFilter.isActive ? "diskMap.tree" : "diskMap.browse.2"
+    }
+
+    private var filterBar: some View {
+        VStack(alignment: .leading, spacing: DS.Space.sm) {
+            HStack(spacing: DS.Space.sm) {
+                DSFilterField(String(localized: "Filter files and folders by name"), text: $model.browseFilter.query)
+                    .frame(minWidth: 100, maxWidth: .infinity)
+                DSFilterButton("Filter files and folders", detail: "Narrow the results below. The disk map and your removal choices stay the same.",
+                               count: model.browseFilter.criteriaCount, clear: { model.browseFilter.clearCriteria() }) {
+                    browseCriteria
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .frame(width: 180, alignment: .leading)
-                .help("Tree opens several folder levels together. List shows one folder at a time. Your choice is remembered.")
             }
-            DSControlField("Name filter", inline: true) {
-                DSFilterField(String(localized: "Filter by name"), text: $model.browseFilter.query)
-                    .frame(width: 180, alignment: .leading)
-            }
-            DSControlField("Search in", inline: true) {
-                Picker("Look In", selection: $model.browseFilter.wholeScan) {
-                    Text("This Folder").tag(false)
-                    Text("Whole Scan").tag(true)
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: DS.Space.sm) {
+                    folderViewControl
+                    Spacer(minLength: 0)
+                    sortControl
+                    TableColumnsButton(scope: columnScope).fixedSize()
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .frame(width: 180, alignment: .leading)
-                .disabled(model.index == nil)
-                .help(model.index == nil ? String(localized: "Available when the scan finishes") : String(localized: "Filter the open folder, or search every folder and every file of 1 MB or more in the scan"))
-            }
-            DisclosureGroup("Date, kind & saved filters", isExpanded: $filtersExpanded) {
-                VStack(alignment: .leading, spacing: DS.Space.md) {
-                    DSControlField("Last modified") {
-                        DateFilterControl(filter: $model.browseFilter.date, showsLabel: false)
-                    }
-                    DSFlow(spacing: DS.Space.md) {
-                        DSControlField("Kind") {
-                            Menu {
-                                Picker("Kind", selection: $model.browseFilter.kind) {
-                                    Text("All Kinds").tag(FileKind?.none)
-                                    Divider()
-                                    ForEach(FileKind.allCases, id: \.self) { Text($0.title).tag(FileKind?.some($0)) }
-                                }
-                                .pickerStyle(.inline)
-                            } label: {
-                                Label(model.browseFilter.kind?.title ?? String(localized: "All Kinds"), systemImage: "square.grid.2x2")
-                            }
-                            .fixedSize()
-                            .help("Show only one kind of item; a folder counts as the kind most of its space is")
-                        }
-                        DSControlField("Saved filters") {
-                            SavedFiltersMenu(filter: $model.browseFilter)
-                        }
-                    }
+                VStack(alignment: .leading, spacing: DS.Space.sm) {
+                    folderViewControl
+                    HStack(spacing: DS.Space.sm) { sortControl; TableColumnsButton(scope: columnScope).fixedSize() }
                 }
-                .padding(.top, DS.Space.sm)
             }
-            .frame(width: 260, alignment: .leading)
-            if model.browseFilter.isActive {
-                Button("Clear Filters") { model.browseFilter = BrowseFilter() }
-                    .accessibilityLabel("Clear the filter")
-                    .fixedSize()
+            DSFlow(spacing: DS.Space.xs) {
+                if let kind = model.browseFilter.kind {
+                    DSFilterChip(title: String(localized: "Kind: \(kind.title)")) { model.browseFilter.kind = nil }
+                }
+                if model.browseFilter.date.isActive {
+                    DSFilterChip(title: String(localized: "Modified: \(model.browseFilter.date.summary)")) { model.browseFilter.date = DateFilter() }
+                }
+            }
+            Label(searchingWholeScan ? String(localized: "Results from the entire scan") : String(localized: "Results in this folder"),
+                  systemImage: searchingWholeScan ? "internaldrive" : "folder")
+                .font(.caption).foregroundStyle(.secondary)
+            if folderView == .tree, model.browseFilter.isActive || searchingWholeScan {
+                DSText("Filtered results use a list. Clear the filters and choose This Folder to return to the tree.", .metadata)
+            }
+            if !model.skipped.isEmpty {
+                Label("\(model.skipped.count) folders excluded from the scan", systemImage: "eye.slash")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .help(model.skipped.map { ($0 as NSString).abbreviatingWithTildeInPath }.joined(separator: "\n"))
             }
         }
         .padding(.horizontal, DS.Space.md)
         .padding(.bottom, DS.Space.sm)
-        .onChange(of: model.browseFilter, initial: true) { _, filter in
-            if filter.kind != nil || filter.date.isActive { filtersExpanded = true }
+        .controlSize(.small)
+    }
+
+    private var folderViewControl: some View {
+        Picker("Folder View", selection: Binding(
+            get: { model.browseFilter.isActive || searchingWholeScan ? .list : folderView },
+            set: { if !model.browseFilter.isActive && !searchingWholeScan { folderView = $0 } }
+        )) {
+            Label("Tree", systemImage: "list.bullet.indent").tag(DiskFolderView.tree)
+            Label("List", systemImage: "list.bullet").tag(DiskFolderView.list)
         }
-        if folderView == .tree, model.browseFilter.isActive {
-            DSText("Filtered results use a list. Clear the filter to return to your open tree.", .metadata)
-                .padding(.horizontal, DS.Space.md)
-                .padding(.bottom, DS.Space.sm)
-        }
-        if !model.skipped.isEmpty {
-            Label("\(model.skipped.count) folder\(model.skipped.count == 1 ? "" : "s") you chose aren't scanned", systemImage: "eye.slash")
-                .font(.caption).foregroundStyle(.secondary)
-                .help(model.skipped.map { ($0 as NSString).abbreviatingWithTildeInPath }.joined(separator: "\n") + "\n" + String(localized: "Change this in Settings → Disk Map."))
-                .padding(.horizontal, DS.Space.md)
-                .padding(.bottom, DS.Space.sm)
+        .pickerStyle(.segmented).labelsHidden().frame(width: 118)
+        .disabled(model.browseFilter.isActive || searchingWholeScan)
+        .help("Tree opens several folder levels together. List shows one folder at a time. Filters show matching results as a list.")
+    }
+
+    private var sortControl: some View {
+        Menu {
+            Button("Largest First") { model.browseSort = .init(column: .size, ascending: false) }
+            Button("Smallest First") { model.browseSort = .init(column: .size, ascending: true) }
+            Divider()
+            Button("Newest First") { model.browseSort = .init(column: .modified, ascending: false) }
+            Button("Oldest First") { model.browseSort = .init(column: .modified, ascending: true) }
+            Divider()
+            Button("Name, A to Z") { model.browseSort = .init(column: .name, ascending: true) }
+            Button("Kind") { model.browseSort = .init(column: .kind, ascending: true) }
+            Button("Most Files First") { model.browseSort = .init(column: .items, ascending: false) }.disabled(searchingWholeScan)
+        } label: { Label("Sort", systemImage: "arrow.up.arrow.down") }
+        .fixedSize()
+        .help("Sort the results below. A folder's date is the latest change anywhere inside it.")
+    }
+
+    private var browseCriteria: some View {
+        VStack(alignment: .leading, spacing: DS.Space.md) {
+            DSControlField("Search in") {
+                Picker("Search in", selection: $model.browseFilter.wholeScan) {
+                    Text("This Folder").tag(false)
+                    Text("Entire Scan").tag(true).disabled(model.index == nil)
+                }.labelsHidden().frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityIdentifier("disk.filter.scope")
+                if model.index == nil {
+                    DSText("Entire Scan becomes available when scanning finishes.", .metadata)
+                } else {
+                    DSText("Entire Scan includes folders and individual files of 1 MB or more. Smaller files are counted inside folders.", .metadata)
+                }
+            }
+            DSControlField("Last modified") {
+                DateFilterControl(filter: $model.browseFilter.date, showsLabel: false)
+                DSText("For a folder, this is the newest change anywhere inside it.", .metadata)
+            }
+            DSControlField("Item kind") {
+                Picker("Item kind", selection: $model.browseFilter.kind) {
+                    Text("All Kinds").tag(FileKind?.none)
+                    ForEach(FileKind.allCases, id: \.self) { Text($0.title).tag(FileKind?.some($0)) }
+                }.labelsHidden().frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityIdentifier("disk.filter.kind")
+                DSText("A folder's kind is the type using most of its space.", .metadata)
+            }
+            Divider()
+            SavedFiltersMenu(filter: $model.browseFilter)
+            DSText("Saved filters remember these criteria and the name filter for reuse. They don't save, move or delete files.", .metadata)
         }
     }
 
@@ -222,7 +262,7 @@ struct InspectorList: View {
                 },
                 onMark: { model.mark($0.map(\.marked)) },
                 onHover: { entry in model.hovered = entry?.folder.map(Segment.folder) },
-                menu: menu, onSmallFiles: { smallFilesOf = $0 })
+                menu: menu, onSmallFiles: { smallFilesOf = $0 }, sortRequest: model.browseSort)
             Divider()
             footer(root, rows: visible, all: visible, treeSelection: selected,
                    allChosen: !current || chosen >= treeState.readyCount)
@@ -233,9 +273,10 @@ struct InspectorList: View {
         let byID = Dictionary(rows.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         return FileTable(
             rows: rows.map(fileRow),
-            columns: [.name, .size, .modified, .kind, .items],
-            hiddenByDefault: [.modified, .kind, .items],
+            columns: [.name, .size, .modified, .kind, .items, .location],
+            hiddenByDefault: [.kind, .items, .location],
             autosave: "diskMap.browse.2",
+            sortRequest: model.browseSort,
             selection: $model.selection,
             marks: Set(model.marked.keys),
             onToggleMark: { id in byID[id].map { model.toggle($0.marked) } },
@@ -262,6 +303,7 @@ struct InspectorList: View {
             id: e.path, name: e.name, size: e.pending ? nil : e.size,
             modified: modified,
             kind: e.kindTitle, items: e.pending ? nil : e.items,
+            location: (e.path as NSString).deletingLastPathComponent,
             symbol: f == nil ? e.kind.symbol : (f?.inheritedKind?.symbol ?? "folder.fill"),
             subtitle: modified.map { f == nil ? $0.listText : "\($0.listText) · \(e.items.formatted()) files" },
             tint: f == nil ? NSColor(ChartColors.kind(e.kind)) : palette.accentText.ns,
@@ -282,6 +324,10 @@ struct InspectorList: View {
             out.append(.action(String(localized: "Don't Scan This Folder")) { model.skipFromNowOn(path) })
         }
         out.append(.quickLook)
+        out.append(.divider)
+        let readyPaths = Set(rows.filter { !$0.pending }.map(\.path))
+        out.append(.action(String(localized: "Select All Listed")) { model.selection = readyPaths })
+        out.append(.action(String(localized: "Invert Selection")) { model.selection = readyPaths.subtracting(model.selection) })
         out.append(.divider)
         let marks = Set(model.marked.keys)
         let parents = Set(chosen.compactMap { Marked.parent(of: $0.path, in: marks) })
@@ -346,8 +392,14 @@ struct InspectorList: View {
                 }
             }
             DSFlow(spacing: DS.Space.sm) {
+                Button(model.choosingContents ? "Reading Contents…" : "Choose All Contents") {
+                    Task { await model.chooseAllContents() }
+                }
+                .disabled(model.opened != nil || model.choosingContents || model.trashing)
+                .help("Choose every direct item in this folder, including hidden and smaller files. Filters don't limit this choice. The folder itself stays; nothing moves until you review and confirm.")
+                .fixedSize()
                 // Choosing ticks rows for the Trash; selecting (⌘A, ⇧-click) only highlights them.
-                Button(treeSelection == nil ? "Choose All" : "Choose Listed") { model.mark(rows.filter { !$0.pending }.map(\.marked)) }
+                Button("Choose Listed") { model.mark(rows.filter { !$0.pending }.map(\.marked)) }
                     .disabled(model.opened != nil || (allChosen ?? rows.allSatisfy { $0.pending || model.isMarked($0.path) }))
                     .help("Tick every item listed here for the Trash. Nothing moves until you review and confirm.")
                     .fixedSize()
@@ -430,6 +482,7 @@ private struct WholeScanSearch: View {
                 columns: [.name, .size, .modified, .kind, .location],
                 hiddenByDefault: [.modified, .kind],
                 autosave: "diskMap.search",
+                sortRequest: model.browseSort,
                 selection: $model.selection,
                 marks: Set(model.marked.keys),
                 onToggleMark: { id in byID[id].map { model.toggle($0.marked) } },
@@ -453,14 +506,16 @@ private struct WholeScanSearch: View {
                             model.browseFilter = BrowseFilter()
                             model.show(folder: target.isFolder ? target.path : (target.path as NSString).deletingLastPathComponent, select: target.isFolder ? nil : target.path)
                         },
-                        .action(String(localized: "Show in Finder")) { FileActions.reveal(chosen.map(\.path)) },
                         .divider,
                         .action(String(localized: "Choose for Removal")) { model.mark(chosen.map(\.marked)) },
-                    ]
+                        .divider,
+                    ] + FileActions.menu(chosen.map(\.path))
                 })
             .overlay {
                 if hits.isEmpty, !result.working {
-                    ContentUnavailableView.search(text: model.browseFilter.query)
+                    ContentUnavailableView("No Matching Items", systemImage: "line.3.horizontal.decrease",
+                        description: Text("Adjust or clear the filters above to see more files and folders."))
+                        .allowsHitTesting(false)
                 }
             }
             Divider()
@@ -507,16 +562,17 @@ private struct SavedFiltersMenu: View {
 
     var body: some View {
         Menu {
+            if saved.isEmpty { Text("No Saved Filters") }
             ForEach(saved) { s in Button(s.name) { filter = s.filter } }
             if !saved.isEmpty { Divider() }
-            Button("Save This Filter") {
+            Button("Save Current Filter") {
                 let name = SavedFilter.name(for: filter)
                 saved = saved.filter { $0.name != name } + [SavedFilter(name: name, filter: filter)]
                 SavedFilter.save(saved)
             }
             .disabled(!filter.isActive)
             if !saved.isEmpty {
-                Menu("Forget") {
+                Menu("Remove Saved Filter") {
                     ForEach(saved) { s in
                         Button(s.name) {
                             saved.removeAll { $0.name == s.name }
@@ -526,7 +582,7 @@ private struct SavedFiltersMenu: View {
                 }
             }
         } label: {
-            Label("Saved", systemImage: "bookmark")
+            Label("Saved Filters", systemImage: "bookmark")
         }
         .fixedSize()
         .help("Filters you saved, and saving the one in use")
@@ -568,7 +624,7 @@ struct SmallFilesSheet: View {
                     rows: rows, columns: [.name, .size, .modified, .location], hiddenByDefault: [.location],
                     autosave: "diskMap.smallFiles", selection: $selection, marks: nil,
                     onOpen: { FileActions.reveal($0) },
-                    menu: { ids in [.quickLook, .action(String(localized: "Show in Finder")) { FileActions.reveal(ids) }] }
+                    menu: { ids in FileActions.inspectionMenu(ids) }
                 )
                 .frame(height: 320)
             }
@@ -586,6 +642,7 @@ struct SmallFilesSheet: View {
         }
         .padding(DS.Space.xl)
         .frame(width: DS.Size.reviewWidth)
+        .dialogKeyboard()
         .task { await start() }
     }
 

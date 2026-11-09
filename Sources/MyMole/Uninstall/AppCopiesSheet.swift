@@ -124,7 +124,7 @@ struct AppCopiesSheet: View {
                                   titles: [.kind: String(localized: "Version / Build"), .items: String(localized: "Copies")],
                                   autosave: "uninstall.copies", defaultSort: .name, selection: $selection, marks: nil,
                                   onOpen: { paths in if let path = paths.first { selection = [path]; openReview() } },
-                                  menu: { paths in [.action(String(localized: "Show in Finder")) { FileActions.reveal(paths) }] })
+                                  menu: { paths in FileActions.menu(paths, canOpen: false) })
                             .frame(height: 260)
                     }
                     if let selected {
@@ -150,7 +150,7 @@ struct AppCopiesSheet: View {
                 DSText(model.measuring ? String(localized: "Measuring the selected app…")
                        : selected.map { String(localized: "\($0.app.name) selected") } ?? String(localized: "Select one copy to review its removal."), .metadata)
             } trailing: {
-                Button("Close") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("Close") { dismiss() }.keyboardShortcut(.cancelAction).disabled(apps.uninstalling)
                 Button("Show in Finder") { FileActions.reveal(Array(selection)) }.disabled(selection.isEmpty)
                 Button("Integrations…") { inspecting = selected }.disabled(selected == nil)
                 Button("Review Uninstall…") { openReview() }.primaryAction().disabled(!canReview)
@@ -158,7 +158,12 @@ struct AppCopiesSheet: View {
             .padding([.horizontal, .bottom], DS.Space.xl)
         }
         .frame(width: DS.Size.reviewWidth)
+        .dialogControls()
+        .dialogKeyboard(canClose: !apps.uninstalling)
         .task { model.load() }
+        .onChange(of: apps.appListRevision) { _, _ in
+            if !model.stopped, !model.loading, !model.measuring, review == nil, !apps.uninstalling { model.load() }
+        }
         .task(id: Search(revision: model.revision, query: query, filter: filter)) {
             let (copies, counts, query, filter) = (model.report.copies, model.counts, query, filter)
             await projected.update(count: copies.count) { Self.project(copies, counts: counts, query: query, filter: filter) }
@@ -183,6 +188,7 @@ struct AppCopiesSheet: View {
             }
             .padding(DS.Space.xl)
             .frame(width: DS.Size.reviewWidth)
+            .dialogKeyboard()
         }
         .onDisappear { model.stop(); reviewJob?.cancel() }
         .overlay(alignment: .bottom) {
@@ -227,7 +233,9 @@ struct AppCopiesSheet: View {
                 FileRow(id: $0.id, name: $0.name, kind: integrationTitle($0.kind), location: $0.path, symbol: "puzzlepiece.extension", subtitle: $0.detail)
             }, columns: [.name, .kind, .location], titles: [.kind: String(localized: "Integration")],
                       autosave: "uninstall.copyIntegrations", defaultSort: .name, selection: $integrationSelection, marks: nil,
-                      onOpen: { paths in FileActions.reveal(copy.integrations.items.filter { paths.contains($0.id) }.map(\.path)) })
+                      onOpen: { paths in FileActions.reveal(copy.integrations.items.filter { paths.contains($0.id) }.map(\.path)) },
+                      menu: { ids in FileActions.menu(copy.integrations.items.filter { ids.contains($0.id) }.map(\.path), canOpen: false) },
+                      filePaths: { ids in let wanted = Set(ids); return copy.integrations.items.filter { wanted.contains($0.id) }.map(\.path) })
                 .frame(height: 170)
         }
         if copy.integrations.items.contains(where: { $0.kind == .finder }) {

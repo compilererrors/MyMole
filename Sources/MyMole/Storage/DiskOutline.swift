@@ -24,6 +24,7 @@ struct DiskOutline: NSViewRepresentable {
     let onHover: (DiskEntry?) -> Void
     let menu: ([DiskEntry], [DiskEntry]) -> [TableMenuEntry]
     let onSmallFiles: (String) -> Void
+    var sortRequest: FileSortRequest?
     var sortRows: @Sendable ([FileRow], FileColumn, Bool) -> [FileRow] = { FileTable.sorted($0, by: $1, ascending: $2) }
 
     @MainActor @Observable final class State {
@@ -64,7 +65,7 @@ struct DiskOutline: NSViewRepresentable {
         outline.columnAutoresizingStyle = .noColumnAutoresizing
         outline.indentationPerLevel = DS.Table.indent
         outline.autoresizesOutlineColumn = false
-        for column in [FileColumn.name, .size, .modified, .kind, .items] {
+        for column in [FileColumn.name, .size, .modified, .kind, .items, .location] {
             let col = NSTableColumn(identifier: .init(column.rawValue))
             col.title = column.title
             col.minWidth = column == .name ? 140 : column.width.min
@@ -72,7 +73,7 @@ struct DiskOutline: NSViewRepresentable {
             col.maxWidth = column.width.max
             col.resizingMask = .userResizingMask
             col.sortDescriptorPrototype = NSSortDescriptor(key: column.rawValue, ascending: column.ascendingFirst)
-            col.isHidden = column != .name && column != .size
+            col.isHidden = column != .name && column != .size && column != .modified
             if column.isNumber { col.headerCell.alignment = .right }
             outline.addTableColumn(col)
             if column == .name { outline.outlineTableColumn = col }
@@ -96,9 +97,10 @@ struct DiskOutline: NSViewRepresentable {
         scroll.documentView = outline
         scroll.hasVerticalScroller = true
         scroll.hasHorizontalScroller = true
-        outline.configureUserColumns()
+        outline.configureUserColumns(hiddenByDefault: ["kind", "items", "location"])
         scroll.autohidesScrollers = true
         scroll.drawsBackground = false
+        c.applySortRequest()
         c.rebuild()
         c.fitting = outline.keepFitting(FileColumn.name.rawValue)
         return scroll
@@ -111,7 +113,8 @@ struct DiskOutline: NSViewRepresentable {
         c.family = context.environment.palette.family
         c.parent = self
         c.outline?.apply(context.environment.palette, lines: context.environment.tableLines, stripes: true)
-        if changed { c.rebuild() }
+        let sortChanged = c.applySortRequest()
+        if changed || sortChanged { c.rebuild() }
         else { c.refreshVisible(appearance: appearanceChanged); c.select() }
     }
 
@@ -141,8 +144,19 @@ struct DiskOutline: NSViewRepresentable {
         private var closing: (path: String, expanded: Set<String>)?
         private var lastMarks: Set<String>?
         private var marksKnown = false
+        private var lastSortRequest: UUID?
 
         init(_ parent: DiskOutline) { self.parent = parent }
+
+        @discardableResult func applySortRequest() -> Bool {
+            guard let request = parent.sortRequest, lastSortRequest != request.id, let outline,
+                  let column = outline.tableColumns.first(where: { $0.identifier.rawValue == request.column.rawValue }) else { return false }
+            lastSortRequest = request.id
+            column.isHidden = false
+            outline.sortDescriptors = [NSSortDescriptor(key: request.column.rawValue, ascending: request.ascending)]
+            outline.fitFlexibleColumn(FileColumn.name.rawValue)
+            return true
+        }
 
         func rebuild() {
             generation += 1
@@ -436,32 +450,36 @@ struct DiskOutline: NSViewRepresentable {
             rebuild()
         }
 
+        func keyboardMenu() -> NSMenu {
+            let menu = NSMenu()
+            menu.add(menuEntries(clicked: -1))
+            outline?.addColumnSubmenu(to: menu)
+            return menu
+        }
+
+        private func menuEntries(clicked: Int) -> [TableMenuEntry] {
+            parent.menu(actionable(targets(clicked: clicked)), parent.state.visible).map { entry in
+                if case .quickLook = entry {
+                    return .action(String(localized: "Quick Look")) { [weak self] in
+                        guard let self, let outline else { return }
+                        if clicked >= 0, !outline.selectedRowIndexes.contains(clicked) {
+                            outline.selectRowIndexes(IndexSet(integer: clicked), byExtendingSelection: false)
+                        }
+                        outline.togglePreview()
+                    }
+                }
+                return entry
+            }
+        }
+
         func menuNeedsUpdate(_ menu: NSMenu) {
             Timings.measure(.menu, rows: outline?.numberOfRows ?? 0) {
                 menu.removeAllItems()
                 if menu === headerMenu, let outline {
-                    for col in outline.tableColumns {
-                        let item = ClosureMenuItem(col.title) { col.isHidden.toggle(); outline.fitFlexibleColumn(FileColumn.name.rawValue) }
-                        item.state = col.isHidden ? .off : .on
-                        item.isEnabled = col !== outline.outlineTableColumn
-                        menu.addItem(item)
-                    }
-                    outline.addColumnWidthActions(to: menu)
+                    outline.populateColumnHeader(menu)
                 } else {
-                    var entries = parent.menu(actionable(targets(clicked: outline?.clickedRow ?? -1)), parent.state.visible)
-                    entries = entries.map { entry in
-                        if case .quickLook = entry {
-                            return .action(String(localized: "Quick Look")) { [weak self] in
-                                guard let self, let outline else { return }
-                                if outline.clickedRow >= 0, !outline.selectedRowIndexes.contains(outline.clickedRow) {
-                                    outline.selectRowIndexes(IndexSet(integer: outline.clickedRow), byExtendingSelection: false)
-                                }
-                                outline.togglePreview()
-                            }
-                        }
-                        return entry
-                    }
-                    menu.add(entries)
+                    menu.add(menuEntries(clicked: outline?.clickedRow ?? -1))
+                    outline?.addColumnSubmenu(to: menu)
                 }
             }
         }
@@ -470,7 +488,8 @@ struct DiskOutline: NSViewRepresentable {
 
 /// Native disclosure triangles and arrow-key navigation, with the same
 /// selection, Quick Look, hover and removal keys as the file table.
-final class DiskOutlineView: NSOutlineView, LinedTable {
+final class DiskOutlineView: NSOutlineView, LinedTable, UserColumnTable {
+    var defaultHiddenColumns = Set<String>()
     weak var coordinator: DiskOutline.Coordinator?
     var lines = TableLines.none
     var lineColor = NSColor.separatorColor
@@ -482,12 +501,29 @@ final class DiskOutlineView: NSOutlineView, LinedTable {
     }
 
     override func keyDown(with event: NSEvent) {
+        if handleFileKey(event) { return }
+        let plain = event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty
         switch event.keyCode {
-        case 49: togglePreview()
-        case 36, 76: coordinator?.open()
+        case 49 where plain: togglePreview()
+        case 36, 76:
+            guard plain else { super.keyDown(with: event); return }
+            coordinator?.open()
         case 51 where event.modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting(.command).isEmpty: coordinator?.mark()
         default: super.keyDown(with: event)
         }
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        handleFileKey(event) || super.performKeyEquivalent(with: event)
+    }
+
+    private func handleFileKey(_ event: NSEvent) -> Bool {
+        guard window?.firstResponder === self, let action = FileKeyboard.action(event) else { return false }
+        switch action {
+        case .menu: if let menu = coordinator?.keyboardMenu() { showKeyboardMenu(menu) }
+        case .copyAbsolutePath: FileActions.copy(coordinator?.previewURLs.map(\.path) ?? [], as: .absolutePath)
+        }
+        return true
     }
 
     func togglePreview() {

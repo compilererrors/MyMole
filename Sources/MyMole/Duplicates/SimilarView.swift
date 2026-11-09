@@ -18,7 +18,7 @@ struct DuplicatesPane: View {
 
     var body: some View {
         switch show {
-        case .identical: DuplicatesView(model: duplicates)
+        case .identical: DuplicatesView(model: duplicates).task { duplicates.scanIfNeeded() }
         case .similar: SimilarView(model: similar)
         }
     }
@@ -138,7 +138,7 @@ struct SimilarView: View {
                 "in \(model.groups.count.formatted()) group\(model.groups.count == 1 ? "" : "s") of pictures that look alike")
         } actions: {
             DSControlField("Filter photo groups") {
-                DSFilterField(String(localized: "Filter by name or folder"), text: $query).frame(width: 280)
+                DSFilterField(String(localized: "Filter by name or folder"), text: $query).frame(minWidth: 180, idealWidth: 280, maxWidth: .infinity)
             }
             DSControlField("Choose pictures for removal") {
                 Button("Choose All but the Best") {
@@ -197,7 +197,9 @@ struct SimilarView: View {
             defaultSort: .freeable,
             selection: $model.selection,
             marks: nil,
-            onOpen: { ids in FileActions.reveal(model.groups.filter { ids.contains($0.id) }.flatMap { $0.images.map(\.path) }) })
+            onOpen: { ids in FileActions.reveal(pathsInGroups(ids)) },
+            menu: { ids in FileActions.menu(pathsInGroups(ids), canOpen: false) },
+            filePaths: pathsInGroups)
         .overlay {
             if !model.groups.isEmpty, filtered.value.isEmpty, !filtered.working {
                 ContentUnavailableView.search(text: query)
@@ -233,6 +235,11 @@ struct SimilarView: View {
             String(localized: "alike another picture here, not the best itself")
         }
         return format.isEmpty ? close : format + " · " + close
+    }
+
+    private func pathsInGroups(_ ids: [String]) -> [String] {
+        let selected = Set(ids)
+        return model.groups.filter { selected.contains($0.id) }.flatMap { $0.images.map(\.path) }
     }
 
     private var pictures: some View {
@@ -277,13 +284,13 @@ struct SimilarView: View {
             menu: { ids in
                 [
                     .quickLook,
-                    .action(String(localized: "Show in Finder")) { FileActions.reveal(ids) },
                     .divider,
                     ids.contains(where: { !model.chosen.contains($0) })
                         ? .action(String(localized: "Choose for Removal")) { model.choose(ids) }
                         : .action(String(localized: "Unchoose")) { model.chosen.subtract(ids) },
                     model.keep.menuEntry(ids, keep: model.keepAlways, stop: model.stopKeeping),
-                ]
+                    .divider,
+                ] + FileActions.menu(ids)
             })
         .overlay {
             if model.shownGroups.isEmpty, !model.groups.isEmpty {

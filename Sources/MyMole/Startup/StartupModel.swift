@@ -66,6 +66,7 @@ final class StartupModel {
     /// small files, so it's done again whenever the pane opens.
     func load() {
         guard !loading, !trashing else { return }
+        liveRevision &+= 1
         loading = true
         let (home, root) = (home, root)
         let p = ScanProgress()
@@ -76,8 +77,6 @@ final class StartupModel {
                 let plugins = Plugins.list(home: home, root: root, progress: p)
                 return StartupListing(items: jobs.items + plugins.items, unreadable: jobs.unreadable + plugins.unreadable, broken: jobs.broken)
             }.value
-            let liveRead = readLive
-            live = await Task.detached(priority: .utility) { liveRead() }.value
             progress = nil
             // A stopped look keeps what was listed before.
             guard !p.isCancelled else {
@@ -93,6 +92,7 @@ final class StartupModel {
             chosen.formIntersection(paths)
             selection.formIntersection(paths)
             await reloadKept()
+            await refreshLive()
         }
     }
 
@@ -101,6 +101,19 @@ final class StartupModel {
     private(set) var live: [String: LaunchdStatus.State]?
     @ObservationIgnored var readLive: @Sendable () -> [String: LaunchdStatus.State]? = {
         Edition.current.isSandboxed ? nil : LaunchdStatus.loaded()
+    }
+    @ObservationIgnored private var liveRevision: UInt64 = 0
+
+    /// Session status changes independently of the launch files. Never reload choices
+    /// or walk plug-in folders just to update a process badge.
+    func refreshLive() async {
+        guard !loading, !trashing else { return }
+        liveRevision &+= 1
+        let revision = liveRevision
+        let read = readLive
+        let current = await Task.detached(priority: .utility) { read() }.value
+        guard !Task.isCancelled, revision == liveRevision, !loading, !trashing else { return }
+        if current != live { live = current }
     }
 
     /// The running look, which Stop ends.
@@ -181,6 +194,7 @@ final class StartupModel {
         let kept = keep.gate
         let (home, backend) = (home, trash)
         trashing = true
+        liveRevision &+= 1
         job = Task {
             let outcome = await jobs.perform(.moveToTrash) { job in
                 job.moveToTrash(picked.map(\.path), through: TrashGate(still: { StartupItems.isStillRemovable($0, home: home) || Plugins.isStillRemovable($0, home: home) }, protections: kept), backend: backend)
@@ -205,6 +219,7 @@ final class StartupModel {
     func undoTrash(run id: UUID? = nil) {
         guard !trashing, let run = id.flatMap(shelf.run) ?? shelf.latest, !run.records.isEmpty else { return }
         trashing = true
+        liveRevision &+= 1
         job = Task {
             let failedRecords = await jobs.perform(.putBack) { $0.putBack(run.records) }
             trashing = false

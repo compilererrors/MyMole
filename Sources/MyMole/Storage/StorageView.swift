@@ -21,12 +21,15 @@ struct StorageView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .dsBottom(showing: !model.marked.isEmpty) {
+        .dsBottom(showing: !model.marked.isEmpty || model.trashing) {
             BasketBar(model: model)
         } toast: {
             NoticeToast(model: model)
         }
         .sheet(isPresented: $model.showReview) { ReviewSheet(model: model) }
+        .task(id: model.removalHintKey) { await model.warmRemovalHints() }
+        .liveRefresh(every: .seconds(2), events: [.applications, .protections]) { await model.warmRemovalHints() }
+        .onReceive(NotificationCenter.default.publisher(for: KeepChanges.name)) { _ in model.invalidateRemovalHints() }
         .paneToolbar("Disk Map", subtitle: "\(subtitle)") { tools }
         .onAppear {
             if model.root == nil && !model.scanning {
@@ -45,6 +48,7 @@ struct StorageView: View {
         guard let r = model.root else { return String(localized: "Where your space went") }
         let size = ByteCountFormatter.string(fromByteCount: r.size, countStyle: .file)
         let files = r.fileCount.formatted()
+        if model.incomplete { return String(localized: "Partial map · \(size) in \(files) files") }
         return model.lastDuration.map { String(localized: "\(size) in \(files) files in \(Int($0.rounded())) s") }
             ?? String(localized: "\(size) in \(files) files")
     }
@@ -243,51 +247,55 @@ struct PathBar: View {
     let model: StorageModel
 
     var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 4) {
-                    Button(action: model.back) {
-                        Label("Back", systemImage: "chevron.backward")
-                            .labelStyle(.titleAndIcon)
-                            .fixedSize()
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(model.current?.parent == nil)
-                    .help(model.current?.parent.map { String(localized: "Back to \($0.name) (⌘↑)") } ?? String(localized: "You're at the top"))
-                    .padding(.trailing, DS.Space.sm)
-                    let lineage = model.lineage
-                    ForEach(Array(lineage.enumerated()), id: \.offset) { i, f in
-                        if i > 0 {
-                            Image(systemName: "chevron.right").font(.caption2.weight(.semibold)).foregroundStyle(.tertiary)
+        HStack(spacing: DS.Space.sm) {
+            Button(action: model.back) {
+                Label("Back", systemImage: "chevron.backward")
+                    .labelStyle(.titleAndIcon).fixedSize()
+            }
+            .buttonStyle(.bordered)
+            .disabled(model.current?.parent == nil)
+            .help(model.current?.parent.map { String(localized: "Back to \($0.name) (⌘↑)") } ?? String(localized: "You're at the top"))
+            ScrollViewReader { proxy in
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 4) {
+                        let lineage = model.lineage
+                        ForEach(Array(lineage.enumerated()), id: \.offset) { i, f in
+                            if i > 0 {
+                                Image(systemName: "chevron.right").font(.caption2.weight(.semibold)).foregroundStyle(.tertiary)
+                            }
+                            let last = i == lineage.count - 1
+                            Group {
+                                if last { segment(f, first: i == 0, current: true) }
+                                else { Button { model.open(f) } label: { segment(f, first: i == 0, current: false) } }
+                            }
+                            .buttonStyle(.plain)
+                            .contextMenu { FileMenuItems(paths: [f.path], canOpen: false) }
+                            .help(f.path)
+                            .id(i)
                         }
-                        let last = i == lineage.count - 1
-                        Button {
-                            model.open(f)
-                        } label: {
-                            Label(i == 0 ? displayRoot(f) : f.name, systemImage: i == 0 ? "internaldrive" : "folder")
-                                .lineLimit(1)
-                                .fixedSize()
-                                .font(.callout.weight(last ? .semibold : .regular))
-                                .foregroundStyle(last ? .primary : .secondary)
-                        }
-                        .buttonStyle(.plain)
-                        .disabled(last)
-                        .id(i)
                     }
                 }
-                .padding(.horizontal, DS.Space.page)
+                .accessibilityIdentifier("diskMap.breadcrumbs")
+                .onChange(of: model.lineage.count) { _, n in
+                    if n > 1 { proxy.scrollTo(n - 1, anchor: .trailing) }
+                }
             }
-            .frame(height: 40)
-            .onChange(of: model.lineage.count) { _, n in proxy.scrollTo(n - 1, anchor: .trailing) }
-        }
-        .overlay(alignment: .trailing) {
             if let space = model.diskSpace, let root = model.root, !model.scanning {
                 OutsideTheMap(space: space, mapped: root.size)
-                    .padding(.trailing, DS.Space.page)
+                    .fixedSize()
             }
         }
+        .padding(.horizontal, DS.Space.page)
+        .frame(minHeight: 40)
         .background(.bar)
         .overlay(alignment: .bottom) { Divider() }
+    }
+
+    private func segment(_ folder: Folder, first: Bool, current: Bool) -> some View {
+        Label(first ? displayRoot(folder) : folder.name, systemImage: first ? "internaldrive" : "folder")
+            .lineLimit(1).fixedSize()
+            .font(.callout.weight(current ? .semibold : .regular))
+            .foregroundStyle(current ? .primary : .secondary)
     }
 
     private func displayRoot(_ f: Folder) -> String {
@@ -326,6 +334,7 @@ struct OutsideTheMap: View {
             }
             .padding(DS.Space.lg)
             .frame(width: 340)
+            .dialogKeyboard()
         }
     }
 
@@ -407,50 +416,46 @@ struct BasketBar: View {
 
     var body: some View {
         DSActionBar {
-            DSIcon(symbol: "checklist")
-            DSText("\(model.marked.count) chosen · \(ByteCountFormatter.string(fromByteCount: model.markedBytes, countStyle: .file))", .body)
+            if model.trashing {
+                PulseDot()
+                DSText(activity, .body)
+            } else {
+                DSIcon(symbol: "checklist")
+                DSText("\(model.marked.count) chosen · \(ByteCountFormatter.string(fromByteCount: model.markedBytes, countStyle: .file))", .body)
+            }
         } trailing: {
             Button("Clear") { model.marked.removeAll() }
                 .accessibilityLabel("Clear the choice")
                 .controlSize(.large)
-            Button("Review & Move to Trash…") { model.showReview = true }
+                .disabled(model.trashing)
+            Button("Move to Trash…", action: model.beginTrashReview)
                 .primaryAction()
+                .disabled(!model.canTrash)
+        }
+    }
+
+    private var activity: String {
+        switch model.removalPhase {
+        case .preparing: String(localized: "Preparing to move…")
+        case .waiting: String(localized: "Waiting for another operation…")
+        case .moving: String(localized: "Moving to the Trash…")
+        case .restoring: String(localized: "Restoring…")
+        case nil: String(localized: "Finishing…")
         }
     }
 }
 
 /// The last chance to look before anything moves. Flags protected paths
 /// (skipped) and risky ones (your files, backups), and notes rebuildable ones.
-/// What's chosen is looked at off the main thread while the sheet is open,
-/// once per item: whether a keep list of another pane protects it (it then
-/// stays), and what a folder holds, so a big one never stalls the window.
-/// The move waits until everything has been looked at.
+/// Uses scan metadata and advisory details warmed while choosing. Fresh
+/// protection and identity checks belong to the worker immediately before moving.
 struct ReviewSheet: View {
     @Environment(\.palette) private var palette
     @Bindable var model: StorageModel
     @Environment(\.dismiss) private var dismiss
-    /// What looking at each chosen item found.
-    @State private var checks: [String: Check] = [:]
-    /// The keep lists couldn't be read: nothing is moved until they can be.
-    @State private var keepsUnreadable = false
-
-    /// Whether a keep list protects the item, and for a folder the gravest
-    /// thing it holds.
-    struct Check: Equatable {
-        var kept = false
-        var inside: PathRisk?
-        /// Programs that have the file open now.
-        var openIn: [String] = []
-        /// Other names the file has (hard links): its space stays until every one goes.
-        var otherNames = 0
-    }
-
     private var items: [Marked] { model.marked.values.sorted { $0.size > $1.size } }
-    /// Files looked at for a program holding them open: the biggest, from this size.
-    static let openCheckMinimum: Int64 = 100_000_000
-    static let openCheckLimit = 20
-    /// Chosen items not looked at yet, largest first.
-    private var unchecked: [String] { items.map(\.path).filter { checks[$0] == nil } }
+    private var hints: RemovalHints.Value? { model.currentRemovalHints }
+    private var keepsUnreadable: Bool { hints?.keepsUnreadable == true }
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.gap) {
@@ -485,7 +490,7 @@ struct ReviewSheet: View {
                     .accessibilityLabel("Unchoose \(m.name)")
                 }
             }
-            .frame(minHeight: 240)
+            .frame(height: min(360, max(80, CGFloat(items.count) * 64)))
             DSActionGroup {
                 EmptyView()
             } trailing: {
@@ -498,97 +503,33 @@ struct ReviewSheet: View {
                 }
                 .primaryAction()
                 .keyboardShortcut(.defaultAction)
-                .disabled(!model.canTrash || !unchecked.isEmpty || keepsUnreadable)
-                .help(
-                    model.scanning
-                        ? String(localized: "Available when the scan finishes")
-                        : keepsUnreadable
-                            ? String(localized: "Your keep lists couldn't be read")
-                            : unchecked.isEmpty ? "" : String(localized: "Available once what's chosen has been looked through"))
+                .disabled(!model.canTrash || keepsUnreadable)
             }
         }
         .padding(Theme.pad)
         .frame(width: DS.Size.reviewWidth)
-        .frame(minHeight: 480, idealHeight: 540)
+        .dialogControls()
+        .dialogKeyboard()
         .tint(palette.accent.color)  // sheets don't inherit the window's tint
-        // Again only when the list changes, not as each result comes in.
-        .task(id: items.map(\.path)) { await check() }
-    }
-
-    /// Looks at what's chosen, off the main thread: the keep lists first,
-    /// read once, then inside each folder nothing keeps, one at a time.
-    /// Stops at the next folder when the sheet goes or the list changes;
-    /// what was found stays, so nothing is looked through twice.
-    private func check() async {
-        let pending = unchecked
-        guard !pending.isEmpty else { return }
-        let progress = ScanProgress()
-        let protections = model.protections
-        await withTaskCancellationHandler {
-            let kept = await Task.detached(priority: .userInitiated) { () -> Set<String>? in
-                guard let keeps = try? protections.read() else { return nil }
-                return Set(pending.filter(keeps))
-            }.value
-            guard !Task.isCancelled else { return }
-            keepsUnreadable = kept == nil
-            // What's kept stays whatever it holds, and a path that warns by
-            // itself needs no look inside: both are settled at once.
-            var walks: [(path: String, folder: Folder)] = []
-            var settled: [String: Check] = [:]
-            // Big files a program has open, such as a virtual disk; a look
-            // takes a moment each, so only the biggest few. The App Sandbox
-            // can't see other programs.
-            let files = Edition.current.isSandboxed ? [] : Array(pending
-                .compactMap { model.marked[$0] }.filter { !$0.isFolder && $0.size >= Self.openCheckMinimum }
-                .sorted { $0.size > $1.size }.prefix(Self.openCheckLimit).map(\.path))
-            let open = await Task.detached(priority: .userInitiated) {
-                Dictionary(uniqueKeysWithValues: files.compactMap { p in OpenFiles.users(of: p).flatMap { $0.isEmpty ? nil : (p, $0) } })
-            }.value
-            let plainFiles = pending.filter { model.marked[$0]?.isFolder == false }
-            let links = await Task.detached(priority: .userInitiated) { HardLinks.otherNames(of: plainFiles) }.value
-            for path in pending {
-                let isKept = kept?.contains(path) ?? false
-                if !isKept, model.marked[path]?.isFolder == true, PathRisk.of(path) == nil, let folder = model.root?.find(path: path) {
-                    walks.append((path, folder))
-                } else {
-                    settled[path] = Check(kept: isKept, openIn: open[path] ?? [], otherNames: links[path] ?? 0)
-                }
-            }
-            checks.merge(settled) { _, new in new }
-            for (path, folder) in walks {
-                guard !Task.isCancelled else { return }
-                let found = await Task.detached(priority: .userInitiated) {
-                    PathRisk.inside(folder, stop: { progress.isCancelled })
-                }.value
-                guard !Task.isCancelled else { return }
-                checks[path] = Check(inside: found)
-            }
-        } onCancel: {
-            progress.cancel()
-        }
+        .onAppear { model.confirmationPresented() }
     }
 
     @ViewBuilder private func warning(_ m: Marked) -> some View {
         if Trasher.isProtected(m.path) {
             Label("Protected location — will be skipped", systemImage: "hand.raised.fill")
                 .font(.caption).foregroundStyle(.red)
-        } else if checks[m.path]?.kept == true {
+        } else if hints?.kept.contains(m.path) == true {
             Label("On one of your keep lists, or holds something that is — will be skipped", systemImage: "lock.shield.fill")
                 .font(.caption).foregroundStyle(.orange)
-        } else if let open = checks[m.path]?.openIn, !open.isEmpty {
+        } else if let open = hints?.openIn[m.path], !open.isEmpty {
             Label("Open in \(open.joined(separator: ", ")) — quit it first, or it goes on writing to the file in the Trash", systemImage: "exclamationmark.triangle.fill")
                 .font(.caption).foregroundStyle(.orange)
         } else if let risk = PathRisk.of(m.path) {
             riskLabel(risk)
-        } else if let n = checks[m.path]?.otherNames, n > 0 {
+        } else if let n = hints?.links[m.path], n > 0 {
             Label("Has \(n) other name\(n == 1 ? "" : "s") (hard link\(n == 1 ? "" : "s")) — its space stays in use until every name goes", systemImage: "link")
                 .font(.caption).foregroundStyle(.secondary)
-        } else if m.isFolder, checks[m.path] == nil {
-            HStack(spacing: DS.Space.xs) {
-                PulseDot(size: 6)
-                DSText("Looking through what it holds…", .metadata)
-            }
-        } else if let risk = checks[m.path]?.inside {
+        } else if let risk = model.scannedRisk(for: m) {
             riskLabel(risk)
         } else if let r = model.root?.find(path: m.path)?.rebuildable {
             Label("\(r.label) — \(r.reason)", systemImage: "arrow.triangle.2.circlepath")
@@ -608,7 +549,7 @@ struct NoticeToast: View {
 
     var body: some View {
         if let n = model.notice {
-            DSUndoToast(text: n.text, canUndo: n.canUndo, undo: { model.undoTrash() }, dismiss: { model.dismissNotice() })
+            DSUndoToast(text: n.text, canUndo: n.canUndo && model.canUndo, undo: { model.undoTrash() }, dismiss: { model.dismissNotice() })
         }
     }
 }

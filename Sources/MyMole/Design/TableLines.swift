@@ -99,8 +99,10 @@ extension NSTableView {
     /// grid, so text keeps clear of the line between them.
     func apply(_ palette: Palette, lines: TableLines, stripes: Bool) {
         let native = palette.family == .native
-        usesAlternatingRowBackgroundColors = stripes && native && lines == .none
-        backgroundColor = native ? .controlBackgroundColor : palette.workspace.ns
+        let alternating = stripes && native && lines == .none
+        if usesAlternatingRowBackgroundColors != alternating { usesAlternatingRowBackgroundColors = alternating }
+        let background: NSColor = native ? .controlBackgroundColor : palette.workspace.ns
+        if backgroundColor != background { backgroundColor = background }
         let gap = NSSize(width: DS.Table.columnGap(lines), height: 0)
         if intercellSpacing != gap {
             intercellSpacing = gap

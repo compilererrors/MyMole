@@ -6,6 +6,7 @@ import SystemKit
 /// scans found. Every card that shows something a pane has more of opens
 /// that pane; the tools themselves are in the sidebar.
 struct DashboardView: View {
+    @AppStorage(DuplicatesShow.key) private var duplicateShow: DuplicatesShow = .identical
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.palette) private var palette
     let app: AppModel
@@ -174,7 +175,10 @@ struct DashboardView: View {
                 DSFlow(spacing: DS.Space.xs) {
                     ForEach(app.smartScanModules) { pane in
                         let state = app.moduleState(pane)
-                        Button { app.pane = pane } label: {
+                        Button {
+                            if pane == .duplicates { duplicateShow = .identical }
+                            app.pane = pane
+                        } label: {
                             DSCapsule(
                                 "\(pane.title): \(state.text)",
                                 symbol: state == .partial || state == .failed || state == .earlier ? "exclamationmark.triangle.fill" : nil,
@@ -190,10 +194,10 @@ struct DashboardView: View {
             }
             Spacer(minLength: 0)
             Button {
-                app.scanAll()
-                app.pane = .clean
+                if app.smartScanning { app.stopSmartScan() }
+                else { app.scanAll() }
             } label: {
-                Label("Scan", systemImage: "sparkles")
+                Label(app.smartScanning ? String(localized: "Stop Scan") : String(localized: "Scan"), systemImage: app.smartScanning ? "stop.fill" : "sparkles")
             }
             .primaryAction()
         }

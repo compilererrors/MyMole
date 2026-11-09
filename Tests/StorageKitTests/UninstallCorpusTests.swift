@@ -19,7 +19,9 @@ import Testing
         let expected: [Expected]
         let mustKeep: [String]
         let blocked: Bool
+        let runtimeRoots: [RuntimeRoot]?
     }
+    private struct RuntimeRoot: Decodable { let path: String; let temporary: Bool }
     private struct App: Decodable {
         let key: String
         let name: String
@@ -108,21 +110,29 @@ import Testing
             return
         }
         let owned = try #require(identity, "\(entry.id): fixture ownership must be known")
-        let found = AppLeftovers.find(for: target, home: root.path, installed: apps, identity: owned, deep: entry.deep)
+        let runtimeRoots = try (entry.runtimeRoots ?? []).map {
+            RuntimeLeftovers.Root(path: try url($0.path).path, kind: $0.temporary ? .temporary : .caches)
+        }
+        let listing = AppLeftovers.list(for: target, home: root.path, installed: apps, identity: owned, deep: entry.deep, runtimeRoots: runtimeRoots)
+        #expect(!listing.limited && !listing.cancelled, "\(entry.id): synthetic search must finish")
+        let found = listing.items
         let byPath = Dictionary(found.map { (String($0.path.dropFirst(root.path.count + 1)), $0) }, uniquingKeysWith: { first, _ in first })
         let actual = Set(byPath.keys)
         let expected = Set(entry.expected.map(\.path))
         metrics.truePositives += actual.intersection(expected).count
         metrics.falsePositives += actual.subtracting(expected).count
         metrics.falseNegatives += expected.subtracting(actual).count
+        metrics.unsafeDefaultChoices += found.filter { item in
+            let path = String(item.path.dropFirst(root.path.count + 1))
+            return item.chosenByDefault && entry.expected.first(where: { $0.path == path })?.chosen != true
+        }.count
         #expect(actual == expected, "\(entry.id): unexpected or missing leftover paths")
         for expectation in entry.expected {
             guard let item = byPath[expectation.path] else { continue }
             #expect(item.evidence.rawValue == expectation.evidence, "\(entry.id): attribution evidence")
             #expect(item.chosenByDefault == expectation.chosen, "\(entry.id): default removal choice")
-            if item.chosenByDefault && !expectation.chosen { metrics.unsafeDefaultChoices += 1 }
             #expect(
-                AppLeftovers.isStillLeftover(item.path, of: target, home: root.path, installed: apps, identity: owned, deep: entry.deep))
+                AppLeftovers.isStillLeftover(item.path, of: target, home: root.path, installed: apps, identity: owned, deep: item.evidence == .loose, runtimeRoots: runtimeRoots))
         }
         for kept in entry.mustKeep {
             let hits = actual.filter { kept == $0 || kept.hasPrefix($0 + "/") }

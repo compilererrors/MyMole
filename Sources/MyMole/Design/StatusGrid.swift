@@ -2,55 +2,102 @@ import SwiftUI
 
 /// Geometry depends on preferences and width, never on live text or readings.
 struct StatusGrid: Layout {
-    let sizes: [StatusCardSize]
+    let cards: [StatusLayout.Card]
+    var compactDensity = false
+    var editing = false
     let spacing: CGFloat
 
-    nonisolated static func frames(sizes: [StatusCardSize], width: CGFloat, spacing: CGFloat) -> [CGRect] {
+    nonisolated static func columnCount(width: CGFloat, spacing: CGFloat) -> Int {
         let width = width.isFinite ? max(1, width) : 900
-        let columns = max(1, min(3, Int((width + spacing) / (280 + spacing))))
-        let unit = (width - CGFloat(columns - 1) * spacing) / CGFloat(columns)
-        var column = 0
+        return max(1, min(3, Int((width + spacing) / (280 + spacing))))
+    }
+
+    nonisolated static func frames(cards: [StatusLayout.Card], width: CGFloat, spacing: CGFloat, compactDensity: Bool = false, editing: Bool = false) -> [CGRect] {
+        let width = width.isFinite ? max(1, width) : 900
+        let columns = columnCount(width: width, spacing: spacing)
+        var frames = [CGRect](repeating: .zero, count: cards.count)
+        var row: [Int] = []
+        var units = 0
         var y: CGFloat = 0
-        var rowHeight: CGFloat = 0
-        return sizes.map { size in
-            let span = min(columns, size.span)
-            if column + span > columns {
-                y += rowHeight + spacing
-                column = 0
-                rowHeight = 0
+        func finishRow() {
+            guard !row.isEmpty else { return }
+            let preferredHeight = row.map { cards[$0].height(compactDensity: compactDensity) }.max() ?? 0
+            let height = preferredHeight + (editing ? 40 : 0)
+            let available = max(1, width - CGFloat(units - 1) * spacing)
+            let unit = available / CGFloat(units)
+            var x: CGFloat = 0
+            for index in row {
+                let span = min(columns, cards[index].size.span)
+                let cardWidth = unit * CGFloat(span) + CGFloat(span - 1) * spacing
+                frames[index] = CGRect(x: x, y: y, width: cardWidth, height: height)
+                x += cardWidth + spacing
             }
-            let rect = CGRect(
-                x: CGFloat(column) * (unit + spacing), y: y,
-                width: CGFloat(span) * unit + CGFloat(span - 1) * spacing, height: size.height)
-            column += span
-            rowHeight = max(rowHeight, size.height)
-            return rect
+            y += height + spacing
+            row = []; units = 0
         }
+        for index in cards.indices {
+            let span = min(columns, cards[index].size.span)
+            if units + span > columns { finishRow() }
+            row.append(index)
+            units += span
+            if units == columns { finishRow() }
+        }
+        finishRow()
+        return frames
     }
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
         let width = proposal.width.flatMap { $0.isFinite ? $0 : nil } ?? 900
-        let frames = Self.frames(sizes: sizes, width: width, spacing: spacing)
+        let frames = Self.frames(cards: cards, width: width, spacing: spacing, compactDensity: compactDensity, editing: editing)
         return CGSize(width: width, height: frames.map(\.maxY).max() ?? 0)
     }
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        for (view, frame) in zip(subviews, Self.frames(sizes: sizes, width: bounds.width, spacing: spacing)) {
-            view.place(at: CGPoint(x: bounds.minX + frame.minX, y: bounds.minY + frame.minY), proposal: ProposedViewSize(frame.size))
+        for (view, frame) in zip(subviews, Self.frames(cards: cards, width: bounds.width, spacing: spacing, compactDensity: compactDensity, editing: editing)) {
+            view.place(at: CGPoint(x: bounds.minX + frame.minX, y: bounds.minY + frame.minY), anchor: .topLeading, proposal: ProposedViewSize(frame.size))
         }
     }
 }
 
 struct StatusCard<Content: View, Actions: View>: View {
     let card: StatusCardID
+    var editing = false
+    var size: StatusCardSize = .standard
+    var canResize = true
+    var drag: StatusCardDrag? = nil
+    var onResize: (StatusCardSize) -> Void = { _ in }
+    var onMove: (Int) -> Void = { _ in }
     @ViewBuilder var content: Content
     @ViewBuilder var actions: Actions
+    @State private var proposedSize: StatusCardSize?
+    private enum Handle: Hashable { case move, resize }
+    @FocusState private var focusedHandle: Handle?
 
     var body: some View {
         VStack(alignment: .leading, spacing: DS.Space.sm) {
             HStack(spacing: DS.Space.sm) {
+                if editing, let drag {
+                    Image(systemName: "line.3.horizontal")
+                        .frame(width: 22, height: 24)
+                        .contentShape(Rectangle())
+                        .draggable(drag) {
+                            Label(card.title, systemImage: card.symbol).padding(DS.Space.md).dsCard()
+                        }
+                        .accessibilityLabel("Move \(card.title)")
+                        .accessibilityAdjustableAction { direction in onMove(direction == .increment ? 1 : -1) }
+                        .focusable()
+                        .focused($focusedHandle, equals: .move)
+                        .onTapGesture { focusedHandle = .move }
+                        .onKeyPress(keys: [.upArrow, .downArrow]) { key in
+                            guard key.modifiers.intersection([.command, .control, .option, .shift]).isEmpty else { return .ignored }
+                            onMove(key.key == .upArrow ? -1 : 1)
+                            return .handled
+                        }
+                        .help("Drag to reorder \(card.title). The Actions menu also offers Move Earlier and Move Later.")
+                }
                 Label(card.title, systemImage: card.symbol)
-                    .font(.subheadline.weight(.semibold))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
                     .accessibilityAddTraits(.isHeader)
                 Spacer(minLength: DS.Space.sm)
                 Menu {
@@ -61,18 +108,76 @@ struct StatusCard<Content: View, Actions: View>: View {
                 .menuIndicator(.hidden)
                 .menuStyle(.borderlessButton)
                 .fixedSize()
+                .foregroundStyle(.secondary)
                 .accessibilityLabel("Actions for \(card.title)")
                 .help("Actions and layout for \(card.title)")
             }
             ScrollView {
-                VStack(alignment: .leading, spacing: DS.Space.sm) { content }
+                VStack(alignment: .leading, spacing: DS.Space.xs) { content }
                     .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .scrollBounceBehavior(.basedOnSize)
+            if editing {
+                HStack {
+                    Text(proposedSize?.title ?? size.title).font(.caption2).foregroundStyle(.secondary)
+                    Spacer()
+                    Image(systemName: "arrow.left.and.right")
+                        .frame(width: 26, height: 22)
+                        .contentShape(Rectangle())
+                        .foregroundStyle(.tint)
+                        .opacity(canResize ? 1 : 0.4)
+                        .accessibilityLabel("Resize \(card.title)")
+                        .accessibilityValue(size.title)
+                        .accessibilityAddTraits(.isButton)
+                        .accessibilityAction { toggleWidth() }
+                        .accessibilityAdjustableAction { direction in
+                            if canResize { onResize(direction == .increment ? .wide : .standard) }
+                        }
+                        .focusable(canResize)
+                        .focused($focusedHandle, equals: .resize)
+                        .onKeyPress(keys: [.leftArrow, .rightArrow, .space, .return]) { key in
+                            guard canResize, key.modifiers.intersection([.command, .control, .option, .shift]).isEmpty else { return .ignored }
+                            switch key.key {
+                            case .leftArrow: onResize(.standard)
+                            case .rightArrow: onResize(.wide)
+                            default: toggleWidth()
+                            }
+                            return .handled
+                        }
+                        .help(canResize ? String(localized: "Drag sideways to resize, or click to toggle width. Cards in a row share a height.")
+                              : String(localized: "Widen the window to change card width."))
+                        .highPriorityGesture(DragGesture(minimumDistance: 0)
+                            .onChanged { value in
+                                guard canResize else { return }
+                                focusedHandle = .resize
+                                proposedSize = abs(value.translation.width) < 40 ? size : value.translation.width > 0 ? .wide : .standard
+                            }
+                            .onEnded { value in
+                                if canResize, abs(value.translation.width) < 6, abs(value.translation.height) < 6 {
+                                    toggleWidth()
+                                } else if canResize, let proposedSize, proposedSize != size {
+                                    onResize(proposedSize)
+                                }
+                                proposedSize = nil
+                            })
+                }
             }
         }
         .padding(DS.Space.md)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .dsCard()
+        .overlay {
+            if proposedSize != nil {
+                RoundedRectangle(cornerRadius: DS.Radius.card).stroke(.tint, lineWidth: 2)
+            }
+        }
         .clipped()
         .contextMenu { actions }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("status.card." + card.rawValue)
+    }
+
+    private func toggleWidth() {
+        if canResize { onResize(size == .wide ? .standard : .wide) }
     }
 }

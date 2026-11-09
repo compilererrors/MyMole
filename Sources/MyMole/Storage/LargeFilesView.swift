@@ -73,74 +73,31 @@ struct LargeFilesView: View {
         let byID = Dictionary(shown.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         let picked = shown.filter { selection.contains($0.id) }
         VStack(spacing: 0) {
-            DSControlBar(
-                "Find large files",
-                detail: "Filters change this list of files of 1 MB or more. Choosing only ticks files for review before they move."
-            ) {
-                DSControlField("Filter by name or folder") {
+            VStack(alignment: .leading, spacing: DS.Space.sm) {
+                HStack(spacing: DS.Space.sm) {
                     DSFilterField(String(localized: "Filter by name or folder"), text: $query)
-                        .frame(width: 240)
+                        .frame(minWidth: 140, maxWidth: .infinity)
+                    DSFilterButton("Filter large files", detail: "Narrow this list of files of 1 MB or more. The disk map and your removal choices stay the same.",
+                                   count: filterCount, clear: clearFilters) { criteria }
+                    TableColumnsButton(scope: "diskMap.largeFiles").fixedSize()
                 }
-                DSControlField("File kind") {
-                    Picker("Kind", selection: $kind) {
-                        Text("All Kinds").tag(FileKind?.none)
-                        Divider()
-                        ForEach(FileKind.allCases, id: \.self) { Text($0.title).tag(FileKind?.some($0)) }
-                    }
-                    .labelsHidden()
-                    .fixedSize()
-                }
-                DSControlField("Location") {
-                    Picker("Place", selection: $place) {
-                        ForEach(Place.allCases) { Text($0.title).tag($0) }
-                    }
-                    .labelsHidden()
-                    .fixedSize()
-                    .help("Only files in this folder; with Older than, old downloads")
+                DSFlow(spacing: DS.Space.xs) {
+                    if let kind { DSFilterChip(title: String(localized: "Kind: \(kind.title)")) { self.kind = nil } }
+                    if place != .anywhere { DSFilterChip(title: place.title) { place = .anywhere } }
+                    if date.isActive { DSFilterChip(title: String(localized: "Modified: \(date.summary)")) { date = DateFilter() } }
                     if place == .downloads {
-                        Button("Every Download…") { reviewingDownloads = true }
-                            .fixedSize()
-                            .help("Go through everything in Downloads, small files too, oldest first")
+                        Button("Review All Downloads…") { reviewingDownloads = true }
+                            .help("Includes small downloads too. Opens a separate review; nothing is chosen for you.")
                     }
                 }
-                DSControlField("Last modified") {
-                    DateFilterControl(filter: $date, showsLabel: false)
-                }
-                DSControlField("Results") {
-                    HStack(spacing: DS.Space.xs) {
-                        if model.scanning { PulseDot() }
-                        DSText(counts(shown: shown, picked: picked), .metadata).keepWhole()
-                    }
-                    if model.largeFiles.count >= StorageModel.largeFileLimit {
-                        Image(systemName: "info.circle")
-                            .foregroundStyle(.secondary)
-                            .help(
-                                "Only the \(StorageModel.largeFileLimit.formatted()) largest files of the scan are listed. Open a folder in Browse to see the rest."
-                            )
-                            .accessibilityLabel("Only the largest files are listed")
-                    }
-                }
-                // Choosing ticks rows for the Trash; selecting (⌘A, ⇧-click) only highlights them.
-                DSControlField("Choose for removal") {
-                    HStack(spacing: DS.Space.sm) {
-                        Button("Choose All") { model.mark(shown.map(\.marked)) }
-                            .disabled(shown.allSatisfy { model.marked[$0.path] != nil })
-                            .help("Tick every file listed for the Trash. Nothing moves until you review and confirm.")
-                            .fixedSize()
-                        Button(picked.isEmpty ? "Choose Selected" : "Choose \(picked.count) Selected") {
-                            // ⌘⌫ in the filter field deletes the text, as everywhere else.
-                            if MyMoleApp.sendToTextField(#selector(NSResponder.deleteToBeginningOfLine(_:))) { return }
-                            model.mark(picked.map(\.marked))
-                        }
-                        .keyboardShortcut(.delete, modifiers: .command)
-                        .help("Tick the highlighted rows for the Trash (⌘⌫). Select rows with a click, ⇧ or ⌘, or ⌘A for all.")
-                        .disabled(picked.isEmpty)
-                        .fixedSize()
-                    }
+                DSText("Files of 1 MB or more from the current scan", .metadata)
+                if model.largeFiles.count >= StorageModel.largeFileLimit {
+                    DSText("Only the \(StorageModel.largeFileLimit.formatted()) largest files are listed. Browse individual folders to see the rest.", .metadata)
                 }
             }
             .padding(.horizontal, DS.Space.page)
             .padding(.vertical, DS.Space.md)
+            Divider()
 
             FileTable(
                 rows: shown.map(fileRow),
@@ -153,12 +110,36 @@ struct LargeFilesView: View {
                 onOpen: { ids in FileActions.reveal(ids) },
                 onMark: { ids in model.mark(ids.compactMap { byID[$0] }.map(\.marked)) },
                 menu: { ids in menu(ids.compactMap { byID[$0] }, rows: shown) })
+                .overlay { emptyState.allowsHitTesting(false) }
+            Divider()
+            DSActionGroup {
+                HStack(spacing: DS.Space.sm) {
+                    if model.scanning || filtered.working { PulseDot() }
+                    DSText(counts(shown: shown, picked: picked), .metadata)
+                }
+            } trailing: {
+                Button("Choose All") { model.mark(shown.map(\.marked)) }
+                    .disabled(shown.isEmpty || shown.allSatisfy { model.marked[$0.path] != nil })
+                    .help("Choose only the files shown by the current filters. Nothing moves until you confirm.")
+                Button(picked.isEmpty ? "Choose Selected" : "Choose \(picked.count) Selected") {
+                    if MyMoleApp.sendToTextField(#selector(NSResponder.deleteToBeginningOfLine(_:))) { return }
+                    model.mark(picked.map(\.marked))
+                }
+                .keyboardShortcut(.delete, modifiers: .command)
+                .disabled(picked.isEmpty)
+            }
+            .controlSize(.small)
+            .padding(.horizontal, DS.Space.page)
+            .padding(.vertical, DS.Space.sm)
         }
         .task(id: FilterKey(files: model.largeFiles, kind: kind, place: place, date: date, query: query)) { await refilter() }
         .sheet(isPresented: $reviewingDownloads) { DownloadsReviewSheet(model: model) }
-        .overlay {
-            if !model.largeFiles.isEmpty, shown.isEmpty, !filtered.working {
-                ContentUnavailableView.search(text: query)
+    }
+
+    @ViewBuilder private var emptyState: some View {
+            if !model.largeFiles.isEmpty, rows.isEmpty, !filtered.working {
+                ContentUnavailableView("No Matching Files", systemImage: "line.3.horizontal.decrease",
+                    description: Text("Try another name, kind, date or location, or clear the filters above."))
             } else if model.largeFiles.isEmpty {
                 if model.scanning {
                     CenterCard(symbol: nil, title: "Looking for large files…", subtitle: "They appear here as the scan finds them.") {}
@@ -167,6 +148,32 @@ struct LargeFilesView: View {
                         "No Large Files", systemImage: "doc.badge.ellipsis",
                         description: Text("Nothing of 1 MB or more in this scan."))
                 }
+            }
+    }
+
+    private var filterCount: Int { (query.isEmpty ? 0 : 1) + (kind == nil ? 0 : 1) + (place == .anywhere ? 0 : 1) + (date.isActive ? 1 : 0) }
+    private func clearFilters() { query = ""; kind = nil; place = .anywhere; date = DateFilter() }
+
+    private var criteria: some View {
+        VStack(alignment: .leading, spacing: DS.Space.md) {
+            DSControlField("File kind") {
+                Picker("File kind", selection: $kind) {
+                    Text("All Kinds").tag(FileKind?.none)
+                    ForEach(FileKind.allCases, id: \.self) { Text($0.title).tag(FileKind?.some($0)) }
+                }.labelsHidden().frame(maxWidth: .infinity, alignment: .leading)
+            }
+            DSControlField("Location within this scan") {
+                Picker("Location", selection: $place) {
+                    ForEach(Place.allCases) { Text($0.title).tag($0) }
+                }.labelsHidden().frame(maxWidth: .infinity, alignment: .leading)
+                DSText("Choose a familiar folder to narrow the scanned results.", .metadata)
+                if place == .downloads {
+                    DSText("Review All Downloads above the list also includes smaller files.", .metadata)
+                }
+            }
+            DSControlField("Last modified") {
+                DateFilterControl(filter: $date, showsLabel: false)
+                DSText("An old modification date doesn't mean a file is safe to remove.", .metadata)
             }
         }
     }
@@ -275,8 +282,9 @@ struct DownloadsReviewSheet: View {
                     },
                     onOpen: { FileActions.reveal($0) },
                     menu: { ids in
-                        var out: [TableMenuEntry] = [.quickLook, .action(String(localized: "Show in Finder")) { FileActions.reveal(ids) }]
+                        var out: [TableMenuEntry] = [.quickLook, .divider] + FileActions.menu(ids)
                         if canChoose {
+                            out.append(.divider)
                             out.append(
                                 .action(String(localized: "Choose for Removal")) {
                                     model.mark(
@@ -305,6 +313,7 @@ struct DownloadsReviewSheet: View {
         }
         .padding(DS.Space.xl)
         .frame(width: DS.Size.reviewWidth)
+        .dialogKeyboard()
         .task {
             let folder = folder
             let read = await Task.detached(priority: .userInitiated) { DownloadsReview.list(folder) }.value

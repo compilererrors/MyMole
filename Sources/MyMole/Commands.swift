@@ -165,7 +165,7 @@ extension AppModel {
 
 /// How one module of a Smart Scan stands.
 enum ModuleState: Equatable {
-    case notYet, running, done, partial, failed
+    case notYet, waiting, running, done, partial, failed
     /// The last Smart Scan didn't finish it (stopped, or access changed):
     /// what's shown is from before.
     case earlier
@@ -174,6 +174,7 @@ enum ModuleState: Equatable {
         switch self {
         case .earlier: String(localized: "from an earlier scan")
         case .notYet: String(localized: "not scanned")
+        case .waiting: String(localized: "queued")
         case .running: String(localized: "scanning")
         case .done: String(localized: "scanned")
         case .partial: String(localized: "partly read")
@@ -187,11 +188,12 @@ extension AppModel {
     /// What a Smart Scan checks, in the order it shows them. Projects and the
     /// Disk Map walk whole folders and scan on their own panes.
     var smartScanModules: [Pane] {
-        [.clean, .installer, .uninstall, .optimize] + (privileged.isAvailable && Edition.current.hasSystemTasks ? [.systemClean] : [])
+        SmartScanPipeline.modules(system: privileged.isAvailable && Edition.current.hasSystemTasks)
     }
 
     func moduleState(_ pane: Pane) -> ModuleState {
         let state = readState(pane)
+        if state != .running, smartScanWaiting.contains(pane) { return .waiting }
         // Finished before the last Smart Scan began: it didn't get through this time.
         if state == .done || state == .partial, let started = smartScanStarted, let at = smartScanFinishedAt(pane), at < started {
             return .earlier
@@ -205,6 +207,7 @@ extension AppModel {
         case .clean: deepClean.scannedAt
         case .installer: installers.scannedAt
         case .uninstall: apps.scannedAt
+        case .duplicates: duplicates.scannedAt
         case .optimize: maintenance.checkedAt
         case .systemClean: systemClean.scannedAt
         default: nil
@@ -220,6 +223,9 @@ extension AppModel {
             installers.scanning ? .running : installers.scannedAt == nil ? .notYet : !installers.unreadableFolders.isEmpty ? .partial : .done
         case .uninstall:
             apps.loading ? .running : apps.scannedAt == nil ? .notYet : !apps.unreadableFolders.isEmpty ? .partial : .done
+        case .duplicates:
+            duplicates.scanning ? .running : duplicates.scannedAt == nil ? .notYet
+                : !duplicates.unreadable.isEmpty || duplicates.uncompared > 0 || !duplicates.excludedRoots.isEmpty ? .partial : .done
         case .optimize:
             maintenance.phase != .idle ? .running : maintenance.checkedAt == nil ? .notYet : .done
         case .systemClean:
@@ -234,7 +240,7 @@ extension AppModel {
         let names = smartScanModules.map { $0 == .uninstall ? String(localized: "the app list") : $0.title }
         let list = names.count > 1
             ? String(localized: "\(names.dropLast().joined(separator: ", ")) and \(names.last ?? "")") : names.joined()
-        return String(localized: "Checks \(list). Projects, Startup Items, Duplicates and the Disk Map read whole folders and scan on their own panes. Nothing is deleted until you confirm.")
+        return String(localized: "Checks \(list). Identical-file comparison follows the cleanup scans. Similar Photos, Projects, Startup Items and the Disk Map scan on their own panes. Nothing is deleted until you confirm.")
     }
 }
 
@@ -313,6 +319,7 @@ struct CommandPalette: View {
                 .padding(DS.Space.sm)
         }
         .frame(width: 520, height: 380)
+        .dialogKeyboard()
         .onAppear { focused = true }
         .onChange(of: query) { chosen = 0 }
         .onKeyPress(.downArrow) {

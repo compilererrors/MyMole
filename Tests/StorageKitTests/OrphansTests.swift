@@ -46,9 +46,9 @@ import Testing
             "Application Support/com.gone.Editor", "Preferences/com.gone.Editor.plist",
         ])
         #expect(Set(found.map(\.bundleID)) == ["com.gone.Editor"])
-        // Caches and window states start chosen; settings and data never do.
+        // Only caches/logs start chosen; window state can contain persistent data.
         let byPlace = Dictionary(uniqueKeysWithValues: found.map { ($0.leftover.place, $0.kind.chosenByDefault) })
-        #expect(byPlace["Caches"] == true && byPlace["Saved Application State"] == true)
+        #expect(byPlace["Caches"] == true && byPlace["Saved Application State"] == false)
         #expect(byPlace["Preferences"] == false && byPlace["Application Support"] == false)
     }
 
@@ -84,6 +84,24 @@ import Testing
 }
 
 @Suite struct OrphanListingTests {
+    @Test func preparedOwnersPreserveCaseAndDotBoundaryProtection() {
+        let ids: Set<String> = ["Com.Synthetic.Editor", "net.tools.Viewer.Helper", "org.utility.Agent"]
+        let running: Set<String> = ["io.current.Player"]
+        let vendors: Set<String> = ["com.vendor"]
+        let owners = Orphans.Owners(vendors: vendors, running: running, claimedIDs: ids)
+        let candidates = ["com.synthetic.editor", "com.synthetic.editor.helper", "com.synthetic.editors",
+                          "net.tools.Viewer", "net.tools.View", "io.current.player", "io.current.player.agent",
+                          "io.current.players", "com.vendor.Unrelated", "org.absent.Editor", "org.utility.Agent"]
+        for candidate in candidates {
+            let lower = candidate.lowercased()
+            let legacy = vendors.contains(Orphans.vendor(candidate)) || running.union(ids).contains { id in
+                let id = id.lowercased()
+                return lower == id || lower.hasPrefix(id + ".") || id.hasPrefix(lower + ".")
+            }
+            #expect(owners.claims(candidate) == legacy)
+        }
+    }
+
     @Test func aHelperInAnotherNamespaceStillHasAnOwnerAndUnknownMetadataBlocksTheSearch() throws {
         let box = try Sandbox()
         for (path, id) in [("Applications/Viewer.app", "org.current.Viewer"),

@@ -1,7 +1,7 @@
 import Darwin
 import Foundation
 
-/// The deeper search for what an app left, which the user turns on: more
+/// The deeper search included in every app review: more
 /// is found, and less surely the app's, so nothing it finds is chosen.
 ///
 /// - The app's name, as letters and digits only and without a trailing
@@ -70,39 +70,53 @@ public enum DeepLeftovers {
     }
 
     public static func find(for app: AppBundle, home: String = Home.path, installed: [AppBundle], progress: ScanProgress = ScanProgress()) -> [Leftover] {
+        find(for: app, home: home, installed: installed, scan: LeftoverScan(progress: progress))
+    }
+
+    static func find(for app: AppBundle, home: String, installed: [AppBundle], scan: LeftoverScan) -> [Leftover] {
         guard !app.isProtected, let id = app.bundleID, AppLeftovers.isWellFormed(id), !id.lowercased().hasPrefix("com.apple."),
-            !installed.contains(where: { $0.path != app.path && $0.bundleID == id }) else { return [] }
+            !installed.contains(where: { $0.path != app.path && $0.bundleID?.caseInsensitiveCompare(id) == .orderedSame }) else { return [] }
         var out: [Leftover] = []
         func add(_ path: String, place: String) {
-            guard !progress.isCancelled, isStill(path, of: app, home: home, installed: installed), let m = AppLeftovers.measure(path, progress: progress) else { return }
+            guard !scan.shouldStop, isStill(path, of: app, home: home, installed: installed), let m = scan.measure(path) else { return }
             var l = Leftover(path: path, bytes: m, place: place)
             l.evidence = .loose
             out.append(l)
         }
         let lib = home + "/Library"
-        for place in places where !progress.isCancelled {
+        for place in places where !scan.shouldStop {
             let dir = lib + "/" + place
-            guard AppFinder.isRealFolder(dir), Trasher.noLinksBetween(home, and: dir) else { continue }
-            for entry in (try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? [] where !progress.isCancelled {
+            for entry in scan.names(dir, within: home, hidden: true) where !scan.shouldStop {
                 let p = dir + "/" + entry
                 if libraryMatch(entry, app: app, installed: installed) {
                     add(p, place: place)
                 } else if nested.contains(place), AppFinder.isRealFolder(p), !entry.lowercased().hasPrefix("com.apple.") {
-                    let entries = (try? FileManager.default.contentsOfDirectory(atPath: p)) ?? []
-                    for inner in entries where !progress.isCancelled && libraryMatch(inner, app: app, installed: installed) {
+                    let entries = scan.names(p, within: home, hidden: true)
+                    for inner in entries where !scan.shouldStop && libraryMatch(inner, app: app, installed: installed) {
                         add(p + "/" + inner, place: place)
                     }
                 }
             }
         }
-        for (folder, place) in homePlaces where !progress.isCancelled {
+        for (folder, place) in homePlaces where !scan.shouldStop {
             let dir = folder.isEmpty ? home : home + "/" + folder
             // Check parents before listing them, so a linked .config is not traversed.
-            guard AppFinder.isRealFolder(dir), Trasher.noLinksBetween(home, and: dir) else { continue }
-            let entries = (try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? []
-            for entry in entries where !progress.isCancelled && homeMatch(entry, hidden: folder.isEmpty, app: app, installed: installed) {
+            let entries = scan.names(dir, within: home, hidden: true)
+            for entry in entries where !scan.shouldStop && homeMatch(entry, hidden: folder.isEmpty, app: app, installed: installed) {
                 add(dir + "/" + entry, place: place)
             }
+        }
+        // Group names can hint at an older app identity even when its
+        // current signature cannot establish exclusive ownership. Discover
+        // these without teaching the removal gate to accept guessed groups.
+        let groups = lib + "/Group Containers"
+        for entry in scan.names(groups, within: home, hidden: true) where !scan.shouldStop {
+            guard let key = key(of: app), matches(entry, app: app, key: key, installed: installed),
+                  Trasher.noLinksBetween(home, and: groups + "/" + entry),
+                  let bytes = scan.measure(groups + "/" + entry) else { continue }
+            var item = Leftover(path: groups + "/" + entry, bytes: bytes, place: "Group Containers")
+            item.evidence = .unverified
+            out.append(item)
         }
         return out
     }
@@ -119,7 +133,7 @@ public enum DeepLeftovers {
     /// Checked again right before a move: by the same rules, with no link on the way.
     public static func isStill(_ path: String, of app: AppBundle, home: String, installed: [AppBundle]) -> Bool {
         guard !app.isProtected, let id = app.bundleID, AppLeftovers.isWellFormed(id), !id.lowercased().hasPrefix("com.apple."),
-            !installed.contains(where: { $0.path != app.path && $0.bundleID == id }),
+            !installed.contains(where: { $0.path != app.path && $0.bundleID?.caseInsensitiveCompare(id) == .orderedSame }),
             Trasher.isPlainPath(path), !Trasher.isProtected(path, home: home),
             path.hasPrefix(home + "/"), Trasher.noLinksBetween(home, and: path)
         else { return false }

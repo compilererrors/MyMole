@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Synchronization
 import Testing
@@ -117,6 +118,43 @@ import Testing
         #expect(DuplicateFinder.find(in: [box.path], minimum: 100_000, progress: stopped).groups.isEmpty)
     }
 
+    @Test func aLinkedSearchRootCannotReadItsDestination() throws {
+        let box = try Sandbox()
+        try box.file("Outside/a.bin", bytes: 150_000)
+        try copy(box, "Outside/a.bin", to: "Outside/b.bin")
+        try FileManager.default.createSymbolicLink(atPath: box.path + "/Alias", withDestinationPath: box.path + "/Outside")
+        let found = DuplicateFinder.find(in: [box.path + "/Alias"], minimum: 100_000)
+        #expect(found.groups.isEmpty)
+        #expect(found.unreadable == [box.path + "/Alias"])
+    }
+
+    @Test func progressAndVerifiedGroupsAreEmittedEvenForSmallSearches() throws {
+        let box = try Sandbox()
+        try box.file("Documents/a.bin", bytes: 150_000)
+        try copy(box, "Documents/a.bin", to: "Downloads/b.bin")
+        let steps = Mutex<[DuplicateStep]>([])
+        let groups = Mutex<[DuplicateGroup]>([])
+        let found = DuplicateFinder.find(in: [box.path], minimum: 100_000, workers: 1,
+            onGroup: { g in groups.withLock { $0.append(g) } }, onStep: { s in steps.withLock { $0.append(s) } })
+        #expect(groups.withLock { $0 } == found.groups)
+        #expect(steps.withLock { $0.first?.phase } == .listing)
+        #expect(steps.withLock { $0.contains { $0.phase == .listing && $0.done == 2 } })
+        #expect(steps.withLock { $0.last?.done } == 2)
+        #expect(steps.withLock { $0.last?.total } == 2)
+    }
+
+    @Test func explicitRootsCannotBypassLibraryDependencyAndRepositoryExclusions() throws {
+        let box = try Sandbox()
+        for path in ["Library.photoslibrary/originals", "site/node_modules/package", "site/PoDs/assets", "repo/assets"] {
+            try box.file(path + "/a.bin", bytes: 150_000)
+            try copy(box, path + "/a.bin", to: path + "/b.bin")
+        }
+        try box.folder("repo/.git")
+        let found = DuplicateFinder.find(in: [box.path + "/Library.photoslibrary/originals", box.path + "/site/node_modules/package", box.path + "/site/PoDs/assets", box.path + "/repo/assets"], minimum: 100_000)
+        #expect(found.groups.isEmpty && found.unreadable.isEmpty)
+        #expect(found.excluded.count == 4)
+    }
+
     @Test func aGroupNeverLosesItsLastCopy() throws {
         let box = try Sandbox()
         try box.file("Documents/a.bin", bytes: 200_000)
@@ -189,8 +227,25 @@ import Testing
         let steps = Mutex<[DuplicateStep]>([])
         _ = DuplicateFinder.find(in: [box.path], minimum: 100_000, workers: 1) { s in steps.withLock { $0.append(s) } }
         let comparing = steps.withLock { $0 }.filter { $0.phase == .comparing }
-        #expect(comparing.map(\.done) == Array(1...7))
+        #expect(comparing.map(\.done) == Array(0...7))
         #expect(comparing.allSatisfy { $0.total == 7 })
+    }
+
+    @Test(arguments: [8_192, 1_048_576 + 37])
+    func reusedContentBufferKeepsIndependentHashesAndTheFinalShortChunk(bytes: Int) throws {
+        let box = try Sandbox()
+        try box.folder("files")
+        let first = Data(repeating: 7, count: bytes)
+        var second = first
+        second[bytes / 2] ^= 1
+        for (name, data) in [("a", first), ("b", first), ("c", second), ("d", second)] {
+            try data.write(to: box.url.appending(path: "files/\(name).bin"))
+        }
+        let gold = Set([first, second].map { SHA256.hash(data: $0).map { String(format: "%02x", $0) }.joined() })
+        let found = DuplicateFinder.find(in: [box.path], minimum: 1, workers: 1)
+        #expect(found.groups.count == 2 && found.groups.allSatisfy { $0.files.count == 2 })
+        #expect(Set(found.groups.map(\.digest)) == gold)
+        #expect(found.unreadable.isEmpty && found.uncompared == 0)
     }
 
     @Test func aFileThatCantBeReadIsCountedAsNotCompared() throws {

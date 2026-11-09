@@ -197,6 +197,8 @@ private final class Walk: @unchecked Sendable {
         var entries: [Entry] = []
         let outcome = DirectoryReader.read(path, isCancelled: { progress.isCancelled }) { entries.append($0) }
         if outcome == .cancelled { return [] }
+        folder.riskListed = outcome == .ok
+        folder.ownRiskCode = PathRisk.merging(PathRisk.code(of: path), PathRisk.code(of: path + "/"))
         if outcome != .ok {
             folder.unreadable = true
             progress.deniedCounter.add(1, ordering: .relaxed)
@@ -209,12 +211,13 @@ private final class Walk: @unchecked Sendable {
         var files = 0
         var bytes: Int64 = 0
         for e in entries {
-            guard !progress.isCancelled else { break }
+            guard !progress.isCancelled else { folder.riskListed = false; break }
+            folder.ownRiskCode = PathRisk.merging(folder.ownRiskCode, PathRisk.childCode(e.name, in: path))
             switch e.kind {
             case .folder:
                 // Stay on one volume: mount points and other disks are skipped.
-                guard e.device == rootDevice else { continue }
-                if !skip.isEmpty, skip.contains(path == "/" ? "/" + e.name : path + "/" + e.name) { continue }
+                guard e.device == rootDevice else { folder.riskListed = false; continue }
+                if !skip.isEmpty, skip.contains(path == "/" ? "/" + e.name : path + "/" + e.name) { folder.riskListed = false; continue }
                 subs.append(
                     Folder(
                         name: e.name, parent: folder,

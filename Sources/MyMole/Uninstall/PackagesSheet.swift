@@ -35,7 +35,8 @@ struct PackagesSheet: View {
                     hiddenByDefault: [.location], titles: [.kind: String(localized: "What"), .modified: String(localized: "Installed")],
                     autosave: "packages.list", selection: $selection, marks: nil,
                     onOpen: { ids in FileActions.reveal(ids.compactMap { id in listing.packages.first { $0.id == id }?.path }) },
-                    menu: { ids in menu(listing.packages.filter { ids.contains($0.id) }) }
+                    menu: { ids in menu(listing.packages.filter { ids.contains($0.id) }) },
+                    filePaths: { ids in let wanted = Set(ids); return listing.packages.filter { wanted.contains($0.id) }.compactMap(\.path) }
                 )
                 .frame(height: 360)
             } else {
@@ -50,6 +51,8 @@ struct PackagesSheet: View {
         }
         .padding(DS.Space.xl)
         .frame(width: DS.Size.reviewWidth)
+        .dialogControls()
+        .dialogKeyboard()
         .task { listing = await Task.detached(priority: .userInitiated) { Packages.list() }.value }
     }
 
@@ -62,7 +65,7 @@ struct PackagesSheet: View {
 
     private func menu(_ chosen: [InstalledPackage]) -> [TableMenuEntry] {
         guard !chosen.isEmpty else { return [] }
-        var out: [TableMenuEntry] = [.action(String(localized: "Show in Finder")) { FileActions.reveal(chosen.map(\.path)) }]
+        var out = FileActions.menu(chosen.map(\.path), canOpen: false)
         let brew = chosen.filter { $0.source != .receipt }
         if !brew.isEmpty {
             out.append(.action(String(localized: "Copy Uninstall Command")) {

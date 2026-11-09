@@ -23,7 +23,8 @@ import Testing
         ] {
             try box.file(rel, bytes: 500)
         }
-        let found = AppLeftovers.find(for: editor, home: box.path, installed: [editor])
+        let identity = AppIdentity(groups: ["ABCDE12345.com.vendor.Editor", "group.com.vendor.Editor"])
+        let found = AppLeftovers.find(for: editor, home: box.path, installed: [editor], identity: identity)
         let rel = Set(found.map { String($0.path.dropFirst(box.path.count + "/Library/".count)) })
         #expect(rel == [
             "Logs/DiagnosticReports/Editor-2026-11-06-101112.ips", "Logs/DiagnosticReports/Editor_2026-11-06.crash",
@@ -31,9 +32,9 @@ import Testing
             "Application Support/com.apple.sharedfilelist/com.apple.LSSharedFileList.ApplicationRecentDocuments/com.vendor.editor.sfl3",
             "Application Scripts/ABCDE12345.com.vendor.Editor", "Application Scripts/group.com.vendor.Editor",
         ])
-        // Reports and lists are rebuilt: they start chosen.
-        #expect(found.filter { !$0.place.hasPrefix("Application Scripts") }.allSatisfy { $0.kind == .rebuildable })
-        for l in found { #expect(AppLeftovers.isStillLeftover(l.path, of: editor, home: box.path, installed: [editor])) }
+        #expect(found.filter { $0.place == "Logs/DiagnosticReports" }.allSatisfy { $0.kind == .rebuildable && !$0.chosenByDefault })
+        #expect(found.filter { $0.place == AppLeftovers.recentDocuments || $0.place == "Application Scripts" }.allSatisfy { !$0.chosenByDefault })
+        for l in found { #expect(AppLeftovers.isStillLeftover(l.path, of: editor, home: box.path, installed: [editor], identity: identity)) }
     }
 
     @Test func aNameAnotherAppHasMatchesNoReports() throws {
@@ -153,7 +154,7 @@ import Testing
         let by = Dictionary(uniqueKeysWithValues: found.map { (String($0.path.dropFirst(box.path.count + "/Library/".count)), $0) })
         // The profile: Chrome's own, in Google's folder; data, so not chosen. Its cache is.
         #expect(by["Application Support/Google/Chrome"]?.evidence == .vendorFolder && by["Application Support/Google/Chrome"]?.chosenByDefault == false)
-        #expect(by["Caches/Google/Chrome"]?.chosenByDefault == true)
+        #expect(by["Caches/Google/Chrome"]?.chosenByDefault == false)
         // Another Google product's folder is never Chrome's.
         #expect(by["Application Support/Google/Earth"] == nil)
         // Google's updater, for the last Google app: offered, never chosen.

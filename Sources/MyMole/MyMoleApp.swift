@@ -138,6 +138,7 @@ extension MyMoleApp {
 /// until its window is opened again or it's quit.
 final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
+        DialogKeyboardRegistry.shared.start()
         NSApp.servicesProvider = self
         if LoginItem.startsInMenuBar(openedAtLogin: LoginItem.wasOpenedAtLogin(), menuBar: MenuBarSettings.show()) {
             startInMenuBar()
@@ -280,11 +281,14 @@ struct RootView: View {
                     }
                 }
             }
-            .navigationSplitViewColumnWidth(min: 190, ideal: 210)
+            .navigationSplitViewColumnWidth(min: 210, ideal: 230, max: 320)
+            .focusSection()
             .safeAreaInset(edge: .top) { brandHeader }
             .safeAreaInset(edge: .bottom) { editionBadge }
+            .frame(minWidth: 210)
         } detail: {
             detail
+                .focusSection()
                 .background(palette.workspace.color)
                 .safeAreaInset(edge: .top, spacing: 0) {
                     if askMenuBar { MenuBarQuestion(asking: $askMenuBar) }
@@ -317,8 +321,9 @@ struct RootView: View {
         .toolbar(removing: .title)
         // Re-probe whenever the app comes forward — the user is most likely
         // returning from System Settings after granting access.
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+        .liveRefresh(every: .seconds(2), events: []) {
             app.recheckDiskAccess()
+            await app.diskAccess.job?.value
         }
         .task {
             app.openWindow = { openWindow(id: MyMoleApp.mainWindow) }
@@ -380,7 +385,7 @@ struct RootView: View {
     private var brandHeader: some View {
         HStack(spacing: DS.Space.sm) {
             AppIconImage(size: 30)
-            Text("MyMole").font(.title3.weight(.semibold))
+            Text("MyMole").font(.title3.weight(.semibold)).lineLimit(1).fixedSize(horizontal: true, vertical: false)
             Spacer()
         }
         .padding(.horizontal, DS.Space.md)
@@ -412,29 +417,36 @@ struct FullDiskAccessGate: View {
     var body: some View {
         CenterCard(
             symbol: "lock.shield",
-            title: "Allow Full Disk Access once",
+            title: "Allow Full Disk Access",
             subtitle:
-                "Cleaning and disk maps read your whole home folder, including other apps' data. Without Full Disk Access macOS asks again for every folder it protects. Turn on MyMole in System Settings → Privacy & Security → Full Disk Access — if it isn't listed, click + and pick MyMole.app. Nothing is scanned until then."
+                "MyMole needs access to protected folders to find caches, app leftovers and disk usage. Scanning waits until access is available."
         ) {
-            DSFlow(spacing: DS.Space.md) {
-                Button("Open System Settings") { FullDiskAccess.openSettings() }
-                    .primaryAction()
-                Button("Show MyMole.app") {
-                    NSWorkspace.shared.activateFileViewerSelecting([Bundle.main.bundleURL])
+            VStack(alignment: .leading, spacing: DS.Space.md) {
+                Text("In Privacy & Security → Full Disk Access, turn on this copy of MyMole. If it isn't listed, use + to add it. Show This Copy in Finder locates the app you're using now.")
+                    .font(.callout).fixedSize(horizontal: false, vertical: true)
+                Button { FullDiskAccess.openSettings() } label: {
+                    Text("Open System Settings").frame(maxWidth: .infinity)
                 }
+                .buttonStyle(.borderedProminent)
                 .controlSize(.large)
-                Button("Check Again") { app.recheckDiskAccess() }
-                    .controlSize(.large)
+                DSControlGrid(minimum: 200, spacing: DS.Space.sm) {
+                    Button {
+                        NSWorkspace.shared.activateFileViewerSelecting([Bundle.main.bundleURL])
+                    } label: { Text("Show This Copy in Finder").foregroundStyle(.primary).frame(maxWidth: .infinity, minHeight: 24) }
+                    Button { app.recheckDiskAccess() } label: { Text("Check Now").foregroundStyle(.primary).frame(maxWidth: .infinity, minHeight: 24) }
+                        .disabled(app.diskAccess.checking)
+                }
+                Label(app.diskAccess.checking ? String(localized: "Checking access…") : String(localized: "Checks automatically while this page is open"),
+                      systemImage: "arrow.trianglehead.2.clockwise")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("If macOS asks you to quit and reopen MyMole, follow that prompt. This page continues automatically when access is detected.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         // A switch turned on in System Settings is noticed while this shows,
         // without having to come back to MyMole first.
-        .task {
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(2))
-                app.recheckDiskAccess()
-            }
-        }
     }
 }

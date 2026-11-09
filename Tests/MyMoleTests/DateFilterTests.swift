@@ -14,6 +14,20 @@ import Testing
         #expect(DateFilter().matches(.now))
     }
 
+    @Test func customDatesAreVisibleAndSavedFiltersWithDifferentDatesKeepDifferentNames() {
+        let date = day(2026, 3, 10)
+        let first = DateFilter(preset: .before, start: date)
+        let second = DateFilter(preset: .before, start: day(2026, 4, 12))
+        #expect(first.summary.contains(date.formatted(date: .abbreviated, time: .omitted)))
+        #expect(SavedFilter.name(for: BrowseFilter(date: first)) != SavedFilter.name(for: BrowseFilter(date: second)))
+        #expect(DateFilter(preset: .between, start: date, end: second.start).summary
+            == DateFilter(preset: .between, start: second.start, end: date).summary)
+        var filter = BrowseFilter(query: "notes", date: first, wholeScan: true)
+        #expect(filter.criteriaCount == 2)
+        filter.clearCriteria()
+        #expect(!filter.isActive && filter.criteriaCount == 0 && filter.wholeScan)
+    }
+
     @Test func beforeAndAfterSplitAtStartOfDay() {
         var f = DateFilter(preset: .before, start: day(2026, 3, 10))
         #expect(f.matches(day(2026, 3, 9, 23)))

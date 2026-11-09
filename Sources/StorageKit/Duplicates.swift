@@ -79,22 +79,31 @@ public struct DuplicateListing: Sendable {
     /// Files that couldn't be read through, or changed while they were
     /// compared: whether they have copies isn't known.
     public var uncompared: Int
+    /// Explicitly requested roots excluded by the library/project safety policy.
+    public var excluded: [String]
 
-    public init(groups: [DuplicateGroup], unreadable: [String] = [], uncompared: Int = 0) {
+    public init(groups: [DuplicateGroup], unreadable: [String] = [], uncompared: Int = 0, excluded: [String] = []) {
         self.groups = groups
         self.unreadable = unreadable
         self.uncompared = uncompared
+        self.excluded = excluded
     }
 }
 
 /// How far a search for duplicates has come.
 public struct DuplicateStep: Sendable, Equatable {
-    public enum Phase: Sendable { case listing, comparing }
+    public enum Phase: Sendable { case waiting, listing, comparing }
 
     public let phase: Phase
     /// Files looked at while listing; files compared of all to compare after.
     public let done: Int
     public let total: Int
+
+    public init(phase: Phase, done: Int, total: Int) {
+        self.phase = phase
+        self.done = done
+        self.total = total
+    }
 }
 
 /// Finds files with the same content in the user's own folders. Files are
@@ -122,11 +131,12 @@ public enum DuplicateFinder {
         "sparsebundle", "rtfd", "pages", "numbers", "key", "lproj", "pkg", "mpkg", "download",
     ]
     /// Folders tools fill with copies on purpose.
-    static let toolFolders: Set<String> = ["node_modules", "Pods", "DerivedData", "bower_components", "__pycache__", "venv", "site-packages", "vendor"]
+    static let toolFolders: Set<String> = ["node_modules", "pods", "deriveddata", "bower_components", "__pycache__", "venv", "site-packages", "vendor"]
 
-    /// The user's own document folders, where they exist.
+    /// Requested document folders, resolved without disk reads. Access may
+    /// be granted after model initialization; missing folders are skipped by the walk.
     public static func standardRoots(home: String) -> [String] {
-        ["Desktop", "Documents", "Downloads", "Movies", "Music", "Pictures"].map { home + "/" + $0 }.filter(isFolder)
+        ["Desktop", "Documents", "Downloads", "Movies", "Music", "Pictures"].map { home + "/" + $0 }
     }
 
     struct Found {
@@ -148,21 +158,34 @@ public enum DuplicateFinder {
         in roots: [String], minimum: Int64 = standardMinimum, progress: ScanProgress = ScanProgress(), workers: Int = 4,
         onStep: (@Sendable (DuplicateStep) -> Void)? = nil
     ) -> DuplicateListing {
+        find(in: roots, minimum: minimum, progress: progress, workers: workers, onGroup: nil, onStep: onStep)
+    }
+
+    public static func find(
+        in roots: [String], minimum: Int64 = standardMinimum, progress: ScanProgress = ScanProgress(), workers: Int = 4,
+        onGroup: (@Sendable (DuplicateGroup) -> Void)?, onStep: (@Sendable (DuplicateStep) -> Void)?
+    ) -> DuplicateListing {
         var unreadable: [String] = []
+        var excluded: [String] = []
         var seen = Set<FileID>()
         var bySize: [Int64: [Found]] = [:]
         var looked = 0
+        onStep?(DuplicateStep(phase: .listing, done: 0, total: 0))
         // A root inside another is walked once, as part of it.
         let outer = Trasher.outermost(roots.filter(Trasher.isPlainPath))
         for root in outer where !progress.isCancelled {
+            guard !excludedRoot(root) else { excluded.append(root); continue }
             walk(root, minimum: minimum, progress: progress, seen: &seen, unreadable: &unreadable) { f in
                 bySize[f.length, default: []].append(f)
                 looked += 1
                 if looked % 2_000 == 0 { onStep?(DuplicateStep(phase: .listing, done: looked, total: 0)) }
             }
+            onStep?(DuplicateStep(phase: .listing, done: looked, total: 0))
         }
+        guard !progress.isCancelled else { return DuplicateListing(groups: [], unreadable: unreadable.sorted(), excluded: excluded.sorted()) }
         let sameLength = bySize.values.filter { $0.count > 1 }
         let total = sameLength.reduce(0) { $0 + $1.count }
+        onStep?(DuplicateStep(phase: .comparing, done: 0, total: total))
         let counter = Atomic<Int>(0)
         let missed = Atomic<Int>(0)
         let groups = Mutex<[DuplicateGroup]>([])
@@ -171,7 +194,7 @@ public enum DuplicateFinder {
             while !progress.isCancelled {
                 let i = next.add(1, ordering: .relaxed).oldValue
                 guard i < sameLength.count else { return }
-                let made = compare(sameLength[i], progress: progress, missed: { missed.add(1, ordering: .relaxed) }) {
+                let made = compare(sameLength[i], progress: progress, missed: { missed.add(1, ordering: .relaxed) }, onGroup: onGroup) {
                     let done = counter.add(1, ordering: .relaxed).newValue
                     onStep?(DuplicateStep(phase: .comparing, done: min(done, total), total: total))
                 }
@@ -179,12 +202,28 @@ public enum DuplicateFinder {
             }
         }
         let sorted = groups.withLock { $0 }.sorted { $0.spare != $1.spare ? $0.spare > $1.spare : $0.digest < $1.digest }
-        return DuplicateListing(groups: sorted, unreadable: unreadable.sorted(), uncompared: missed.load(ordering: .relaxed))
+        return DuplicateListing(groups: sorted, unreadable: unreadable.sorted(), uncompared: missed.load(ordering: .relaxed), excluded: excluded.sorted())
     }
 
     struct FileID: Hashable {
         let device: Int32
         let inode: UInt64
+    }
+
+    /// An explicitly chosen root must obey the same exclusions as a child.
+    /// Choosing a subfolder mustn't bypass a library, dependency or repository boundary.
+    private static func excludedRoot(_ path: String) -> Bool {
+        let components = path.split(separator: "/").map(String.init)
+        if components.contains(where: {
+            $0.hasPrefix(".") || packages.contains(($0 as NSString).pathExtension.lowercased()) || toolFolders.contains($0.lowercased())
+        }) { return true }
+        var directory = path
+        while directory != "/", !directory.isEmpty {
+            var st = stat()
+            if lstat(directory + "/.git", &st) == 0 { return true }
+            directory = (directory as NSString).deletingLastPathComponent
+        }
+        return false
     }
 
     /// Every file worth comparing under `root`, depth first, without
@@ -196,24 +235,43 @@ public enum DuplicateFinder {
     ) {
         var stack = [root]
         while let dir = stack.popLast(), !progress.isCancelled {
-            guard let d = opendir(dir) else {
+            var st = stat()
+            guard lstat(dir, &st) == 0 else {
                 if errno != ENOENT && errno != ENOTDIR { unreadable.append(dir) }
+                continue
+            }
+            guard st.st_mode & S_IFMT == S_IFDIR else { unreadable.append(dir); continue }
+            guard let opened = Trasher.openFolder(dir, creating: false) else {
+                unreadable.append(dir)
+                continue
+            }
+            guard let d = fdopendir(opened) else {
+                close(opened)
+                unreadable.append(dir)
                 continue
             }
             defer { closedir(d) }
             let fd = dirfd(d)
-            var st = stat()
             // A folder that's a Git repository holds copies that belong there.
-            if dir != root, fstatat(fd, ".git", &st, AT_SYMLINK_NOFOLLOW) == 0 { continue }
-            while !progress.isCancelled, let e = readdir(d) {
+            if fstatat(fd, ".git", &st, AT_SYMLINK_NOFOLLOW) == 0 { continue }
+            while !progress.isCancelled {
+                errno = 0
+                guard let e = readdir(d) else {
+                    if errno != 0 { unreadable.append(dir) }
+                    break
+                }
                 let name = withUnsafePointer(to: &e.pointee.d_name) {
                     $0.withMemoryRebound(to: CChar.self, capacity: Int(MAXPATHLEN)) { String(cString: $0) }
                 }
-                guard !name.hasPrefix("."), fstatat(fd, name, &st, AT_SYMLINK_NOFOLLOW) == 0 else { continue }
+                guard !name.hasPrefix(".") else { continue }
+                guard fstatat(fd, name, &st, AT_SYMLINK_NOFOLLOW) == 0 else {
+                    unreadable.append(dir + "/" + name)
+                    continue
+                }
                 switch st.st_mode & S_IFMT {
                 case S_IFDIR:
                     let ext = (name as NSString).pathExtension.lowercased()
-                    if !packages.contains(ext), !toolFolders.contains(name) { stack.append(dir + "/" + name) }
+                    if !packages.contains(ext), !toolFolders.contains(name.lowercased()) { stack.append(dir + "/" + name) }
                 case S_IFREG:
                     // Not downloaded: its content is in the cloud, and reading it would fetch it.
                     guard st.st_size >= minimum, st.st_flags & UInt32(SF_DATALESS) == 0,
@@ -234,7 +292,7 @@ public enum DuplicateFinder {
     /// full SHA-256 decides. `counted` is called once a file is settled:
     /// unlike every other, or read whole.
     static func compare(
-        _ files: [Found], progress: ScanProgress, missed: () -> Void = {}, counted: () -> Void
+        _ files: [Found], progress: ScanProgress, missed: () -> Void = {}, onGroup: ((DuplicateGroup) -> Void)? = nil, counted: () -> Void
     ) -> [DuplicateGroup] {
         var bySample: [SHA256.Digest: [Found]] = [:]
         var buffer = [UInt8](repeating: 0, count: sample)
@@ -249,12 +307,16 @@ public enum DuplicateFinder {
         }
         for candidates in bySample.values where candidates.count == 1 { counted() }
         var out: [DuplicateGroup] = []
+        // One bounded scratch buffer for the whole size group, allocated
+        // only if full comparison is needed. Small files don't need 1 MiB each.
+        var contents: [UInt8] = []
         for candidates in bySample.values where candidates.count > 1 {
             var byDigest: [String: [Found]] = [:]
             for f in candidates {
                 guard !progress.isCancelled else { return [] }
                 defer { counted() }
-                guard let d = digest(f, progress: progress) else {
+                if contents.isEmpty { contents = readBuffer(for: f) }
+                guard let d = digest(f, progress: progress, buffer: &contents) else {
                     if !progress.isCancelled { missed() }
                     continue
                 }
@@ -262,11 +324,13 @@ public enum DuplicateFinder {
             }
             for (d, same) in byDigest where same.count > 1 {
                 let ordered = same.sorted { $0.modified != $1.modified ? $0.modified < $1.modified : $0.path < $1.path }
-                out.append(DuplicateGroup(
+                let group = DuplicateGroup(
                     length: ordered[0].length, bytes: ordered.map(\.bytes).min() ?? 0, digest: d,
                     files: ordered.map {
                         DuplicateFile(path: $0.path, modified: $0.modified, inode: $0.inode, device: $0.device, cloneID: FileSpace.cloneID($0.path))
-                    }))
+                    })
+                out.append(group)
+                onGroup?(group)
             }
         }
         return out
@@ -276,7 +340,9 @@ public enum DuplicateFinder {
     /// still the file that was listed: the same volume, file number, length
     /// and last change.
     private static func open(_ f: Found) -> Int32? {
-        let fd = Darwin.open(f.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard let parent = Trasher.openFolder((f.path as NSString).deletingLastPathComponent, creating: false) else { return nil }
+        let fd = openat(parent, (f.path as NSString).lastPathComponent, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        close(parent)
         guard fd >= 0 else { return nil }
         guard isListed(fd, f) else {
             close(fd)
@@ -311,14 +377,22 @@ public enum DuplicateFinder {
     /// SHA-256 of the whole file; nil when it can't be read to its end,
     /// changed while it was read, or the search was stopped.
     static func digest(_ f: Found, progress: ScanProgress = ScanProgress()) -> String? {
+        var buffer = readBuffer(for: f)
+        return digest(f, progress: progress, buffer: &buffer)
+    }
+
+    private static func readBuffer(for file: Found) -> [UInt8] {
+        [UInt8](repeating: 0, count: Int(max(1, min(Int64(chunk), file.length))))
+    }
+
+    private static func digest(_ f: Found, progress: ScanProgress, buffer: inout [UInt8]) -> String? {
         guard let fd = open(f) else { return nil }
         defer { close(fd) }
         var hash = SHA256()
-        var buffer = [UInt8](repeating: 0, count: chunk)
         var read: Int64 = 0
         while read < f.length {
             guard !progress.isCancelled else { return nil }
-            let n = Darwin.read(fd, &buffer, chunk)
+            let n = Darwin.read(fd, &buffer, buffer.count)
             guard n > 0 else { return nil }
             buffer.withUnsafeBytes { hash.update(bufferPointer: UnsafeRawBufferPointer(rebasing: $0[..<n])) }
             read += Int64(n)
@@ -326,11 +400,6 @@ public enum DuplicateFinder {
         // Rewritten while it was read: what was hashed isn't what's there.
         guard isListed(fd, f) else { return nil }
         return hash.finalize().map { String(format: "%02x", $0) }.joined()
-    }
-
-    private static func isFolder(_ path: String) -> Bool {
-        var st = stat()
-        return lstat(path, &st) == 0 && st.st_mode & S_IFMT == S_IFDIR
     }
 
     /// Whether the file at `path` is still the one that was compared: the

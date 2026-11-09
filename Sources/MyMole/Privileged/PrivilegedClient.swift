@@ -138,6 +138,36 @@ final class PrivilegedClient {
         return r
     }
 
+    func trashApplication(_ app: AppBundle, source: RemovedApp.Source) async throws -> ApplicationTrash.Receipt? {
+        #if !APPSTORE
+        guard let request = await Task.detached(priority: .userInitiated, operation: {
+            ApplicationTrash.Request.capture(app, source: source)
+        }).value else { return nil }
+        let reply = try await run(.applicationTrash(request, restoring: false),
+            prompt: String(localized: "MyMole needs administrator approval to stop \(app.name)'s bundled background agents and move the app to your Trash."))
+        guard case .applicationTrash(let receipt) = reply, receipt.request == request,
+              receipt.record.original.path == app.path else {
+            throw Failure.failed(String(localized: "The app move could not be verified."))
+        }
+        return receipt
+        #else
+        return nil
+        #endif
+    }
+
+    func restoreApplication(_ receipt: ApplicationTrash.Receipt) async throws -> Bool {
+        #if !APPSTORE
+        let reply = try await run(.applicationTrash(receipt.request, restoring: true),
+            prompt: String(localized: "MyMole needs administrator approval to restore the app from your Trash."))
+        guard case .applicationTrash(let restored) = reply, restored == receipt else {
+            throw Failure.failed(String(localized: "The app restore could not be verified."))
+        }
+        return true
+        #else
+        return false
+        #endif
+    }
+
     private func run(_ request: PrivilegedRequest, prompt: String) async throws -> PrivilegedReply {
         guard let tool = toolPath else { throw Failure.unavailable }
         guard !busy else { throw Failure.busy }
@@ -168,6 +198,7 @@ final class PrivilegedClient {
             throw Failure.failed(String(localized: "The privileged tool didn't finish (code \(code))."))
         }
         if case .refused(let why) = reply { throw Failure.refused(why) }
+        if case .applicationTrashRefusal(let failure) = reply { throw failure }
         return reply
     }
 
@@ -224,6 +255,7 @@ extension PrivilegedClient {
         else { return nil }
         let paths: [String]
         switch envelope.request {
+        case .applicationTrash: return (0, PrivilegedTool.output(.refused("The synthetic administrator operation was cancelled.")))
         case .removeSystem(let p, _), .removeLeftovers(let p, _, _): paths = p
         case .maintenance(let tasks, _):
             let reports = tasks.compactMap(MaintenanceTask.init(rawValue:)).map { TaskReport($0, .failed, String(localized: "Stood in for by the smoke test.")) }

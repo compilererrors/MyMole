@@ -18,7 +18,7 @@ enum FullDiskAccess {
     private static let log = Logger(subsystem: "com.viktornyberg.mymole", category: "access")
 
     /// Granted, refused, or not known: none of the probes said either way.
-    enum State: Equatable {
+    enum State: Equatable, Sendable {
         case granted, denied, unknown
     }
 

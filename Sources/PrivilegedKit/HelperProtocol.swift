@@ -19,6 +19,9 @@ public enum PrivilegedRequest: Codable, Sendable, Equatable {
     /// What an uninstalled app left system-wide, checked against
     /// `SystemLeftovers` for `appID` and `ids` again.
     case removeLeftovers(paths: [String], appID: String, ids: [String])
+    /// Exactly one verified app, moved between Applications and the active
+    /// user's private Trash. No permanent deletion or arbitrary destination.
+    case applicationTrash(ApplicationTrash.Request, restoring: Bool)
 }
 
 /// A request and the version of the tool it was written for.
@@ -37,12 +40,14 @@ public enum PrivilegedReply: Codable, Sendable, Equatable {
     case reports([TaskReport])
     case removal(RemovalReport)
     case refused(String)
+    case applicationTrash(ApplicationTrash.Receipt)
+    case applicationTrashRefusal(ApplicationTrash.Failure)
 }
 
 public enum PrivilegedTool {
     /// The tool and the app ship in one bundle; a mismatch means a tool from
     /// another build was asked, which is refused.
-    public static let version = "5"
+    public static let version = "7"
     public static let name = "MyMoleHelper"
 
     /// The command-line argument for `envelope`.
@@ -81,6 +86,10 @@ public enum PrivilegedTool {
             return .removal(SystemCleanRules.remove(paths, keep: CleanKeepList(paths: Set(keep))))
         case .removeLeftovers(let paths, let appID, let ids):
             return .removal(SystemLeftovers.remove(paths, appID: appID, ids: ids, runner: runner))
+        case .applicationTrash(let request, let restoring):
+            do { return .applicationTrash(try ApplicationTrash.move(request, restoring: restoring)) }
+            catch let failure as ApplicationTrash.Failure { return .applicationTrashRefusal(failure) }
+            catch { return .refused(error.localizedDescription) }
         }
     }
 

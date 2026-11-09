@@ -173,18 +173,21 @@ struct DSNotice<Actions: View>: View {
     }
 
     var body: some View {
-        HStack(alignment: .center, spacing: DS.Space.md) {
-            Group {
-                if kind == .working {
-                    PulseDot(tint: tint)
-                } else {
-                    Image(systemName: symbol).foregroundStyle(tint)
+        DSActionGroup {
+            HStack(alignment: .center, spacing: DS.Space.md) {
+                Group {
+                    if kind == .working {
+                        PulseDot(tint: tint)
+                    } else {
+                        Image(systemName: symbol).foregroundStyle(tint)
+                    }
                 }
+                .frame(width: DS.Size.iconColumn)
+                DSText(phrase: text, .body)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .frame(width: DS.Size.iconColumn)
-            DSText(phrase: text, .body)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            actions.controlSize(.small).fixedSize()
+        } trailing: {
+            actions.controlSize(.small)
         }
         .padding(.horizontal, DS.Space.md)
         .padding(.vertical, DS.Space.sm + 2)
@@ -460,15 +463,23 @@ struct DSFlow: Layout {
     var alignsToTop = false
     var alignsToTrailing = false
 
+    private func sizes(_ subviews: Subviews, width: CGFloat?) -> [CGSize] {
+        subviews.map { view in
+            let ideal = view.sizeThatFits(.unspecified)
+            guard let width, width.isFinite, ideal.width > width else { return ideal }
+            return view.sizeThatFits(.init(width: max(0, width), height: nil))
+        }
+    }
+
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        let rows = Self.rows(subviews.map { $0.sizeThatFits(.unspecified) }, width: proposal.width ?? .infinity, spacing: spacing)
+        let rows = Self.rows(sizes(subviews, width: proposal.width), width: proposal.width ?? .infinity, spacing: spacing)
         let width = rows.map(\.width).max() ?? 0
         let height = rows.map(\.height).reduce(0, +) + spacing * CGFloat(max(0, rows.count - 1))
         return CGSize(width: proposal.width.map { min($0, width) } ?? width, height: height)
     }
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        let sizes = subviews.map { $0.sizeThatFits(.unspecified) }
+        let sizes = sizes(subviews, width: bounds.width)
         var y = bounds.minY
         for row in Self.rows(sizes, width: bounds.width, spacing: spacing) {
             var x = alignsToTrailing ? bounds.maxX - row.width : bounds.minX

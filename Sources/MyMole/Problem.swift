@@ -15,7 +15,7 @@ enum Links {
 /// error, a code to quote when asking for help. The code holds nothing
 /// personal (see `ErrorCode`); the message may name a file, so only the code
 /// is ever copied.
-struct Problem: Equatable, CustomStringConvertible {
+struct Problem: Equatable, CustomStringConvertible, Sendable, Error {
     let text: String
     let code: ErrorCode?
 
@@ -44,13 +44,17 @@ struct CopyErrorCodeButton: View {
     var body: some View {
         if let code {
             Button("Copy Error Code") {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(Self.report(code), forType: .string)
+                Self.copy(code)
             }
             .help("Copies \(code.description) and MyMole's version, to quote when asking for help. No file names or paths are included.")
-            Link("Get Help", destination: Links.support)
+            Button("Get Help") { NSWorkspace.shared.open(Links.support) }
                 .help("Opens support in your browser. Paste the copied error code there.")
         }
+    }
+
+    static func copy(_ code: ErrorCode) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(report(code), forType: .string)
     }
 
     /// In English whatever the interface's language: it's read by support.

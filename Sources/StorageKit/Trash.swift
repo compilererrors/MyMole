@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 
 /// Where an item went, so it can be put back.
-public struct TrashRecord: Sendable, Hashable {
+public struct TrashRecord: Sendable, Hashable, Codable {
     public let original: URL
     public let trashed: URL
 
@@ -61,6 +61,22 @@ public struct TrashBackend: Sendable {
         }
     }
 
+    /// The coordinator supplies a checked URL, retaining any Powerbox grant.
+    /// This backend uses ordinary permissions and never deletes permanently.
+    public static func systemOutcome(for source: URL, area: ErrorCode.Area) -> TrashOutcome {
+        var result: NSURL?
+        do {
+            try FileManager.default.trashItem(at: source, resultingItemURL: &result)
+            guard let result else {
+                return TrashOutcome(moved: [], failed: [(source.path, "The Trash didn't say where it went.")])
+            }
+            return TrashOutcome(moved: [TrashRecord(original: source, trashed: result as URL)], failed: [])
+        } catch {
+            return TrashOutcome(moved: [], failed: [(source.path, error.localizedDescription)],
+                                failureInfo: [source.path: .init(error, area: area)])
+        }
+    }
+
     /// Moves items into `dir`, which must be on the same volume, each under
     /// a name of its own.
     /// Where the app's moves go: the Trash. The UI smoke test's own build
@@ -83,12 +99,46 @@ public struct TrashBackend: Sendable {
 }
 
 public struct TrashOutcome: Sendable {
+    public struct FailureInfo: Sendable, Equatable {
+        public let code: ErrorCode
+        public let permissionDenied: Bool
+
+        public init(_ error: any Error, area: ErrorCode.Area) {
+            code = ErrorCode(area, error)
+            var current: NSError? = error as NSError
+            var denied = false
+            for _ in 0..<8 {
+                guard let error = current else { break }
+                if error.domain == NSCocoaErrorDomain {
+                    denied = denied || error.code == NSFileWriteNoPermissionError || error.code == NSFileReadNoPermissionError
+                } else if error.domain == NSPOSIXErrorDomain {
+                    denied = denied || error.code == Int(EACCES) || error.code == Int(EPERM)
+                } else if error.domain == NSOSStatusErrorDomain {
+                    // permErr and afpAccessDenied can be returned by native
+                    // recycling without a wrapping Cocoa/POSIX error.
+                    denied = denied || error.code == -54 || error.code == -5000
+                }
+                current = error.userInfo[NSUnderlyingErrorKey] as? NSError
+            }
+            permissionDenied = denied
+        }
+    }
+
     public let moved: [TrashRecord]
     public let failed: [(path: String, reason: String)]
+    /// Optional platform diagnostics, restricted to entries that actually failed.
+    public let failureInfo: [String: FailureInfo]
 
-    public init(moved: [TrashRecord], failed: [(path: String, reason: String)]) {
+    public init(moved: [TrashRecord], failed: [(path: String, reason: String)], failureInfo: [String: FailureInfo] = [:]) {
         self.moved = moved
         self.failed = failed
+        guard !failureInfo.isEmpty else {
+            self.failureInfo = [:]
+            return
+        }
+        let failedPaths = Set(failed.map(\.path))
+        let movedPaths = Set(moved.map(\.original.path))
+        self.failureInfo = failureInfo.filter { failedPaths.contains($0.key) && !movedPaths.contains($0.key) }
     }
 }
 
@@ -246,13 +296,17 @@ public enum Trasher {
 
     /// The entry at `path` as the file system names it: kind, volume and
     /// file number. Nil when there's nothing there.
-    struct Identity: Equatable {
-        let type: mode_t
-        let device: dev_t
-        let inode: ino_t
+    public struct Identity: Equatable, Sendable, Codable {
+        public let type: mode_t
+        public let device: dev_t
+        public let inode: ino_t
+
+        public init(type: mode_t, device: dev_t, inode: ino_t) {
+            self.type = type; self.device = device; self.inode = inode
+        }
     }
 
-    static func identity(of path: String) -> Identity? {
+    public static func identity(of path: String) -> Identity? {
         var st = stat()
         guard lstat(path, &st) == 0 else { return nil }
         return Identity(type: st.st_mode & S_IFMT, device: st.st_dev, inode: st.st_ino)

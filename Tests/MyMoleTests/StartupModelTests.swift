@@ -1,5 +1,6 @@
 import Foundation
 import StorageKit
+import Synchronization
 import Testing
 
 @testable import MyMole
@@ -29,6 +30,47 @@ import Testing
             m.protections = UserProtections(root: root.appending(path: "lists"))
             return m
         }
+    }
+
+    @Test func loadedJobStatusUpdatesIndependentlyWithoutResettingChoicesOrReloadingFiles() async throws {
+        let box = Box()
+        try box.agent("home/Library/LaunchAgents/com.example.worker.plist", label: "com.example.worker", program: "/synthetic/worker")
+        let model = box.model()
+        let state = Mutex<[String: LaunchdStatus.State]?>(["com.example.worker": .loaded])
+        model.readLive = { state.withLock { $0 } }
+        model.load()
+        await model.job?.value
+        let date = model.loadedAt
+        let path = try #require(model.items.first?.path)
+        model.toggle(path)
+        state.withLock { $0 = ["com.example.worker": .running(pid: 42)] }
+        await model.refreshLive()
+        #expect(model.live?["com.example.worker"] == .running(pid: 42))
+        #expect(model.loadedAt == date && model.chosen == [path])
+        state.withLock { $0 = nil }
+        await model.refreshLive()
+        #expect(model.live == nil && model.chosen == [path])
+    }
+
+    @Test func aSlowEarlierStatusReadCannotReplaceANewerAnswer() async throws {
+        let box = Box()
+        let model = box.model()
+        let entered = Mutex(false)
+        let release = DispatchSemaphore(value: 0)
+        defer { release.signal() }
+        model.readLive = {
+            entered.withLock { $0 = true }
+            _ = release.wait(timeout: .now() + 3)
+            return ["com.example.worker": .loaded]
+        }
+        let earlier = Task { await model.refreshLive() }
+        for _ in 0..<200 where !entered.withLock({ $0 }) { try await Task.sleep(for: .milliseconds(5)) }
+        try #require(entered.withLock { $0 })
+        model.readLive = { ["com.example.worker": .running(pid: 42)] }
+        await model.refreshLive()
+        release.signal()
+        await earlier.value
+        #expect(model.live?["com.example.worker"] == .running(pid: 42))
     }
 
     @Test func onlyTheUsersOwnAgentsCanBeChosenAndMovedAndUndoPutsThemBack() async throws {

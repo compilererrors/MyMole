@@ -4,8 +4,8 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 /// What removed apps left in the Library, opened from Uninstall. Searched
-/// against a fresh metadata inventory; caches and window states start
-/// chosen, settings and data stay unless the user picks them.
+/// against a fresh metadata inventory; only caches and logs start
+/// chosen. Settings, saved state and data need an explicit choice.
 struct OrphansSheet: View {
     @Bindable var model: OrphansModel
     let apps: AppsModel
@@ -13,28 +13,34 @@ struct OrphansSheet: View {
     @State private var confirm = false
     @State private var query = ""
     @State private var kind = -1
-    @State private var filtered = OffMain<[Orphan]>([])
+    @State private var filtered = OffMain<[FileRow]>([])
     @State private var removed: RemovedApp?
     @State private var access: RemovedAppAccess?
     @State private var choosing = false
     @State private var chooseProblem: String?
 
     private struct Search: Hashable {
-        let items: [Orphan]
+        let revision: UInt64
         let query: String
         let kind: Int
+    }
+    @State private var presentedSearch: Search?
+    private var search: Search { Search(revision: model.presentationRevision, query: query, kind: kind) }
+    private var visible: [FileRow] { filtered.value }
 
-        func matches() -> [Orphan] {
-            let prepared = TextQuery(query)
-            return items.filter {
-                (kind == -1 || $0.kind.rawValue == kind)
-                    && prepared.matches($0.bundleID, $0.leftover.name, $0.path, $0.leftover.place)
-            }
+    nonisolated static func project(_ items: [Orphan], keep: SharedKeep, query: String, kind: Int) -> [FileRow] {
+        let prepared = TextQuery(query)
+        return items.compactMap { orphan in
+            guard (kind == -1 || orphan.kind.rawValue == kind),
+                  prepared.matches(orphan.bundleID, orphan.leftover.name, orphan.path, orphan.leftover.place) else { return nil }
+            var row = FileRow(id: orphan.path, name: orphan.leftover.name, size: orphan.bytes,
+                              kind: "\(orphan.kind.title) · \(orphan.leftover.place)",
+                              location: (orphan.path as NSString).deletingLastPathComponent,
+                              symbol: "folder.badge.questionmark", subtitle: orphan.bundleID)
+            keep.mark(&row)
+            return row
         }
     }
-
-    private var search: Search { Search(items: model.items, query: query, kind: kind) }
-    private var visible: [Orphan] { model.items.count <= OffMain<[Orphan]>.inline ? search.matches() : filtered.value }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -58,27 +64,35 @@ struct OrphansSheet: View {
                             "\(model.unreadable.count) folder\(model.unreadable.count == 1 ? "" : "s") in your Library couldn't be read, so what's in \(model.unreadable.count == 1 ? "it" : "them") isn't listed: \(model.unreadable.map { ($0 as NSString).abbreviatingWithTildeInPath }.joined(separator: ", "))."
                         )
                     }
-                    DSControlBar("Find old app files", detail: "Search the results by app ID, file name or folder. Settings and data are never chosen automatically.") {
-                        DSControlField("Search leftovers") {
-                            DSFilterField(String(localized: "App ID, name or folder"), text: $query).frame(width: 260)
-                        }
-                        DSControlField("File type") {
-                            Picker("File type", selection: $kind) {
-                                Text("All types").tag(-1)
-                                Text("Caches and logs").tag(Leftover.Kind.rebuildable.rawValue)
-                                Text("App components").tag(Leftover.Kind.appPart.rawValue)
-                                Text("Settings").tag(Leftover.Kind.settings.rawValue)
-                                Text("App data").tag(Leftover.Kind.data.rawValue)
-                            }.labelsHidden().fixedSize()
-                        }
-                        DSControlField("Refresh results") {
+                    VStack(alignment: .leading, spacing: DS.Space.sm) {
+                        HStack(spacing: DS.Space.sm) {
+                            DSFilterField(String(localized: "App ID, name or folder"), text: $query).frame(minWidth: 160, maxWidth: .infinity)
+                            DSFilterButton("Filter leftover files", detail: "Narrow the leftovers listed below by category. This does not run another search or change your removal choices.",
+                                           count: (query.isEmpty ? 0 : 1) + (kind == -1 ? 0 : 1), clear: { query = ""; kind = -1 }) {
+                                DSControlField("Leftover category") {
+                                    Picker("Leftover category", selection: $kind) {
+                                        Text("All Categories").tag(-1)
+                                        Text("Caches and logs").tag(Leftover.Kind.rebuildable.rawValue)
+                                        Text("App components").tag(Leftover.Kind.appPart.rawValue)
+                                        Text("Settings").tag(Leftover.Kind.settings.rawValue)
+                                        Text("App data").tag(Leftover.Kind.data.rawValue)
+                                    }.labelsHidden().frame(maxWidth: .infinity, alignment: .leading)
+                                }
+                            }
+                            TableColumnsButton(scope: "uninstall.orphans").fixedSize()
                             if model.loading { Button("Stop") { model.stop() } }
                             else { Button("Scan Again") { model.load() }.disabled(model.trashing) }
+                        }
+                        if kind != -1 {
+                            DSFilterChip(title: String(localized: "Category: \(Leftover.Kind(rawValue: kind)?.title ?? String(localized: "All types"))")) { kind = -1 }
                         }
                     }
                     HStack {
                         DSText("\(visible.count) of \(model.items.count) found · choices include hidden results", .metadata)
                         Spacer()
+                        if let at = model.loadedAt {
+                            DSCapsule("Scanned \(at.formatted(.relative(presentation: .named)))", symbol: "clock")
+                        }
                         if model.loading || choosing || filtered.working { ProgressView().controlSize(.small) }
                     }
                     content
@@ -102,6 +116,7 @@ struct OrphansSheet: View {
                 Button("Close") { dismiss() }
                     .controlSize(.large)
                     .keyboardShortcut(.cancelAction)
+                    .disabled(model.trashing || apps.uninstalling)
                 Button(model.trashing ? String(localized: "Moving…") : String(localized: "Move to Trash…")) { confirm = true }
                     .primaryAction()
                     .disabled(model.trashBlocker != nil)
@@ -111,6 +126,8 @@ struct OrphansSheet: View {
             .padding(.bottom, DS.Space.xl)
         }
         .frame(width: DS.Size.reviewWidth)
+        .dialogControls()
+        .dialogKeyboard(canClose: !model.trashing && !apps.uninstalling)
         .overlay(alignment: .bottom) {
             VStack(spacing: DS.Space.sm) {
                 if let n = model.notice {
@@ -122,10 +139,21 @@ struct OrphansSheet: View {
             }
             .padding(.bottom, DS.Space.lg)
         }
-        .task { model.load() }
+        .liveRefresh(every: .seconds(60), events: [.applications, .volumes]) {
+            model.loadIfNeeded()
+            if model.loading { await model.job?.value }
+        }
+        .onChange(of: apps.appListRevision) { _, _ in
+            if !model.stopped, !model.loading, !model.trashing { model.load() }
+        }
         .task(id: search) {
             let request = search
-            await filtered.update(count: request.items.count) { request.matches() }
+            let items = model.items
+            let keep = model.keep
+            await filtered.update(count: items.count, inlineLimit: 128) {
+                Self.project(items, keep: keep, query: request.query, kind: request.kind)
+            }
+            if !Task.isCancelled { presentedSearch = request }
         }
         .sheet(item: $removed, onDismiss: {
             releaseAccess()
@@ -147,7 +175,23 @@ struct OrphansSheet: View {
         ) { model.trashChosen() }
     }
 
-    @ViewBuilder private var content: some View {
+    private var content: some View {
+        FileTable(
+            rows: visible,
+            columns: [.name, .size, .kind, .location],
+            titles: [.kind: String(localized: "What")],
+            autosave: "uninstall.orphans",
+            selection: $model.selection,
+            marks: model.chosen,
+            onToggleMark: { model.toggle($0) },
+            onOpen: { FileActions.reveal($0) },
+            onMark: { model.choose($0) },
+            menu: { ids in menu(ids) })
+            .frame(height: 300)
+            .overlay { emptyState.allowsHitTesting(false) }
+    }
+
+    @ViewBuilder private var emptyState: some View {
         if model.loading && model.items.isEmpty {
             DSLoading("Looking through your Library…").frame(height: 300)
         } else if (model.loadedAt != nil || model.stopped) && model.items.isEmpty {
@@ -155,20 +199,11 @@ struct OrphansSheet: View {
                 model.stopped ? String(localized: "Search Stopped") : String(localized: "No Unclaimed Leftovers Found"), systemImage: "folder.badge.questionmark",
                 description: Text("Only the searched Library folders are covered. Shared developer files stay protected. Choose an app in the Trash below for a more specific search."))
                 .frame(height: 300)
+        } else if visible.isEmpty && !model.items.isEmpty && presentedSearch != search {
+            DSLoading("Preparing the list…").frame(height: 300)
         } else if visible.isEmpty && !model.items.isEmpty && !filtered.working {
-            ContentUnavailableView.search(text: query).frame(height: 300)
-        } else {
-            FileTable(
-                rows: visible.map(row),
-                columns: [.name, .size, .kind, .location],
-                titles: [.kind: String(localized: "What")],
-                autosave: "uninstall.orphans",
-                selection: $model.selection,
-                marks: model.chosen,
-                onToggleMark: { model.toggle($0) },
-                onOpen: { FileActions.reveal($0) },
-                onMark: { model.choose($0) },
-                menu: { ids in menu(ids) })
+            ContentUnavailableView("No Matching Items", systemImage: "line.3.horizontal.decrease",
+                description: Text("Adjust or clear the filters above to see more files and folders."))
                 .frame(height: 300)
         }
     }
@@ -206,24 +241,17 @@ struct OrphansSheet: View {
         access = nil
     }
 
-    private func row(_ o: Orphan) -> FileRow {
-        var r = FileRow(
-            id: o.path, name: o.leftover.name, size: o.bytes, kind: "\(o.kind.title) · \(o.leftover.place)",
-            location: (o.path as NSString).deletingLastPathComponent, symbol: "folder.badge.questionmark",
-            subtitle: o.bundleID)
-        model.keep.mark(&r)
-        return r
-    }
-
     private func menu(_ ids: [String]) -> [TableMenuEntry] {
         guard !ids.isEmpty else { return [] }
-        var out: [TableMenuEntry] = [.quickLook, .action(String(localized: "Show in Finder")) { FileActions.reveal(ids) }, .divider]
+        var out: [TableMenuEntry] = [.quickLook, .divider]
         if ids.contains(where: { !model.chosen.contains($0) }) {
             out.append(.action(String(localized: "Choose for Trash")) { model.choose(ids) })
         } else {
             out.append(.action(String(localized: "Unchoose")) { model.chosen.subtract(ids) })
         }
         out.append(model.keep.menuEntry(ids, keep: model.keepAlways, stop: model.stopKeeping))
+        out.append(.divider)
+        out += FileActions.menu(ids, canOpen: false)
         return out
     }
 }
