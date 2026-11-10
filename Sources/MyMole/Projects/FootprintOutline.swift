@@ -16,7 +16,9 @@ struct FootprintOutline: NSViewRepresentable {
     let chosen: Set<String>
     let age: ProjectsModel.Age
     let measured: Set<String>
+    var contentsRevision: Int = 0
     let menu: (FootprintOutline.Target) -> [TableMenuEntry]
+    var sortRows: @Sendable ([FileRow], FileColumn, Bool) -> [FileRow] = { FileTable.sorted($0, by: $1, ascending: $2) }
 
     /// What a row's menu is for.
     enum Target {
@@ -30,6 +32,7 @@ struct FootprintOutline: NSViewRepresentable {
         let outline = FootprintOutlineView()
         outline.coordinator = context.coordinator
         outline.style = DS.Table.style
+        outline.configureRows(height: DS.Table.compactRow)
         // Sections and spacing carry the structure; stripes on rows this
         // tall would turn every group into a block.
         outline.apply(context.environment.palette, lines: context.environment.tableLines, stripes: false)
@@ -81,18 +84,20 @@ struct FootprintOutline: NSViewRepresentable {
     }
 
     static func dismantleNSView(_ scroll: NSScrollView, coordinator: Coordinator) {
+        coordinator.sorting.stop()
         NSTableView.stopFitting(&coordinator.fitting)
     }
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         let c = context.coordinator
+        c.applyDensity(context.environment.layoutDensity)
         c.outline?.apply(context.environment.palette, lines: context.environment.tableLines, stripes: false)
         let old = c.parent
         c.parent = self
         if old.footprint != footprint {
             c.rebuild()
         } else {
-            if old.measured != measured { c.contentsArrived() }
+            if old.measured != measured || old.contentsRevision != contentsRevision { c.rebuild() }
             if old.chosen != chosen || old.age != age { c.refreshVisible() }
         }
     }
@@ -111,11 +116,16 @@ struct FootprintOutline: NSViewRepresentable {
             case loading
         }
 
-        let kind: Kind
+        var kind: Kind
         let key: String
         /// The folder whose contents are this row's children, when it has any.
-        let opens: String?
+        var opens: String?
         var children: [Node]?
+        var sourceTree: Folder?
+        var contentsVersion = 0
+        var descendantsNeedRefresh = false
+        var contentOwner: (path: String, version: Int)?
+        var sortToken: UUID?
 
         init(_ kind: Kind, key: String, opens: String? = nil) {
             self.kind = kind
@@ -151,29 +161,43 @@ struct FootprintOutline: NSViewRepresentable {
         weak var headerMenu: NSMenu?
         var fitting: [NSObjectProtocol] = []
         private var roots: [Node] = []
-        /// Rows waiting for an entry's contents, by the entry's path.
-        private var waiting: [String: [Node]] = [:]
         /// The order of the rows at every level, from the clicked header.
         private var sort = NSSortDescriptor(key: FileColumn.size.rawValue, ascending: false)
+        private var nodesByKey: [String: Node] = [:]
+        private var density = Density.current
+        let sorting = FootprintSorting()
 
         init(_ parent: FootprintOutline) { self.parent = parent }
 
         private var model: ProjectsModel { parent.model }
 
+        func applyDensity(_ value: Density) {
+            guard density != value, let outline else { return }
+            density = value
+            let anchor = TableScrollAnchor(outline) { (outline.item(atRow: $0) as? Node)?.key }
+            outline.style = DS.Table.style
+            outline.configureRows(height: DS.Table.compactRow)
+            outline.indentationPerLevel = DS.Table.indent
+            outline.noteHeightOfRows(withIndexesChanged: IndexSet(integersIn: 0..<outline.numberOfRows))
+            refreshCells()
+            outline.updateScrollableWidth()
+            anchor.restore(in: outline) { key in nodesByKey[key].map { outline.row(forItem: $0) } }
+        }
+
         // Building
 
         func rebuild() {
             guard let outline else { return }
-            let open = expandedKeys()
-            waiting = [:]
+            let anchor = TableScrollAnchor(outline) { (outline.item(atRow: $0) as? Node)?.key }
+            let selected = outline.selectedRowIndexes.compactMap { (outline.item(atRow: $0) as? Node)?.key }
             let f = parent.footprint
             let inside = f.items.filter { $0.attribution == .inside }
             let outside = f.items.filter { $0.attribution != .inside }
-            roots = []
+            var fresh: [Node] = []
             if !inside.isEmpty {
                 let s = Node(.section(String(localized: "In the project folder"), help: nil), key: "s:inside")
                 s.children = sorted(inside.map(itemNode))
-                roots.append(s)
+                fresh.append(s)
             }
             if !outside.isEmpty {
                 let s = Node(.section(
@@ -181,20 +205,120 @@ struct FootprintOutline: NSViewRepresentable {
                     help: String(localized: "Sessions and DerivedData are tied to the project by the path their tool recorded. Items in ~/Library are matched by name: their bundle ID contains “\(f.project.name)”. Check those before removing them.")),
                     key: "s:outside")
                 s.children = sorted(outside.map(itemNode))
-                roots.append(s)
+                fresh.append(s)
             }
-            outline.reloadData()
-            for r in roots { outline.expandItem(r) }
-            reopen(roots, open)
+            outline.withoutRowAnimation {
+                reconcile(fresh, under: nil)
+                for r in roots { outline.expandItem(r) }
+                nodesByKey = [:]
+                index(roots)
+                outline.selectRowIndexes(IndexSet(selected.compactMap { key in
+                    guard let node = nodesByKey[key] else { return nil }
+                    let row = outline.row(forItem: node)
+                    return row >= 0 ? row : nil
+                }), byExtendingSelection: false)
+                refreshCells()
+                anchor.restore(in: outline) { key in nodesByKey[key].map { outline.row(forItem: $0) } }
+            }
             refreshChoiceHeader()
+        }
+
+        /// Retain native item identity and open branches. A removal changes
+        /// only its siblings, instead of replacing the entire detail pane.
+        private func reconcile(_ fresh: [Node], under parent: Node?) {
+            guard let outline else { return }
+            let old = parent?.children ?? (parent == nil ? roots : [])
+            let previous = Dictionary(old.map { ($0.key, $0) }, uniquingKeysWith: { a, _ in a })
+            let merged = fresh.map { candidate -> Node in
+                guard let retained = previous[candidate.key] else { return candidate }
+                retained.descendantsNeedRefresh = retained.item != candidate.item
+                retained.kind = candidate.kind
+                retained.opens = candidate.opens
+                retained.contentOwner = candidate.contentOwner
+                return retained
+            }
+            if let parent { parent.children = merged } else { roots = merged }
+            if let changes = TableRowChanges.between(old.map(\.key), merged.map(\.key)) {
+                if !changes.removed.isEmpty || !changes.inserted.isEmpty {
+                    outline.beginUpdates()
+                    outline.removeItems(at: changes.removed, inParent: parent, withAnimation: [])
+                    outline.insertItems(at: changes.inserted, inParent: parent, withAnimation: [])
+                    outline.endUpdates()
+                }
+            } else {
+                let open = expandedKeys()
+                if let parent { outline.reloadItem(parent, reloadChildren: true) } else { outline.reloadData() }
+                reopen(merged, open)
+            }
+            for (candidate, node) in zip(fresh, merged) {
+                guard previous[node.key] != nil, node.children != nil else { continue }
+                // A measured entry may be refreshing. Keep its current rows
+                // until a replacement arrives, with no empty/loading flash.
+                let children: [Node]?
+                if case .section = node.kind { children = candidate.children ?? [] }
+                else { children = freshChildren(of: node) }
+                if let children { reconcile(children, under: node) }
+            }
+        }
+
+        private func index(_ nodes: [Node]) {
+            for node in nodes {
+                nodesByKey[node.key] = node
+                if let children = node.children { index(children) }
+            }
+        }
+
+        private func freshChildren(of node: Node) -> [Node]? {
+            switch node.kind {
+            case .item(let item) where item.entries.count > 1:
+                return sorted(item.entries.map { entry in
+                    let key = "e:" + entry.path
+                    let opens = nodesByKey[key]?.opens ?? (Self.isFolder(entry) ? entry.path : nil)
+                    return Node(.entry(item, entry), key: key, opens: opens)
+                }, owner: node)
+            case .item(let item), .entry(let item, _):
+                guard let path = node.opens else { return [] }
+                if let tree = model.contents[path] {
+                    guard node.sourceTree !== tree || node.descendantsNeedRefresh else { return nil }
+                    node.sourceTree = tree
+                    node.contentsVersion = model.contentsVersions[path, default: 0]
+                    return rows(in: tree, item: item, owner: node)
+                }
+                // Cache eviction doesn't invalidate the rows of an open branch.
+                // A move or Undo explicitly changes the entry's version.
+                if node.sourceTree != nil, node.contentsVersion == model.contentsVersions[path, default: 0] { return nil }
+                model.loadContents(path)
+                return nil
+            case .folder(let item, let folder):
+                guard node.sourceTree !== folder || node.descendantsNeedRefresh else { return nil }
+                node.sourceTree = folder
+                return rows(in: folder, item: item, owner: node)
+            default: return []
+            }
+        }
+
+        private func refreshCells() {
+            guard let outline else { return }
+            outline.enumerateAvailableRowViews { rowView, row in
+                guard let node = outline.item(atRow: row) as? Node else { return }
+                for (index, column) in outline.tableColumns.enumerated() where !column.isHidden {
+                    if let cell = rowView.view(atColumn: index) as? TreeNameCell {
+                        cell.configure(node, look: self.look(node)) { [weak self] in self?.toggle(node) }
+                        cell.setChoosingEnabled(self.isCurrent(node))
+                    } else if let cell = rowView.view(atColumn: index) as? TreeValueCell {
+                        cell.configure(node, size: column.identifier.rawValue == "size")
+                    }
+                }
+            }
         }
 
         private func itemNode(_ item: FootprintItem) -> Node {
             let single = item.entries.count == 1 ? item.entries[0].path : nil
-            return Node(.item(item), key: "i:" + item.id, opens: single.flatMap { Self.isFolder($0) ? $0 : nil })
+            let key = "i:" + item.id
+            return Node(.item(item), key: key, opens: item.entries.count == 1 && (nodesByKey[key]?.opens == single || Self.isFolder(item.entries[0])) ? single : nil)
         }
 
-        private func expandedKeys() -> Set<String> {
+        private func expandedKeys(in nodes: [Node]? = nil) -> Set<String> {
             guard let outline else { return [] }
             var keys = Set<String>()
             func walk(_ nodes: [Node]) {
@@ -203,7 +327,7 @@ struct FootprintOutline: NSViewRepresentable {
                     walk(n.children ?? [])
                 }
             }
-            walk(roots)
+            walk(nodes ?? roots)
             return keys
         }
 
@@ -215,9 +339,10 @@ struct FootprintOutline: NSViewRepresentable {
             }
         }
 
-        private static func isFolder(_ path: String) -> Bool {
+        private static func isFolder(_ entry: FootprintEntry) -> Bool {
+            if let known = entry.isDirectory { return known }
             var st = stat()
-            return lstat(path, &st) == 0 && st.st_mode & S_IFMT == S_IFDIR
+            return lstat(entry.path, &st) == 0 && st.st_mode & S_IFMT == S_IFDIR
         }
 
         private func children(of n: Node) -> [Node] {
@@ -226,29 +351,34 @@ struct FootprintOutline: NSViewRepresentable {
             switch n.kind {
             case .item(let item) where item.entries.count > 1:
                 made = sorted(item.entries.map { e in
-                    Node(.entry(item, e), key: "e:" + e.path, opens: Self.isFolder(e.path) ? e.path : nil)
-                })
+                    Node(.entry(item, e), key: "e:" + e.path, opens: Self.isFolder(e) ? e.path : nil)
+                }, owner: n)
             case .item(let item), .entry(let item, _):
                 made = n.opens.map { contents(of: $0, item: item, waiter: n) } ?? []
             case .folder(let item, let folder):
-                made = rows(in: folder, item: item)
+                n.sourceTree = folder
+                made = rows(in: folder, item: item, owner: n)
             default:
                 made = []
             }
             n.children = made
+            index(made)
             return made
         }
 
         /// An entry's contents once measured; until then a placeholder row,
         /// and the row is filled in when they arrive.
         private func contents(of path: String, item: FootprintItem, waiter: Node) -> [Node] {
-            if let tree = model.contents[path] { return rows(in: tree, item: item) }
-            waiting[path, default: []].append(waiter)
+            if let tree = model.contents[path] {
+                waiter.sourceTree = tree
+                waiter.contentsVersion = model.contentsVersions[path, default: 0]
+                return rows(in: tree, item: item, owner: waiter)
+            }
             model.loadContents(path)
             return [Node(.loading, key: "l:" + path)]
         }
 
-        private func rows(in folder: Folder, item: FootprintItem) -> [Node] {
+        private func rows(in folder: Folder, item: FootprintItem, owner: Node) -> [Node] {
             var nodes: [Node] = folder.subfolders.map { f in
                 let opens = f.subfolders.isEmpty && f.listedFiles.isEmpty && f.smallFileCount == 0 ? nil : f.path
                 return Node(.folder(item, f), key: "f:" + f.path, opens: opens)
@@ -258,71 +388,73 @@ struct FootprintOutline: NSViewRepresentable {
                 let p = base + "/" + file.name
                 return Node(.file(item, path: p, size: file.size, modified: file.modified), key: "f:" + p)
             }
-            nodes = sorted(nodes)
+            nodes = sorted(nodes, owner: owner)
             // The small files counted together stay last, whatever the order.
             if folder.smallFileCount > 0 {
                 nodes.append(Node(
                     .smallFiles(item, folder: base, count: folder.smallFileCount, bytes: folder.smallFileBytes),
                     key: "m:" + base))
             }
+            let owner = folder.lineage.first?.path ?? folder.path
+            for node in nodes { node.contentOwner = (owner, model.contentsVersions[owner, default: 0]) }
             return nodes
         }
 
         /// Rows in the order of the clicked header; ties by name.
-        private func sorted(_ nodes: [Node]) -> [Node] {
-            let key = sort.key ?? FileColumn.size.rawValue
+        private func sorted(_ nodes: [Node], owner: Node? = nil) -> [Node] {
+            let column = FileColumn(rawValue: sort.key ?? "") ?? .size
             let ascending = sort.ascending
-            func name(_ n: Node) -> String {
-                switch n.kind {
-                case .item(let i): i.title
-                case .entry(_, let e): (e.path as NSString).lastPathComponent
-                case .folder(_, let f): f.name
-                case .file(_, let p, _, _): (p as NSString).lastPathComponent
-                default: ""
+            if let owner {
+                sorting.cancel(owner)
+                if nodes.count > 512 {
+                    sorting.enqueue(nodes, owner: owner, column: column, ascending: ascending, sort: parent.sortRows) { [weak self] owner, keys in
+                        self?.installOrder(keys, under: owner)
+                    }
+                    return nodes
                 }
             }
-            func value(_ n: Node) -> (bytes: Int64, date: Date) {
-                switch n.kind {
-                case .item(let i): (i.bytes, i.latest)
-                case .entry(_, let e): (e.bytes, e.modified)
-                case .folder(_, let f): (f.size, f.latestChange)
-                case .file(_, _, let s, let m): (s, m)
-                case .smallFiles(_, _, _, let b): (b, .distantPast)
-                default: (0, .distantPast)
-                }
+            let byKey = Dictionary(nodes.map { ($0.key, $0) }, uniquingKeysWith: { a, _ in a })
+            let rows = nodes.compactMap(FootprintSorting.row)
+            return parent.sortRows(rows, column, ascending).compactMap { byKey[$0.id] } + nodes.filter { !FootprintSorting.isSortable($0) }
+        }
+
+        private func installOrder(_ keys: [String], under node: Node) {
+            guard let children = node.children else { return }
+            let byKey = Dictionary(children.map { ($0.key, $0) }, uniquingKeysWith: { a, _ in a })
+            guard byKey.count == children.count, Set(keys).count == keys.count else { return }
+            let tail = children.filter { !FootprintSorting.isSortable($0) }
+            let ordered = keys.compactMap { byKey[$0] } + tail
+            guard ordered.count == children.count, ordered.map(\.key) != children.map(\.key) else { return }
+            let open = expandedKeys(in: children)
+            let anchor = outline.map { table in TableScrollAnchor(table) { (table.item(atRow: $0) as? Node)?.key } }
+            let selected = outline?.selectedRowIndexes.compactMap { outline?.item(atRow: $0) as? Node } ?? []
+            node.children = ordered
+            guard let outline, outline.row(forItem: node) >= 0, outline.isItemExpanded(node) else { return }
+            outline.withoutRowAnimation {
+                outline.reloadItem(node, reloadChildren: true)
+                reopen(ordered, open)
+                outline.selectRowIndexes(IndexSet(selected.compactMap { selected in
+                    let row = outline.row(forItem: selected)
+                    return row >= 0 ? row : nil
+                }), byExtendingSelection: false)
+                refreshCells()
+                anchor?.restore(in: outline) { key in self.nodesByKey[key].map { outline.row(forItem: $0) } }
             }
-            return nodes.sorted { a, b in
-                let byName = name(a).localizedStandardCompare(name(b))
-                switch key {
-                case FileColumn.modified.rawValue:
-                    let (x, y) = (value(a).date, value(b).date)
-                    if x != y { return ascending ? x < y : x > y }
-                case FileColumn.name.rawValue:
-                    if byName != .orderedSame { return ascending ? byName == .orderedAscending : byName == .orderedDescending }
-                default:
-                    let (x, y) = (value(a).bytes, value(b).bytes)
-                    if x != y { return ascending ? x < y : x > y }
-                }
-                return byName == .orderedAscending
+        }
+
+        private func sortLoadedBranches(_ nodes: [Node]) {
+            for node in nodes {
+                guard let children = node.children else { continue }
+                let ordered = sorted(children, owner: node)
+                if children.count <= 512 { installOrder(ordered.compactMap { FootprintSorting.row($0)?.id }, under: node) }
+                sortLoadedBranches(children)
             }
         }
 
         func outlineView(_ outlineView: NSOutlineView, sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]) {
             guard let first = outlineView.sortDescriptors.first, first != sort else { return }
             sort = first
-            rebuild()
-        }
-
-        /// Fills in the rows whose contents were measured meanwhile.
-        func contentsArrived() {
-            guard let outline else { return }
-            for (path, nodes) in waiting where model.contents[path] != nil {
-                waiting[path] = nil
-                for n in nodes {
-                    n.children = nil
-                    outline.reloadItem(n, reloadChildren: true)
-                }
-            }
+            sortLoadedBranches(roots)
         }
 
         /// The tick boxes of the rows that have cells (those on screen and
@@ -338,6 +470,7 @@ struct FootprintOutline: NSViewRepresentable {
                     let cell = rowView.view(atColumn: column) as? TreeNameCell
                 else { return }
                 cell.update(look(n))
+                cell.setChoosingEnabled(self.isCurrent(n))
             }
         }
 
@@ -422,6 +555,7 @@ struct FootprintOutline: NSViewRepresentable {
             if id.rawValue == "name" {
                 let cell = outlineView.makeView(withIdentifier: id, owner: nil) as? TreeNameCell ?? TreeNameCell(identifier: id)
                 cell.configure(n, look: look(n)) { [weak self] in self?.toggle(n) }
+                cell.setChoosingEnabled(isCurrent(n))
                 return cell
             }
             let cell = outlineView.makeView(withIdentifier: id, owner: nil) as? TreeValueCell ?? TreeValueCell(identifier: id)
@@ -454,7 +588,12 @@ struct FootprintOutline: NSViewRepresentable {
             }
         }
 
+        private func isCurrent(_ n: Node) -> Bool {
+            n.contentOwner.map { $0.version == model.contentsVersions[$0.path, default: 0] } ?? true
+        }
+
         func toggle(_ n: Node) {
+            guard isCurrent(n) else { return }
             switch n.kind {
             case .item(let i): model.toggle(i)
             case .smallFiles: break
@@ -515,6 +654,10 @@ struct FootprintOutline: NSViewRepresentable {
         }
 
         private func addActions(for n: Node, to menu: NSMenu) {
+            guard isCurrent(n) else {
+                menu.add(FileActions.inspectionMenu(n.path.map { [$0] } ?? []))
+                return
+            }
             guard let item = n.item else { return }
             let target: Target
             if case .item = n.kind {
@@ -537,6 +680,7 @@ struct FootprintOutline: NSViewRepresentable {
 
         /// Whether a row can be ticked, and whether it is.
         private func tick(_ n: Node) -> Bool? {
+            guard isCurrent(n) else { return nil }
             let l = look(n)
             guard let state = l.check, !l.locked else { return nil }
             if case .smallFiles = n.kind { return nil }
@@ -596,6 +740,7 @@ extension NSMenu {
 /// The outline itself: Space ticks the selected rows.
 final class FootprintOutlineView: NSOutlineView, LinedTable, UserColumnTable {
     var defaultHiddenColumns = Set<String>()
+    var columnViewport: ColumnViewport?
     weak var coordinator: FootprintOutline.Coordinator?
     var lines = TableLines.none
     var lineColor = NSColor.separatorColor
@@ -669,6 +814,7 @@ private final class TreeNameCell: NSTableCellView, ColumnWidthProviding {
     private var onToggle: () -> Void = {}
     private var isItem = false
     private var isSection = false
+    private var choiceIsEditable = true
 
     init(identifier: NSUserInterfaceItemIdentifier) {
         super.init(frame: .zero)
@@ -696,10 +842,16 @@ private final class TreeNameCell: NSTableCellView, ColumnWidthProviding {
         if let state = look.check, check.state != state { check.state = state }
     }
 
+    func setChoosingEnabled(_ enabled: Bool) {
+        check.isEnabled = enabled && choiceIsEditable
+        check.toolTip = enabled ? nil : String(localized: "Refreshing folder contents…")
+    }
+
     func configure(_ n: FootprintOutline.Node, look: (check: NSControl.StateValue?, locked: Bool), onToggle: @escaping () -> Void) {
         self.onToggle = onToggle
         isItem = false
         isSection = false
+        choiceIsEditable = true
         check.isHidden = look.check == nil
         check.state = look.check ?? .off
         check.isEnabled = true
@@ -743,6 +895,7 @@ private final class TreeNameCell: NSTableCellView, ColumnWidthProviding {
             icon.image = Self.symbol(for: p, folder: false)
             toolTip = p
         case .smallFiles(_, _, let count, _):
+            choiceIsEditable = false
             title.stringValue = String(localized: "\(count.formatted()) smaller file\(count == 1 ? "" : "s")")
             title.textColor = .secondaryLabelColor
             icon.image = NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: nil)

@@ -1,4 +1,7 @@
 import AppKit
+#if SMOKE
+import PrivilegedKit
+#endif
 import StorageKit
 import SwiftUI
 import SystemKit
@@ -168,7 +171,11 @@ final class AppModel {
     let deepClean = DeepCleanModel()
     let apps: AppsModel
     let trash = TrashModel()
+    #if SMOKE
+    let startup = StartupModel(root: Home.path + "/System")
+    #else
     let startup = StartupModel()
+    #endif
     let duplicates = DuplicatesModel()
     let orphans: OrphansModel
     let similar = SimilarModel()
@@ -195,27 +202,46 @@ final class AppModel {
         // Folders chosen for a pane before, opened again before any pane reads them.
         ChosenFolders.shared.restore()
         #if SMOKE
-        let privileged = ProcessInfo.processInfo.environment["MYMOLE_SMOKE_APPS"] == nil
-            ? PrivilegedClient() : PrivilegedClient(toolPath: nil)
+        let privileged = PrivilegedClient(toolPath: Home.path + "/SyntheticHelper", toolRunning: { false })
         #else
         let privileged = PrivilegedClient()
         #endif
         self.privileged = privileged
         let knownCopies = KnownAppCopies()
-        var appSystem: AppsModel.SystemSide = Edition.current.hasSystemTasks ? .live(privileged) : .unavailable
-        var copies: @Sendable (AppBundle) -> [AppBundle]? = AppsModel.liveOtherCopies
-        var runtime = Edition.current.isSandboxed ? [] : RuntimeLeftovers.systemRoots()
         #if SMOKE
-        if ProcessInfo.processInfo.environment["MYMOLE_SMOKE_APPS"] != nil {
-            appSystem = .init(base: Home.path + "/System", isReady: { false }, remove: { _, _, _ in .init() })
-            copies = { _ in [] }
-            runtime = [.init(path: Home.path + "/Runtime/Caches", kind: .caches), .init(path: Home.path + "/Runtime/Temp", kind: .temporary)]
-        }
+        let appSystem = AppsModel.SystemSide(base: Home.path + "/System", isReady: { false }, remove: { _, _, _ in .init() })
+        let copies: @Sendable (AppBundle) -> [AppBundle]? = { _ in [] }
+        let runtime = [RuntimeLeftovers.Root(path: Home.path + "/Runtime/Caches", kind: .caches), .init(path: Home.path + "/Runtime/Temp", kind: .temporary)]
+        #else
+        let appSystem: AppsModel.SystemSide = Edition.current.hasSystemTasks ? .live(privileged) : .unavailable
+        let copies: @Sendable (AppBundle) -> [AppBundle]? = AppsModel.liveOtherCopies
+        let runtime = Edition.current.isSandboxed ? [] : RuntimeLeftovers.systemRoots()
         #endif
         apps = AppsModel(otherCopies: copies, system: appSystem, knownCopies: knownCopies, runtimeRoots: runtime)
+        #if SMOKE
+        orphans = OrphansModel(known: { _ in false }, running: { RunningAppSnapshot.read().bundleIDs }, knownCopies: knownCopies)
+        maintenance = MaintenanceModel(privileged: privileged, engine: MaintenanceEngine(role: .user, running: { [] }, protections: { try UserProtections.live.read() }))
+        #else
         orphans = OrphansModel(knownCopies: knownCopies)
         maintenance = MaintenanceModel(privileged: privileged)
+        #endif
+        #if SMOKE
+        let syntheticSystem = Home.path + "/System/Library"
+        systemClean = SystemCleanModel(privileged: privileged, backend: .init(
+            isReady: { true }, scan: { progress in
+                await Task.detached {
+                    SystemCleanRules.list(roots: [.init(path: syntheticSystem + "/Caches", reason: "Synthetic system cache"),
+                                                 .init(path: syntheticSystem + "/Logs", reason: "Synthetic system log")], progress: progress)
+                }.value
+            }, remove: { paths, _ in
+                var report = RemovalReport()
+                for path in paths { report.failed[path] = "System removal is simulated in this test build." }
+                return report
+            }))
+        systemClean.lookForStaging = { [] }
+        #else
         systemClean = SystemCleanModel(privileged: privileged)
+        #endif
         diskAccess.didChange = { [weak self] in self?.prefetchScans() }
         recheckDiskAccess()
     }

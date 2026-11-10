@@ -15,7 +15,7 @@ enum FullDiskAccess {
         "Library/Application Support/com.apple.TCC",
     ]
 
-    private static let log = Logger(subsystem: "com.viktornyberg.mymole", category: "access")
+    private static let log = Logger(subsystem: "com.mymole.app", category: "access")
 
     /// Granted, refused, or not known: none of the probes said either way.
     enum State: Equatable, Sendable {

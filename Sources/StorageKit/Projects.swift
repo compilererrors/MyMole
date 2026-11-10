@@ -132,11 +132,14 @@ public struct FootprintEntry: Sendable, Hashable, Codable {
     public let path: String
     public let bytes: Int64
     public let modified: Date
+    /// Advisory presentation metadata from the existing scan, never removal authority.
+    public let isDirectory: Bool?
 
-    public init(path: String, bytes: Int64, modified: Date) {
+    public init(path: String, bytes: Int64, modified: Date, isDirectory: Bool? = nil) {
         self.path = path
         self.bytes = bytes
         self.modified = modified
+        self.isDirectory = isDirectory
     }
 }
 

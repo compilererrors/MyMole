@@ -10,15 +10,16 @@ public enum Home {
     public static let path: String = {
         let env = ProcessInfo.processInfo.environment
         #if SMOKE
-        // The UI smoke test's own build gives the sandboxed edition a
-        // synthetic home; shipping builds have no such switch.
-        if let smoke = env["MYMOLE_SMOKE_HOME"], smoke.hasPrefix("/") { return smoke }
-        #endif
+        guard let run = try? SyntheticRun.environment(env) else { fatalError("Refusing to launch without a verified synthetic home.") }
+        ProcessInfo.processInfo.processName = "mymole-e2e-" + (env["MYMOLE_SMOKE_TOKEN"] ?? "").replacingOccurrences(of: "-", with: "")
+        return run.home
+        #else
         guard env["APP_SANDBOX_CONTAINER_ID"] != nil else { return NSHomeDirectory() }
         if let pw = getpwuid(getuid()), let dir = pw.pointee.pw_dir {
             let s = String(cString: dir)
             if !s.isEmpty { return s }
         }
         return NSHomeDirectory()
+        #endif
     }()
 }

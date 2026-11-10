@@ -10,6 +10,9 @@ import Synchronization
 // never blanks the pane.
 
 extension SystemReaders {
+    #if SMOKE
+    public static let live = synthetic
+    #else
     public static let live = SystemReaders(
         hardware: {
             let v = ProcessInfo.processInfo.operatingSystemVersion
@@ -43,6 +46,19 @@ extension SystemReaders {
         // The App Sandbox hides other processes' counters, so `ps` shows
         // nothing there; the tile stays away instead of running it in vain.
         processes: { ProcessList.sandboxed ? [] : ProcessList.top() })
+    #endif
+
+    #if DEBUG || SMOKE
+    public static let synthetic = SystemReaders(
+        hardware: { .init(model: "Synthetic Mac", chip: "Synthetic CPU", memoryBytes: 16 << 30, osVersion: "macOS Test", diskHealth: "Verified") },
+        uptime: { 7_200 }, cores: { [.init(user: 20, system: 10, idle: 70, nice: 0)] },
+        load: { (0.5, 0.4, 0.3) }, coreSplit: { (2, 2) },
+        memory: { .init(used: 4 << 30, total: 16 << 30, swapUsed: 0, swapTotal: 0, pressure: .normal) },
+        volumes: { [.init(name: "Synthetic Disk", mount: "/", total: 100 << 30, available: 60 << 30, isInternal: true)] },
+        disk: { .init(read: 100_000, written: 50_000) }, interfaces: { [] }, battery: { nil },
+        processes: { [.init(pid: 2_147_483_000, name: "Synthetic Editor", cpu: 12, memoryBytes: 128 << 20),
+                      .init(pid: 2_147_483_001, name: "Synthetic Player", cpu: 4, memoryBytes: 64 << 20)] })
+    #endif
 }
 
 /// A C string buffer up to its terminating zero.

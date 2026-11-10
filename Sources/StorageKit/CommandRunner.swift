@@ -41,11 +41,15 @@ public struct CommandRunner: Sendable {
     public static func processes(
         timeLimit: TimeInterval, grace: TimeInterval = 3, outputLimit: Int = standardOutputLimit, drain: TimeInterval = 5
     ) -> CommandRunner {
+        #if SMOKE
+        return CommandRunner(run: { _, _ in (-1, "External programs are disabled in synthetic test builds.") }, exists: { _ in false })
+        #else
         CommandRunner(
             run: { exe, args in
                 ProcessGroup.run(exe, args, timeLimit: timeLimit, grace: grace, outputLimit: outputLimit, drain: drain)
             },
             exists: { FileManager.default.isExecutableFile(atPath: $0) })
+        #endif
     }
 }
 

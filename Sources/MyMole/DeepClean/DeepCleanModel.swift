@@ -115,7 +115,11 @@ final class DeepCleanModel {
         home: String = Home.path, base: URL = CleanStore.defaultBase, keepURL: URL = CleanKeepList.defaultURL,
         logURL: URL = CleanupLog.defaultURL,
         runningApps: @escaping @MainActor () -> Set<String> = {
+            #if SMOKE
+            return []
+            #else
             Set(NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier))
+            #endif
         },
         runningTools: @escaping @Sendable () -> Set<String>? = RunningTools.names,
         trash: TrashBackend = .live, projectRules: URL = ProjectStore.defaultBase,

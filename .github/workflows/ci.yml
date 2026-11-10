@@ -43,11 +43,21 @@ jobs:
       # The App Store edition's own code: never elevates, offers only
       # sandbox tasks, and keeps folder access to what was chosen. Real
       # bookmarks and the App Sandbox itself are checked by hand.
+      # CI makes test builds only; App Store release packaging stays local.
       - name: Test the App Store edition (sandboxed)
         run: scripts/test-guarded.sh --appstore
 
+      - name: End-to-end file flows (synthetic data only)
+        run: scripts/test-e2e.sh
+
+      - name: End-to-end App Store file flows (synthetic data only)
+        run: scripts/test-e2e.sh --appstore
+
       - name: Test policy catches violations
         run: scripts/test-policy-guard.sh
+
+      - name: Test execution guard rejects skipped and incomplete runs
+        run: bash scripts/test-events-guard.sh
 
       - name: Negative string checks catch unreadable binaries and matches
         run: scripts/test-strings-guard.sh
@@ -66,13 +76,7 @@ jobs:
           swift build -c release --product MyMole
           swift build -c release --product MyMoleHelper
           bin="$(swift build -c release --show-bin-path)"
-          scripts/check-no-strings.sh "$bin/MyMole" 'MYMOLE_SMOKE_HOME|MYMOLE_SMOKE_TRASH|MYMOLE_SMOKE_ELEVATE|MYMOLE_SMOKE_APPS|MYMOLE_SMOKE_GRANTED'
-
-      - name: Build the App Store edition
-        run: |
-          swift build -c release --scratch-path .build/appstore -Xswiftc -DAPPSTORE --product MyMole
-          bin="$(swift build -c release --scratch-path .build/appstore -Xswiftc -DAPPSTORE --show-bin-path)"
-          scripts/check-no-strings.sh "$bin/MyMole" 'osascript|with administrator privileges|MYMOLE_SMOKE_HOME|MYMOLE_SMOKE_TRASH|MYMOLE_SMOKE_ELEVATE|MYMOLE_SMOKE_APPS|MYMOLE_SMOKE_GRANTED'
+          scripts/check-no-strings.sh "$bin/MyMole" 'MYMOLE_SMOKE_|MYMOLE_E2E_|mymole-synthetic-run|Refusing to launch without a verified synthetic home'
 
   thread-sanitizer:
     # Shared state across threads in one process: the cleanup log's queue

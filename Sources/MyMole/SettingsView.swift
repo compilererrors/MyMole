@@ -130,7 +130,7 @@ struct SettingsView: View {
             Picker("Layout", selection: Binding(
                 get: { Density(rawValue: density) ?? .standard },
                 set: { d in
-                    // Measures first, then the views are made again with them.
+                    // Update observed metrics without recreating open panes.
                     Density.current = d
                     density = d.rawValue
                 })

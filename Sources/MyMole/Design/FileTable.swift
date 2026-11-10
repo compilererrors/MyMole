@@ -125,7 +125,7 @@ struct FileTable: NSViewRepresentable {
         table.coordinator = context.coordinator
         context.coordinator.enabled = context.environment.isEnabled
         table.style = DS.Table.style
-        table.rowHeight = Self.rowHeight
+        table.configureRows(height: Self.rowHeight)
         table.apply(context.environment.palette, lines: context.environment.tableLines, stripes: true)
         table.allowsMultipleSelection = true
         table.allowsColumnReordering = true
@@ -184,6 +184,7 @@ struct FileTable: NSViewRepresentable {
         let c = context.coordinator
         c.parent = self
         c.enabled = context.environment.isEnabled
+        c.applyDensity(context.environment.layoutDensity)
         c.table?.apply(context.environment.palette, lines: context.environment.tableLines, stripes: true)
         c.applySortRequest()
         c.load(rows, marks: marks, selection: selection)
@@ -239,6 +240,7 @@ struct FileTable: NSViewRepresentable {
             let column: FileColumn
             let ascending: Bool
             let sameOrder: Bool
+            let changes: TableRowChanges?
             let unchanged: Bool
             let choices: ListedChoices
         }
@@ -261,8 +263,20 @@ struct FileTable: NSViewRepresentable {
         /// echoed back into the binding.
         private var syncing = false
         private var lastSortRequest: UUID?
+        private var density = Density.current
 
         init(_ parent: FileTable) { self.parent = parent }
+
+        func applyDensity(_ value: Density) {
+            guard density != value, let table else { return }
+            density = value
+            let anchor = TableScrollAnchor(table) { self.shown.indices.contains($0) ? self.shown[$0].id : nil }
+            table.style = DS.Table.style
+            table.configureRows(height: DS.Table.row)
+            refreshVisibleCells()
+            table.updateScrollableWidth()
+            anchor.restore(in: table) { rowIndex[$0] }
+        }
 
         func applySortRequest() {
             guard let request = parent.sortRequest, lastSortRequest != request.id, let table,
@@ -322,23 +336,20 @@ struct FileTable: NSViewRepresentable {
             }
         }
 
-        private func reloadVisible(_ table: NSTableView, columns: IndexSet? = nil) {
-            table.reloadRowsWithViews(columns: columns)
-        }
-
         private var selectedIDs: Set<String> {
             guard let table else { return [] }
             return Set(table.selectedRowIndexes.compactMap { $0 < shown.count ? shown[$0].id : nil })
         }
 
-        private func select(_ ids: Set<String>) {
+        private func select(_ ids: Set<String>, reveal: Bool = true) {
             guard let table else { return }
             requestedSelection = ids
             let set = IndexSet(ids.compactMap { rowIndex[$0] })
+            let wasSyncing = syncing
             syncing = true
-            table.selectRowIndexes(set, byExtendingSelection: false)
-            syncing = false
-            if let first = set.first, !table.rows(in: table.visibleRect).contains(first) { table.scrollRowToVisible(first) }
+            if table.selectedRowIndexes != set { table.selectRowIndexes(set, byExtendingSelection: false) }
+            syncing = wasSyncing
+            if reveal, let first = set.first, !table.rows(in: table.visibleRect).contains(first) { table.scrollRowToVisible(first) }
         }
 
         private func resort() {
@@ -375,12 +386,13 @@ struct FileTable: NSViewRepresentable {
                                                 previousInput: [FileRow], previousRows: [FileRow], previousIndex: [String: Int], sameSort: Bool) -> Prepared {
             if sameSort, input == previousInput {
                 return Prepared(source: input, rows: previousRows, index: previousIndex, column: column,
-                                ascending: ascending, sameOrder: true, unchanged: true, choices: ListedChoices(input))
+                                ascending: ascending, sameOrder: true, changes: nil, unchanged: true, choices: ListedChoices(input))
             }
             let sorted = FileTable.sorted(input, by: column, ascending: ascending)
             let sameOrder = sorted.count == previousRows.count && zip(sorted, previousRows).allSatisfy { $0.id == $1.id }
             let index = sameOrder ? previousIndex : Dictionary(sorted.enumerated().map { ($0.element.id, $0.offset) }, uniquingKeysWith: { a, _ in a })
-            return Prepared(source: input, rows: sorted, index: index, column: column, ascending: ascending, sameOrder: sameOrder, unchanged: false, choices: ListedChoices(input))
+            let changes = sameOrder ? nil : TableRowChanges.between(previousRows.map(\.id), sorted.map(\.id))
+            return Prepared(source: input, rows: sorted, index: index, column: column, ascending: ascending, sameOrder: sameOrder, changes: changes, unchanged: false, choices: ListedChoices(input))
         }
 
         func stopSorting() {
@@ -400,6 +412,7 @@ struct FileTable: NSViewRepresentable {
                 previous.releaseLater()
                 return
             }
+            let anchor = TableScrollAnchor(table) { self.shown.indices.contains($0) ? self.shown[$0].id : nil }
             let previous = RetiredValue((shown, appliedSource, rowIndex))
             shown = prepared.rows
             appliedSource = prepared.source
@@ -412,16 +425,41 @@ struct FileTable: NSViewRepresentable {
             refreshChoiceHeader()
             guard !prepared.unchanged else { return }
             if prepared.sameOrder {
-                Timings.measure(.refresh, rows: prepared.rows.count) { reloadVisible(table) }
+                Timings.measure(.refresh, rows: prepared.rows.count) { refreshVisibleCells() }
             } else {
                 Timings.measure(.reload, rows: prepared.rows.count) {
                     syncing = true
-                    table.reloadData()
+                    table.withoutRowAnimation {
+                        if let changes = prepared.changes {
+                            table.beginUpdates()
+                            table.removeRows(at: changes.removed, withAnimation: [])
+                            table.insertRows(at: changes.inserted, withAnimation: [])
+                            table.endUpdates()
+                        } else { table.reloadData() }
+                        select(parent.selection, reveal: false)
+                        refreshVisibleCells()
+                        anchor.restore(in: table) { rowIndex[$0] }
+                    }
                     syncing = false
-                    select(parent.selection)
                 }
             }
             if QLPreviewPanel.sharedPreviewPanelExists() && QLPreviewPanel.shared().isVisible { QLPreviewPanel.shared().reloadData() }
+        }
+
+        /// Update existing cells in place. Recreating visible views on each
+        /// measurement flashes selection chrome and interrupts pointer tracking.
+        func refreshVisibleCells() {
+            guard let table else { return }
+            table.enumerateAvailableRowViews { rowView, row in
+                guard self.shown.indices.contains(row) else { return }
+                let value = self.shown[row]
+                for (index, column) in table.tableColumns.enumerated() where !column.isHidden {
+                    guard let field = FileColumn(rawValue: column.identifier.rawValue) else { continue }
+                    if let cell = rowView.view(atColumn: index) as? FileNameCell {
+                        cell.configure(value, marked: self.marks.map { $0.contains(value.id) }, dimUnmeasured: self.parent.columns.contains(.size)) { [weak self] in self?.parent.onToggleMark(value.id) }
+                    } else if let cell = rowView.view(atColumn: index) as? FileTextCell { cell.configure(value, column: field) }
+                }
+            }
         }
 
         func bindWindow(_ window: NSWindow?) {
@@ -563,6 +601,16 @@ struct FileTable: NSViewRepresentable {
             return menu
         }
 
+        /// A tracked menu can outlive a sort. Resolve its original identities,
+        /// never a saved row number that now belongs to a different file.
+        func selectForPreview(_ ids: Set<String>) -> Bool {
+            let current = Set(ids.filter { rowIndex[$0] != nil })
+            guard !current.isEmpty else { return false }
+            parent.selection = current
+            select(current, reveal: false)
+            return true
+        }
+
         private func addListedChoices(to menu: NSMenu) {
             guard marks != nil, parent.onSetMarks != nil else { return }
             if !menu.items.isEmpty { menu.addItem(.separator()) }
@@ -575,12 +623,9 @@ struct FileTable: NSViewRepresentable {
                 switch e {
                 case .action(let title, let run): menu.addItem(ClosureMenuItem(title, run))
                 case .quickLook:
-                    let clicked = clickedRow ?? table?.clickedRow ?? -1
+                    let ids = Set(targetIDs(clicked: clickedRow ?? table?.clickedRow ?? -1))
                     menu.addItem(ClosureMenuItem(String(localized: "Quick Look")) { [weak self] in
-                        guard let table = self?.table else { return }
-                        if clicked >= 0, !table.selectedRowIndexes.contains(clicked) {
-                            table.selectRowIndexes([clicked], byExtendingSelection: false)
-                        }
+                        guard let self, let table, selectForPreview(ids) else { return }
                         table.togglePreview()
                     })
                 case .divider:
@@ -601,6 +646,7 @@ struct FileTable: NSViewRepresentable {
 /// The table view itself: keys, hover, Quick Look.
 final class FileTableView: NSTableView, LinedTable, UserColumnTable {
     var defaultHiddenColumns = Set<String>()
+    var columnViewport: ColumnViewport?
     weak var coordinator: FileTable.Coordinator?
     var lines = TableLines.none
     var lineColor = NSColor.separatorColor

@@ -27,13 +27,8 @@ final class AppCopiesModel {
          }, budget: ScanBudget = .shared) {
         self.folders = folders
         #if SMOKE
-        if ProcessInfo.processInfo.environment["MYMOLE_SMOKE_APPS"] != nil {
-            self.runner = CommandRunner(run: { _, _ in (0, "") }, exists: { _ in false })
-            self.registered = { _ in [] }
-        } else {
-            self.runner = runner
-            self.registered = registered
-        }
+        self.runner = CommandRunner(run: { _, _ in (0, "") }, exists: { _ in false })
+        self.registered = { _ in [] }
         #else
         self.runner = runner
         self.registered = registered

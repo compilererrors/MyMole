@@ -37,12 +37,13 @@ struct DiskOutline: NSViewRepresentable {
     }
 
     final class Node {
-        let entry: DiskEntry?
-        let folder: Folder?
+        var entry: DiskEntry?
+        var folder: Folder?
         let path: String
-        let summary: FileRow?
+        var summary: FileRow?
         let smallFiles: Bool
         var children: [Node]?
+        var generation = -1
 
         init(entry: DiskEntry?, folder: Folder?, path: String, summary: FileRow? = nil, smallFiles: Bool = false) {
             self.entry = entry
@@ -60,7 +61,7 @@ struct DiskOutline: NSViewRepresentable {
         let c = context.coordinator
         outline.coordinator = c
         outline.style = DS.Table.style
-        outline.rowHeight = FileTable.rowHeight
+        outline.configureRows(height: FileTable.rowHeight)
         outline.apply(context.environment.palette, lines: context.environment.tableLines, stripes: true)
         outline.allowsMultipleSelection = true
         outline.columnAutoresizingStyle = .noColumnAutoresizing
@@ -114,6 +115,7 @@ struct DiskOutline: NSViewRepresentable {
         let appearanceChanged = c.family != context.environment.palette.family
         c.family = context.environment.palette.family
         c.parent = self
+        c.applyDensity(context.environment.layoutDensity)
         c.outline?.apply(context.environment.palette, lines: context.environment.tableLines, stripes: true)
         let sortChanged = c.applySortRequest()
         if changed || sortChanged { c.rebuild() }
@@ -147,8 +149,32 @@ struct DiskOutline: NSViewRepresentable {
         private var lastMarks: Set<String>?
         private var marksKnown = false
         private var lastSortRequest: UUID?
+        private var density = Density.current
 
         init(_ parent: DiskOutline) { self.parent = parent }
+
+        func applyDensity(_ value: Density) {
+            guard density != value, let outline else { return }
+            density = value
+            let anchor = TableScrollAnchor(outline) { (outline.item(atRow: $0) as? Node).map(Self.key) }
+            outline.style = DS.Table.style
+            outline.configureRows(height: DS.Table.row)
+            outline.indentationPerLevel = DS.Table.indent
+            refreshVisible(appearance: true)
+            outline.updateScrollableWidth()
+            restore(anchor)
+        }
+
+        private static func key(_ node: Node) -> String { (node.smallFiles ? "small:" : "row:") + node.path }
+
+        private func restore(_ anchor: TableScrollAnchor) {
+            guard let outline else { return }
+            var index: [String: Int] = [:]
+            for row in 0..<outline.numberOfRows {
+                if let node = outline.item(atRow: row) as? Node { index[Self.key(node)] = row }
+            }
+            anchor.restore(in: outline) { index[$0] }
+        }
 
         @discardableResult func applySortRequest() -> Bool {
             guard let request = parent.sortRequest, lastSortRequest != request.id, let outline,
@@ -263,20 +289,43 @@ struct DiskOutline: NSViewRepresentable {
                                   summary: FileRow(id: key, name: String(localized: "\(small.0.formatted()) smaller files"), size: small.1,
                                                    symbol: "doc.on.doc", subtitle: String(localized: "Under 1 MB each · open to list")), smallFiles: true))
             }
+            guard let outline else { return }
+            let anchor = TableScrollAnchor(outline) { (outline.item(atRow: $0) as? Node).map(Self.key) }
+            let old = node === requestedRoot ? rootNode?.children ?? [] : node.children ?? []
+            let byKey = Dictionary(old.map { (Self.key($0), $0) }, uniquingKeysWith: { a, _ in a })
+            nodes = nodes.map { candidate in
+                let retained = byKey[Self.key(candidate)] ?? candidate
+                retained.entry = candidate.entry
+                retained.folder = candidate.folder
+                retained.summary = candidate.summary
+                retained.generation = run
+                return retained
+            }
             node.children = nodes
             syncing = true
             if node === requestedRoot {
                 rootNode = node
                 displayedRevision = parent.revision
-                outline?.reloadData()
             }
-            else { outline?.reloadItem(node, reloadChildren: true) }
-            for child in nodes where child.folder != nil && parent.expanded.contains(child.path) && child.entry?.pending == false {
-                outline?.expandItem(child)
+            let parentItem: Node? = node === requestedRoot ? nil : node
+            outline.withoutRowAnimation {
+                if let changes = TableRowChanges.between(old.map(Self.key), nodes.map(Self.key)) {
+                    outline.beginUpdates()
+                    outline.removeItems(at: changes.removed, inParent: parentItem, withAnimation: [])
+                    outline.insertItems(at: changes.inserted, inParent: parentItem, withAnimation: [])
+                    outline.endUpdates()
+                } else if let parentItem { outline.reloadItem(parentItem, reloadChildren: true) }
+                else { outline.reloadData() }
+                for child in nodes where child.folder != nil && parent.expanded.contains(child.path) && child.entry?.pending == false {
+                    outline.expandItem(child)
+                    if child.children != nil { schedule(child) }
+                }
+                reportVisible()
+                select(force: true)
+                refreshVisible(appearance: true)
+                restore(anchor)
             }
             syncing = false
-            reportVisible()
-            select(force: true)
         }
 
         func reportVisible() {
@@ -285,7 +334,7 @@ struct DiskOutline: NSViewRepresentable {
             parent.state.revision = parent.revision
             let nodes = (0..<outline.numberOfRows).compactMap { outline.item(atRow: $0) as? Node }
             known = Dictionary(nodes.filter { $0.entry != nil }.map { ($0.path, $0) }, uniquingKeysWith: { a, _ in a })
-            let entries = nodes.compactMap(\.entry)
+            let entries = nodes.filter { $0.generation == generation }.compactMap(\.entry)
             parent.state.visible = entries
             parent.state.byPath = Dictionary(entries.map { ($0.path, $0) }, uniquingKeysWith: { a, _ in a })
             parent.state.readyCount = entries.filter { !$0.pending }.count
@@ -336,7 +385,19 @@ struct DiskOutline: NSViewRepresentable {
         func refreshVisible(appearance: Bool = false) {
             guard let outline else { return }
             refreshChoiceHeader()
-            if appearance { outline.reloadRowsWithViews(); return }
+            if appearance {
+                outline.enumerateAvailableRowViews { row, index in
+                    guard let node = outline.item(atRow: index) as? Node else { return }
+                    for (columnIndex, column) in outline.tableColumns.enumerated() where !column.isHidden {
+                        if let cell = row.view(atColumn: columnIndex) as? FileNameCell { self.configure(cell, node: node) }
+                        else if let cell = row.view(atColumn: columnIndex) as? FileTextCell,
+                                let field = FileColumn(rawValue: column.identifier.rawValue) {
+                            cell.configure(node.entry.map(self.parent.row) ?? node.summary ?? FileRow(id: node.path, name: ""), column: field)
+                        }
+                    }
+                }
+                return
+            }
             guard !marksKnown || lastMarks != parent.marks else { return }
             lastMarks = parent.marks
             marksKnown = true
@@ -357,7 +418,7 @@ struct DiskOutline: NSViewRepresentable {
 
         private func actionable(_ nodes: [Node]) -> [DiskEntry] {
             guard isCurrent else { return [] }
-            return nodes.compactMap(\.entry).filter { !$0.pending }
+            return nodes.filter { $0.generation == generation }.compactMap(\.entry).filter { !$0.pending }
         }
 
         private var isCurrent: Bool { rootNode?.folder === parent.root && displayedRevision == parent.revision }
@@ -460,11 +521,11 @@ struct DiskOutline: NSViewRepresentable {
                 row.badgeTint = .secondaryLabelColor
             }
             cell.configure(row, marked: marked) { [weak self] in
-                guard let self, isCurrent, let entry = node.entry, !entry.pending,
+                guard let self, isCurrent, node.generation == generation, let entry = node.entry, !entry.pending,
                       parent.marks.flatMap({ Marked.parent(of: entry.path, in: $0) }) == nil else { return }
                 parent.onToggle(entry)
             }
-            cell.setChoosingEnabled(isCurrent && included == nil && node.entry?.pending == false, help: help)
+            cell.setChoosingEnabled(isCurrent && node.generation == generation && included == nil && node.entry?.pending == false, help: help)
             cell.toolTip = node.entry?.path
         }
 
@@ -489,18 +550,25 @@ struct DiskOutline: NSViewRepresentable {
         }
 
         private func menuEntries(clicked: Int) -> [TableMenuEntry] {
-            parent.menu(actionable(targets(clicked: clicked)), parent.state.visible).map { entry in
+            let paths = Set(actionable(targets(clicked: clicked)).map(\.path))
+            return parent.menu(actionable(targets(clicked: clicked)), parent.state.visible).map { entry in
                 if case .quickLook = entry {
                     return .action(String(localized: "Quick Look")) { [weak self] in
-                        guard let self, let outline else { return }
-                        if clicked >= 0, !outline.selectedRowIndexes.contains(clicked) {
-                            outline.selectRowIndexes(IndexSet(integer: clicked), byExtendingSelection: false)
-                        }
+                        guard let self, let outline, selectForPreview(paths) else { return }
                         outline.togglePreview()
                     }
                 }
                 return entry
             }
+        }
+
+        func selectForPreview(_ paths: Set<String>) -> Bool {
+            guard isCurrent else { return false }
+            let current = Set(paths.filter { known[$0]?.generation == generation && known[$0]?.entry?.pending == false })
+            guard !current.isEmpty else { return false }
+            parent.selection = current
+            select(force: true)
+            return true
         }
 
         func menuNeedsUpdate(_ menu: NSMenu) {
@@ -521,6 +589,7 @@ struct DiskOutline: NSViewRepresentable {
 /// selection, Quick Look, hover and removal keys as the file table.
 final class DiskOutlineView: NSOutlineView, LinedTable, UserColumnTable {
     var defaultHiddenColumns = Set<String>()
+    var columnViewport: ColumnViewport?
     weak var coordinator: DiskOutline.Coordinator?
     var lines = TableLines.none
     var lineColor = NSColor.separatorColor

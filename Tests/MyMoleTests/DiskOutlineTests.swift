@@ -129,7 +129,7 @@ import Testing
         h.refresh()
         await h.coordinator.job?.value
         let fresh = try #require(h.coordinator.rootNode?.children?.first(where: { $0.path == old.path }))
-        #expect(fresh !== old && h.outline.isItemExpanded(fresh))
+        #expect(fresh === old && h.outline.isItemExpanded(fresh))
         let child = try #require(fresh.children?.first(where: { $0.folder != nil }))
         #expect(h.outline.isItemExpanded(child))
         #expect(h.coordinator.previewURLs.map(\.path) == [nested.path + "/data.bin"])
@@ -152,6 +152,24 @@ import Testing
         h.coordinator.select(force: true)
         h.coordinator.mark()
         #expect(h.chosen.isEmpty && top.children == nil)
+    }
+
+    @Test func aTrackedMenuKeepsItsOriginalPreviewPathAcrossSortingAndCannotOpenAnotherScope() async throws {
+        let h = Harness(root())
+        defer { h.stop() }
+        h.start()
+        await h.coordinator.job?.value
+        let original = try #require(h.coordinator.rootNode?.children?.first?.path)
+        h.outline.sortDescriptors = [NSSortDescriptor(key: "name", ascending: false)]
+        await h.coordinator.job?.value
+        #expect(h.coordinator.selectForPreview([original]))
+        #expect(h.coordinator.previewURLs.map(\.path) == [original])
+        h.root = root("another-scope")
+        h.revision += 1
+        h.refresh()
+        #expect(!h.coordinator.selectForPreview([original]))
+        await h.coordinator.job?.value
+        #expect(!h.coordinator.selectForPreview([original]))
     }
 
     @Test func aSlowOldSortCannotOverwriteANewerMapOrSpawnMoreSorters() async throws {
@@ -208,6 +226,54 @@ import Testing
         #expect(h.coordinator.rootNode !== earlier && h.outline.numberOfRows == 1_025)
         h.coordinator.mark()
         #expect(h.chosen.map(\.path) == [path])
+    }
+
+    @Test func anOpenBranchKeepsItsRowsWhileRefreshingButOldDescendantsCannotBeChosen() async throws {
+        func tree(_ count: Int) -> Folder {
+            let root = root(count: 1)
+            let folder = root.subfolders[0]
+            folder.subfolders = (0..<count).map { index in
+                let child = Folder(name: "child-\(index)", parent: folder)
+                child.ownBytes[.other] = 2_000_000
+                child.smallFileCount = 1
+                child.finish()
+                return child
+            }
+            folder.finish()
+            root.finish()
+            return root
+        }
+        let h = Harness(tree(1_024))
+        defer { h.stop() }
+        h.start()
+        await h.coordinator.job?.value
+        let folder = try #require(h.coordinator.rootNode?.children?.first)
+        h.outline.expandItem(folder)
+        await h.coordinator.job?.value
+        let earlier = try #require(folder.children?.first(where: { $0.entry != nil }))
+        h.selection = [earlier.path]
+        h.coordinator.select(force: true)
+        let release = DispatchSemaphore(value: 0)
+        defer { release.signal() }
+        let sorting = Atomic<Bool>(false)
+        h.sorter = { rows, col, asc in
+            sorting.store(true, ordering: .relaxed)
+            _ = release.wait(timeout: .now() + 5)
+            return FileTable.sorted(rows, by: col, ascending: asc)
+        }
+        h.root = tree(1_025)
+        h.revision += 1
+        h.refresh()
+        try #require(await waitUntil { sorting.load(ordering: .relaxed) })
+        #expect(h.outline.isItemExpanded(folder))
+        #expect(folder.children?.contains(where: { $0 === earlier }) == true)
+        #expect(h.selection == [earlier.path])
+        h.coordinator.mark()
+        #expect(h.chosen.isEmpty)
+        release.signal()
+        await h.coordinator.job?.value
+        h.coordinator.mark()
+        #expect(h.chosen.map(\.path) == [earlier.path])
     }
 
     @Test func aChildIncludedByAChosenFolderShowsACheckedDisabledBox() async throws {

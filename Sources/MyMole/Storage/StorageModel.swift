@@ -342,6 +342,9 @@ final class StorageModel {
     }
 
     func scan(path: String, background: Bool = false) {
+        #if SMOKE
+        guard let scope = try? SyntheticRun.current(), path == scope.home || path.hasPrefix(scope.home + "/") else { return }
+        #endif
         // The tree mustn't be swapped while a move or Undo works on it; the
         // scan starts once that's done.
         guard !trashing else {

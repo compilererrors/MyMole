@@ -92,10 +92,13 @@ final class ProjectsModel {
     /// What's inside entries the user opened, measured on demand; the most
     /// recent few are kept.
     var contents: [String: Folder] = [:]
+    var contentsRevision = 0
     /// Entries being measured. Not observed: the outline asks for contents
     /// from its data source while SwiftUI updates it, and nothing draws this.
-    @ObservationIgnored var loadingContents = Set<String>()
+    @ObservationIgnored var loadingContents: [String: UUID] = [:]
     @ObservationIgnored var contentsOrder: [String] = []
+    @ObservationIgnored var contentsVersions: [String: Int] = [:]
+    @ObservationIgnored var readContents: @Sendable (String, Int) -> Folder = { StorageScanner.scan(path: $0, workers: $1).root }
 
     private var progress: ScanProgress?
     /// A move that can still be put back, the entries it took, and whether

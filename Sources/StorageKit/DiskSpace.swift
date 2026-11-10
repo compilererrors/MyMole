@@ -28,6 +28,10 @@ public struct DiskSpace: Sendable, Equatable {
 
     /// The disk `path` is on, or nil when it can't be read.
     public static func read(volumeOf path: String, runner: CommandRunner = .processes(timeLimit: 10)) -> DiskSpace? {
+        #if SMOKE
+        guard (try? SyntheticRun.current()) != nil else { return nil }
+        return DiskSpace(total: 100 << 30, used: 40 << 30, purgeable: 0, snapshots: [])
+        #else
         let keys: Set<URLResourceKey> = [
             .volumeTotalCapacityKey, .volumeAvailableCapacityForImportantUsageKey, .volumeAvailableCapacityKey,
         ]
@@ -38,6 +42,7 @@ public struct DiskSpace: Sendable, Equatable {
         return DiskSpace(
             total: Int64(total), used: max(0, Int64(total) - available), purgeable: max(0, available - Int64(free)),
             snapshots: snapshots(of: path, runner: runner))
+        #endif
     }
 
     /// "com.apple.TimeMachine.2026-11-06-010203.local", one a line.

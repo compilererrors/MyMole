@@ -179,7 +179,7 @@ public enum ProjectArtifacts {
                     default: sub.name
                     }
                 groups[key, default: (c, [])].1.append(
-                    FootprintEntry(path: sub.path, bytes: sub.size, modified: sub.latestChange))
+                    FootprintEntry(path: sub.path, bytes: sub.size, modified: sub.latestChange, isDirectory: true))
                 claimed[top, default: 0] += sub.size
             }
         }
@@ -190,13 +190,13 @@ public enum ProjectArtifacts {
         }
         var source: [FootprintEntry] = []
         if root.looseBytes > 0 {
-            source.append(FootprintEntry(path: project.path, bytes: root.looseBytes, modified: root.ownLatestChange))
+            source.append(FootprintEntry(path: project.path, bytes: root.looseBytes, modified: root.ownLatestChange, isDirectory: true))
         }
         for sub in root.subfolders {
             // Nothing left once a top-level folder is an item of its own.
             let left = sub.size - (claimed[sub.path] ?? 0)
             guard left > 0 else { continue }
-            source.append(FootprintEntry(path: sub.path, bytes: left, modified: latest[sub.path] ?? sub.ownLatestChange))
+            source.append(FootprintEntry(path: sub.path, bytes: left, modified: latest[sub.path] ?? sub.ownLatestChange, isDirectory: true))
         }
         out.append(
             FootprintItem(

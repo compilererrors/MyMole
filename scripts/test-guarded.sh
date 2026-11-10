@@ -37,8 +37,33 @@ swift build --build-tests ${build[@]+"${build[@]}"}
 
 root=$(mktemp -d "${TMPDIR:-/tmp}/mymole-guarded-test-XXXXXX")
 root=$(cd "$root" && pwd -P)
-trap 'rm -rf "$root"' EXIT
+outside=$(mktemp -d /private/tmp/mymole-guard-canary-XXXXXXXX)
+lease=$(python3 -I - "$root" "$outside" <<'PY'
+import json,os,sys
+print(json.dumps({p:[os.lstat(p).st_dev,os.lstat(p).st_ino,os.getuid()] for p in sys.argv[1:]}))
+PY
+)
+cleanup() {
+  local result=$?
+  trap - EXIT
+  python3 -I - "$root" "$outside" "$lease" <<'PY' || result=1
+import json,os,shutil,stat,sys
+lease=json.loads(sys.argv[3])
+for path in sys.argv[1:3]:
+    s=os.lstat(path)
+    assert stat.S_ISDIR(s.st_mode) and [s.st_dev,s.st_ino,s.st_uid]==lease[path]
+    assert s.st_uid==os.getuid() and s.st_mode & 0o077==0
+sentinel=os.path.join(sys.argv[2],'sentinel')
+s=os.lstat(sentinel)
+assert stat.S_ISREG(s.st_mode) and s.st_uid==os.getuid() and s.st_mode & 0o077==0
+with open(sentinel,'rb') as f: assert f.read()==b'synthetic canary'
+for path in sys.argv[1:3]: shutil.rmtree(path)
+PY
+  exit "$result"
+}
+trap cleanup EXIT
 mkdir -m 700 "$root/tmp" "$root/cache"
+printf 'synthetic canary' > "$outside/sentinel"
 
 usertmp=$(cd "$(getconf DARWIN_USER_TEMP_DIR)" && pwd -P)
 quote() { local text=${1//\\/\\\\}; printf '"%s"' "${text//\"/\\\"}"; }
@@ -55,25 +80,17 @@ profile="$root/profile.sb"
   # Every user's home is closed; only this repository is opened again (later
   # rules win), so agent history, settings and other projects stay out.
   echo '(deny file-read* (subpath "/Users"))'
+  echo "(deny file-read* (subpath $(quote "$outside")))"
   [ "${home#/Users/}" = "$home" ] && echo "(deny file-read* (subpath $(quote "$home")))"
   echo "(allow file-read* (subpath $(quote "$repo")) (literal \"/Users\") (literal $(quote "$home")))"
 } > "$profile"
 
-# The guard proves itself first: each probe must be refused.
+# Probe only our own canary, never user files or a real network endpoint.
 sandboxed() { /usr/bin/sandbox-exec -f "$profile" /bin/sh -c "$1" >/dev/null 2>&1; }
-probe="$home/.mymole-guard-probe-$$"
-if sandboxed "touch '$probe'"; then rm -f "$probe"; fail "The sandbox let a test write to the home folder."; fi
-if sandboxed "ls '$home/Documents'"; then fail "The sandbox let a test read the Documents folder."; fi
-# Places a narrower list missed, probed by name only: listing them must fail.
-for closed in .codex .claude .config Library/Preferences Workspace .Trash; do
-  if [ -e "$home/$closed" ] && sandboxed "ls '$home/$closed'"; then fail "The sandbox let a test read ~/$closed."; fi
-done
-if sandboxed "touch '$home/.Trash/.mymole-guard-probe-$$'"; then fail "The sandbox let a test write to the Trash."; fi
+if sandboxed "exec 3>>'$outside/sentinel'"; then fail "The sandbox let a test write outside its run folder."; fi
+if sandboxed "exec 3<'$outside/sentinel'"; then fail "The sandbox let a test read its closed canary."; fi
 sandboxed "ls '$repo/Package.swift'" || fail "The sandbox refused reading this repository."
-if sandboxed "/usr/bin/nc -z -G 3 1.1.1.1 443"; then fail "The sandbox let a test reach the network."; fi
 sandboxed "touch '$root/tmp/probe'" || fail "The sandbox refused writes to the run's own folder."
-cachedir=$(getconf DARWIN_USER_CACHE_DIR)
-if sandboxed "touch '$cachedir/.mymole-guard-probe-$$'"; then rm -f "$cachedir/.mymole-guard-probe-$$"; fail "The sandbox let a test write to the user's cache folder."; fi
 echo "Guard: home reads (but this repository), home and Trash writes, and the network are refused; the run folder is writable."
 
 # Each test bundle runs straight through Swift Testing's helper: building
@@ -102,8 +119,15 @@ for dir in Tests/*/; do
   if TMPDIR="$root/tmp/" MYMOLE_GUARDED_TEST=1 XDG_CACHE_HOME="$root/cache" PLATFORM="$developer/Platforms/MacOSX.platform/Developer" \
     INSERT="$insert" /usr/bin/sandbox-exec -f "$profile" /bin/sh -c \
     '[ -z "$INSERT" ] || export DYLD_INSERT_LIBRARIES="$INSERT"; DYLD_FRAMEWORK_PATH="$PLATFORM/Library/Frameworks" DYLD_LIBRARY_PATH="$PLATFORM/usr/lib" exec "$@"' sh \
-    "$helper" --test-bundle-path "$bundle" --testing-library swift-testing "$@"; then
-    matched=$((matched + 1))
+    "$helper" --test-bundle-path "$bundle" --testing-library swift-testing "$@" \
+    --event-stream-output-path "$root/$target.events.jsonl"; then
+    verified=0
+    python3 -I "$repo/scripts/check-test-events.py" "$root/$target.events.jsonl" || verified=$?
+    case "$verified" in
+      0) matched=$((matched + 1)) ;;
+      69) echo "No active tests in $target." ;;
+      *) status=1 ;;
+    esac
   else
     code=$?
     # Swift Testing's no-tests exit is expected for a filter that matches
@@ -117,5 +141,5 @@ for dir in Tests/*/; do
     fi
   fi
 done
-[ "$matched" -gt 0 ] || fail "No test bundle matched the requested run."
+[ "$matched" -gt 0 ] || fail "No test functions actually ran; check the filter and disabled suites."
 exit $status

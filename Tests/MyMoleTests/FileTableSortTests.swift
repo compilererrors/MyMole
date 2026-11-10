@@ -59,6 +59,23 @@ import Testing
         #expect(coordinator.shown.isEmpty && table.numberOfRows == 0)
     }
 
+    @Test func previewFromAMenuTargetsItsOriginalIdentityAfterSortingAndRefusesADisappearedRow() {
+        var selection = Set<String>()
+        let (coordinator, table) = fixture(selection: Binding(get: { selection }, set: { selection = $0 }))
+        let first = FileRow(id: "/synthetic/a", name: "A", size: 100)
+        let second = FileRow(id: "/synthetic/b", name: "B", size: 200)
+        coordinator.load([first, second], marks: [], selection: [])
+        let original = coordinator.shown[0].id
+        var changed = first
+        changed.size = 300
+        coordinator.load([changed, second], marks: [], selection: [])
+        #expect(coordinator.selectForPreview([original]))
+        #expect(selection == [original] && coordinator.shown[table.selectedRow].id == original)
+        coordinator.load([changed], marks: [], selection: selection)
+        #expect(!coordinator.selectForPreview([original]))
+        #expect(coordinator.shown.count == 1)
+    }
+
     @Test func bulkChoiceWaitsForTheCurrentFilteredPresentationAndNeverChecksStaleRows() async throws {
         let (coordinator, table) = fixture()
         var requested: [String] = []
