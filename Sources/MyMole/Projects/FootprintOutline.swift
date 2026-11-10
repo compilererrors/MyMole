@@ -58,6 +58,7 @@ struct FootprintOutline: NSViewRepresentable {
         outline.delegate = context.coordinator
         outline.target = context.coordinator
         outline.doubleAction = #selector(Coordinator.doubleClicked)
+        TableChoiceHeader.install(on: outline)
         let rowMenu = NSMenu()
         rowMenu.delegate = context.coordinator
         outline.menu = rowMenu
@@ -185,6 +186,7 @@ struct FootprintOutline: NSViewRepresentable {
             outline.reloadData()
             for r in roots { outline.expandItem(r) }
             reopen(roots, open)
+            refreshChoiceHeader()
         }
 
         private func itemNode(_ item: FootprintItem) -> Node {
@@ -328,6 +330,7 @@ struct FootprintOutline: NSViewRepresentable {
         /// made again, so a click costs microseconds however big the folder.
         func refreshVisible() {
             guard let outline else { return }
+            refreshChoiceHeader()
             let column = outline.column(withIdentifier: NSUserInterfaceItemIdentifier(FileColumn.name.rawValue))
             guard column >= 0 else { return }
             outline.enumerateAvailableRowViews { rowView, row in
@@ -335,6 +338,20 @@ struct FootprintOutline: NSViewRepresentable {
                     let cell = rowView.view(atColumn: column) as? TreeNameCell
                 else { return }
                 cell.update(look(n))
+            }
+        }
+
+        private func refreshChoiceHeader() {
+            guard let header = outline?.headerView as? TableChoiceHeader else { return }
+            let items = parent.footprint.items.filter { $0.removable && !model.eligible($0).isEmpty }
+            let states = items.map(model.check)
+            let all = !states.isEmpty && states.allSatisfy { $0 == .on }
+            let state: ListedChoices.State = all ? .on : states.contains(where: { $0 != .off }) ? .mixed : .off
+            header.update(state: state, visible: true, enabled: !items.isEmpty && !model.scanning && !model.trashing,
+                          help: String(localized: "Check the removable items listed for this project within the age filter. Protected data stays. Expanded contents go with their chosen parent; nothing is moved here.")) { [weak self] in
+                guard let self else { return }
+                model.setListedItems(items, checked: !all)
+                refreshVisible()
             }
         }
 

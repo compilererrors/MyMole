@@ -22,15 +22,55 @@ public enum ApplicationTrash {
 
         /// Only root-owned third-party apps directly in Applications qualify.
         /// The original pre-move proof prevents a replacement being authorized.
-        public static func capture(_ app: AppBundle, source: RemovedApp.Source) -> Request? {
+        public static func isEligible(_ app: AppBundle, source: RemovedApp.Source) -> Bool {
             var st = stat()
             guard (app.path as NSString).deletingLastPathComponent == "/Applications",
                   source.isAtOriginalPath, !app.isProtected, let id = app.bundleID,
                   !id.lowercased().hasPrefix("com.apple."), AppLeftovers.isWellFormed(id),
-                  lstat(app.path, &st) == 0, st.st_uid == 0, st.st_mode & S_IFMT == S_IFDIR else { return nil }
+                  lstat(app.path, &st) == 0, st.st_uid == 0, st.st_mode & S_IFMT == S_IFDIR else { return false }
+            return true
+        }
+
+        public static func capture(_ app: AppBundle, source: RemovedApp.Source) -> Request? {
+            guard isEligible(app, source: source), let id = app.bundleID else { return nil }
+            let name = (app.path as NSString).lastPathComponent
+            let trash = Home.path + "/.Trash/"
+            guard let destination = availableTrashName(for: name, occupied: { candidate in
+                var entry = stat()
+                if lstat(trash + candidate, &entry) == 0 { return true }
+                return errno == ENOENT ? false : nil
+            }) else { return nil }
             return Request(path: app.path, bundleID: id, identity: source.originalIdentity,
                            parentIdentity: source.originalParentIdentity, uid: getuid(),
-                           trashName: UUID().uuidString + "-" + (app.path as NSString).lastPathComponent)
+                           trashName: destination)
+        }
+
+        /// Names are reserved by the final exclusive rename, never overwritten.
+        /// The inexpensive preflight only proposes a readable destination.
+        static func availableTrashName(for name: String, occupied: (String) -> Bool?) -> String? {
+            for number in 1...9_999 {
+                let candidate = trashName(for: name, number: number)
+                guard let exists = occupied(candidate) else { return nil }
+                if !exists { return candidate }
+            }
+            return nil
+        }
+
+        static func trashName(for name: String, number: Int) -> String {
+            number == 1 ? name : (name as NSString).deletingPathExtension + " \(number)." + (name as NSString).pathExtension
+        }
+
+        static func acceptsTrashName(_ value: String, original name: String, restoring: Bool) -> Bool {
+            if value == name { return true }
+            let stem = (name as NSString).deletingPathExtension
+            let ext = "." + (name as NSString).pathExtension
+            if value.hasPrefix(stem + " "), value.hasSuffix(ext) {
+                let digits = String(value.dropFirst(stem.count + 1).dropLast(ext.count))
+                if let number = Int(digits), (2...9_999).contains(number), trashName(for: name, number: number) == value { return true }
+            }
+            // Receipts produced by an earlier build can still be restored.
+            return restoring && value.count > 37 && UUID(uuidString: String(value.prefix(36))) != nil
+                && value == String(value.prefix(36)) + "-" + name
         }
     }
 
@@ -119,8 +159,7 @@ public enum ApplicationTrash {
               Trasher.isPlainPath(request.path), (request.path as NSString).deletingLastPathComponent == context.applications,
               name.lowercased().hasSuffix(".app"), name.utf8.count <= 200,
               AppLeftovers.isWellFormed(request.bundleID), !request.bundleID.lowercased().hasPrefix("com.apple."),
-              request.trashName.count > 37, UUID(uuidString: String(request.trashName.prefix(36))) != nil,
-              request.trashName == String(request.trashName.prefix(36)) + "-" + name else {
+              Request.acceptsTrashName(request.trashName, original: name, restoring: restoring) else {
             throw Failure.refused("This request does not name an eligible application.")
         }
         let apps = try directory(context.applications)

@@ -15,6 +15,8 @@ struct StatusTelemetry: View {
     @Binding var order: StatusView.ProcessOrder
     var action: (Action) -> Void = { _ in }
     var requestQuit: (StatusAppTarget) -> Void = { _ in }
+    var processLimit = 8
+    var showsProcessMonitorLink = true
     @State private var showingDetails = false
     @State private var selectedInterface: String?
     @Environment(\.palette) private var palette
@@ -169,10 +171,10 @@ struct StatusTelemetry: View {
         }.font(.caption2).foregroundStyle(.secondary).padding(.top, DS.Space.xs)
         if snapshot.topProcesses.isEmpty {
             DSText("Process details aren't available for this reading.", .metadata)
-            link("Activity Monitor", symbol: "arrow.up.forward") { action(.activityMonitor) }
+            if showsProcessMonitorLink { link("Activity Monitor", symbol: "arrow.up.forward") { action(.activityMonitor) } }
         } else {
             VStack(spacing: 0) {
-                ForEach(order.sorted(snapshot.topProcesses).prefix(8)) { process in
+                ForEach(order.sorted(snapshot.topProcesses).prefix(processLimit)) { process in
                     StatusProcessRow(process: process, emphasis: order, requestQuit: requestQuit)
                 }
             }
@@ -212,8 +214,11 @@ struct StatusTelemetry: View {
     }
 
     private var detailsButton: some View {
-        Button { showingDetails = true } label: { Label("Details", systemImage: "chevron.right") }
-            .buttonStyle(.plain).font(.caption).foregroundStyle(.secondary)
+        Button { showingDetails = true } label: {
+            Label("Details", systemImage: "chevron.right").frame(minHeight: 24).contentShape(.rect)
+        }
+            .buttonStyle(.borderless).font(.caption).foregroundStyle(.secondary)
+            .allowsWindowActivationEvents()
             .accessibilityLabel("Details for \(card.title)")
             .popover(isPresented: $showingDetails, arrowEdge: .bottom) {
                 ViewThatFits(in: .vertical) {
@@ -323,8 +328,11 @@ struct StatusTelemetry: View {
         }.font(.caption)
     }
     private func link(_ title: LocalizedStringKey, symbol: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) { Label(title, systemImage: symbol) }
-            .buttonStyle(.plain).font(.caption).foregroundStyle(palette.accentText.color)
+        Button(action: action) {
+            Label(title, systemImage: symbol).frame(minHeight: 24).contentShape(.rect)
+        }
+            .buttonStyle(.borderless).font(.caption).foregroundStyle(palette.accentText.color)
+            .allowsWindowActivationEvents()
     }
 }
 

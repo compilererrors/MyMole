@@ -424,6 +424,14 @@ struct BasketBar: View {
                 DSText("\(model.marked.count) chosen · \(ByteCountFormatter.string(fromByteCount: model.markedBytes, countStyle: .file))", .body)
             }
         } trailing: {
+            if model.trashing {
+                if model.removalPhase != .restoring {
+                    Button(model.removalStopping ? "Stopping…" : "Stop", action: model.stopRemoval)
+                        .controlSize(.large)
+                        .disabled(!model.canStopRemoval)
+                        .help("Stops before the next item. Anything already moved can be undone.")
+                }
+            } else {
             Button("Clear") { model.marked.removeAll() }
                 .accessibilityLabel("Clear the choice")
                 .controlSize(.large)
@@ -431,12 +439,15 @@ struct BasketBar: View {
             Button("Move to Trash…", action: model.beginTrashReview)
                 .primaryAction()
                 .disabled(!model.canTrash)
+            }
         }
     }
 
     private var activity: String {
-        switch model.removalPhase {
+        if model.removalStopping { return String(localized: "Stopping after the current item…") }
+        return switch model.removalPhase {
         case .preparing: String(localized: "Preparing to move…")
+        case .stoppingScan: String(localized: "Stopping the scan before moving…")
         case .waiting: String(localized: "Waiting for another operation…")
         case .moving: String(localized: "Moving to the Trash…")
         case .restoring: String(localized: "Restoring…")

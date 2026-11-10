@@ -1,6 +1,7 @@
 import CoreTransferable
 import Foundation
 import UniformTypeIdentifiers
+import SwiftUI
 
 /// Only a card identity and the originating layout session travel in a drag.
 struct StatusCardDrag: Codable, Transferable, Sendable {
@@ -16,5 +17,20 @@ struct StatusCardDrag: Codable, Transferable, Sendable {
 
     static var transferRepresentation: some TransferRepresentation {
         CodableRepresentation(contentType: contentType)
+    }
+}
+
+/// Normal telemetry controls have no drag destination over their hit regions.
+/// Drop interactions exist only during an explicit layout edit.
+struct StatusCardDropTarget: ViewModifier {
+    let enabled: Bool
+    let accept: ([StatusCardDrag]) -> Bool
+    let targeted: (Bool) -> Void
+
+    @ViewBuilder func body(content: Content) -> some View {
+        if enabled {
+            content.dropDestination(for: StatusCardDrag.self) { items, _ in accept(items) }
+                isTargeted: { targeted($0) }
+        } else { content }
     }
 }

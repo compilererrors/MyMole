@@ -59,6 +59,22 @@ import Testing
         #expect(coordinator.shown.isEmpty && table.numberOfRows == 0)
     }
 
+    @Test func bulkChoiceWaitsForTheCurrentFilteredPresentationAndNeverChecksStaleRows() async throws {
+        let (coordinator, table) = fixture()
+        var requested: [String] = []
+        coordinator.parent.onSetMarks = { ids, _ in requested = ids }
+        let earlier = rows("earlier", count: 1)
+        coordinator.load(earlier, marks: [], selection: [])
+        let newest = rows("newest")
+        coordinator.load(newest, marks: [], selection: [])
+        coordinator.setListedMarks(true)
+        #expect(requested.isEmpty)
+        await coordinator.sortJob?.value
+        coordinator.setListedMarks(true)
+        #expect(Set(requested) == Set(newest.map(\.id)))
+        #expect(table.numberOfRows == newest.count)
+    }
+
     @Test func dismantlingPreventsALateSortFromPublishing() async throws {
         let (coordinator, table) = fixture()
         let earlier = rows("earlier", count: 1)

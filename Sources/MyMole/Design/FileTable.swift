@@ -32,7 +32,10 @@ struct FileRow: Identifiable, Equatable, Sendable {
     /// A measured item may still be protected or required in this review.
     var canChoose = true
     var reviewBeforeChoosing = false
+    /// A retained duplicate can still be chosen individually, but bulk choice keeps it.
+    var bulkCheckable = true
     var choiceHelp: String?
+    var sizePlaceholder: String?
 }
 
 enum FileColumn: String, CaseIterable, Sendable {
@@ -104,6 +107,10 @@ struct FileTable: NSViewRepresentable {
     var onToggleMark: (String) -> Void = { _ in }
     var onOpen: ([String]) -> Void = { _ in }
     var onMark: ([String]) -> Void = { _ in }
+    /// Explicit add/remove semantics; nil hides the bulk checkbox.
+    var onSetMarks: (([String], Bool) -> Void)?
+    var bulkChoiceHelp: String?
+    var bulkChoicesEnabled = true
     var onHover: (String?) -> Void = { _ in }
     var menu: ([String]) -> [TableMenuEntry] = { FileActions.inspectionMenu($0) }
     /// Groups and integration records map their IDs to real files explicitly.
@@ -116,6 +123,7 @@ struct FileTable: NSViewRepresentable {
     func makeNSView(context: Context) -> NSScrollView {
         let table = FileTableView()
         table.coordinator = context.coordinator
+        context.coordinator.enabled = context.environment.isEnabled
         table.style = DS.Table.style
         table.rowHeight = Self.rowHeight
         table.apply(context.environment.palette, lines: context.environment.tableLines, stripes: true)
@@ -142,6 +150,7 @@ struct FileTable: NSViewRepresentable {
         table.delegate = context.coordinator
         table.target = context.coordinator
         table.doubleAction = #selector(Coordinator.doubleClicked)
+        TableChoiceHeader.install(on: table)
         let rowMenu = NSMenu()
         rowMenu.delegate = context.coordinator
         table.menu = rowMenu
@@ -174,6 +183,7 @@ struct FileTable: NSViewRepresentable {
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         let c = context.coordinator
         c.parent = self
+        c.enabled = context.environment.isEnabled
         c.table?.apply(context.environment.palette, lines: context.environment.tableLines, stripes: true)
         c.applySortRequest()
         c.load(rows, marks: marks, selection: selection)
@@ -214,6 +224,7 @@ struct FileTable: NSViewRepresentable {
     @MainActor
     final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
         var parent: FileTable
+        var enabled = true
         weak var table: FileTableView?
         weak var rowMenu: NSMenu?
         weak var headerMenu: NSMenu?
@@ -229,14 +240,17 @@ struct FileTable: NSViewRepresentable {
             let ascending: Bool
             let sameOrder: Bool
             let unchanged: Bool
+            let choices: ListedChoices
         }
         private var sortGeneration = 0
+        private var installedGeneration = -1
         private let sorter = OffMain<Prepared?>(nil)
         private(set) var sortJob: Task<Void, Never>?
         private var appliedSource: [FileRow] = []
         private var appliedColumn: FileColumn?
         private var appliedAscending = false
         private var rowIndex: [String: Int] = [:]
+        private var choices = ListedChoices([])
         private var requestedSelection: Set<String>?
         private var pendingDisplay: (Prepared, Int)?
         private var resume: DispatchWorkItem?
@@ -280,6 +294,23 @@ struct FileTable: NSViewRepresentable {
                 if presentationActive { refreshMarks(table) }
             }
             if requestedSelection != selection { select(selection) }
+            refreshChoiceHeader()
+        }
+
+        private func refreshChoiceHeader() {
+            guard let header = table?.headerView as? TableChoiceHeader else { return }
+            let state = choices.state(marks ?? [])
+            header.update(state: state, visible: marks != nil && parent.onSetMarks != nil,
+                          enabled: enabled && parent.bulkChoicesEnabled && installedGeneration == sortGeneration && sortJob == nil && pendingDisplay == nil && presentationActive && (!choices.checkable.isEmpty || !choices.clearable.isDisjoint(with: marks ?? [])),
+                          help: parent.bulkChoiceHelp) { [weak self] in self?.setListedMarks() }
+        }
+
+        func setListedMarks(_ checked: Bool? = nil) {
+            guard table != nil, enabled, parent.bulkChoicesEnabled, presentationActive, installedGeneration == sortGeneration, sortJob == nil, pendingDisplay == nil,
+                  let marks, let action = parent.onSetMarks else { return }
+            let checked = checked ?? (choices.state(marks) != .on)
+            let ids = checked ? choices.checkable : choices.clearable
+            if !ids.isEmpty { action(Array(ids), checked) }
         }
 
         private func refreshMarks(_ table: NSTableView) {
@@ -337,18 +368,19 @@ struct FileTable: NSViewRepresentable {
                 self.sortJob = nil
                 self.install(prepared, generation: generation)
             }
+            refreshChoiceHeader()
         }
 
         nonisolated private static func prepare(_ input: [FileRow], column: FileColumn, ascending: Bool,
                                                 previousInput: [FileRow], previousRows: [FileRow], previousIndex: [String: Int], sameSort: Bool) -> Prepared {
             if sameSort, input == previousInput {
                 return Prepared(source: input, rows: previousRows, index: previousIndex, column: column,
-                                ascending: ascending, sameOrder: true, unchanged: true)
+                                ascending: ascending, sameOrder: true, unchanged: true, choices: ListedChoices(input))
             }
             let sorted = FileTable.sorted(input, by: column, ascending: ascending)
             let sameOrder = sorted.count == previousRows.count && zip(sorted, previousRows).allSatisfy { $0.id == $1.id }
             let index = sameOrder ? previousIndex : Dictionary(sorted.enumerated().map { ($0.element.id, $0.offset) }, uniquingKeysWith: { a, _ in a })
-            return Prepared(source: input, rows: sorted, index: index, column: column, ascending: ascending, sameOrder: sameOrder, unchanged: false)
+            return Prepared(source: input, rows: sorted, index: index, column: column, ascending: ascending, sameOrder: sameOrder, unchanged: false, choices: ListedChoices(input))
         }
 
         func stopSorting() {
@@ -374,7 +406,10 @@ struct FileTable: NSViewRepresentable {
             rowIndex = prepared.index
             appliedColumn = prepared.column
             appliedAscending = prepared.ascending
+            choices = prepared.choices
+            installedGeneration = generation
             previous.releaseLater()
+            refreshChoiceHeader()
             guard !prepared.unchanged else { return }
             if prepared.sameOrder {
                 Timings.measure(.refresh, rows: prepared.rows.count) { reloadVisible(table) }
@@ -516,14 +551,23 @@ struct FileTable: NSViewRepresentable {
             }
             let ids = targetIDs(clicked: table.clickedRow)
             if !ids.isEmpty { add(parent.menu(ids), to: menu) }
+            addListedChoices(to: menu)
             table.addColumnSubmenu(to: menu)
         }
 
         func keyboardMenu() -> NSMenu {
             let menu = NSMenu()
             add(parent.menu(targetIDs(clicked: -1)), to: menu, clickedRow: -1)
+            addListedChoices(to: menu)
             table?.addColumnSubmenu(to: menu)
             return menu
+        }
+
+        private func addListedChoices(to menu: NSMenu) {
+            guard marks != nil, parent.onSetMarks != nil else { return }
+            if !menu.items.isEmpty { menu.addItem(.separator()) }
+            if !choices.checkable.isEmpty { menu.addItem(ClosureMenuItem(String(localized: "Check All Listed")) { [weak self] in self?.setListedMarks(true) }) }
+            if !choices.clearable.isEmpty { menu.addItem(ClosureMenuItem(String(localized: "Uncheck All Listed")) { [weak self] in self?.setListedMarks(false) }) }
         }
 
         private func add(_ entries: [TableMenuEntry], to menu: NSMenu, clickedRow: Int? = nil) {
@@ -844,7 +888,7 @@ final class FileTextCell: NSTableCellView, ColumnWidthProviding {
         label.toolTip = nil
         switch column {
         case .size:
-            label.stringValue = r.size.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? String(localized: "Scanning…")
+            label.stringValue = r.size.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? r.sizePlaceholder ?? String(localized: "Scanning…")
             if r.size == nil { label.textColor = .tertiaryLabelColor }
         case .freeable:
             label.stringValue = r.freeable.map { $0 > 0 ? ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) : "—" } ?? ""

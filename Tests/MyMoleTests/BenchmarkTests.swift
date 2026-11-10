@@ -13,6 +13,33 @@ import Testing
 /// time taken and the most memory the run had held by then.
 @Suite(.serialized, .enabled(if: ProcessInfo.processInfo.environment["MYMOLE_BENCHMARK"] == "1"))
 struct BenchmarkTests {
+    @Test func preparingLargeDiskMapResults() {
+        let root = Folder(name: "synthetic", parent: nil, rootPath: "/synthetic")
+        for folder in 0..<1_500 {
+            let child = Folder(name: "folder-\(folder)", parent: root)
+            child.listedFiles = (0..<64).map { file in
+                FileItem(name: "file-\(file).bin", size: Int64(((folder * 64 + file) * 7919) % 100_003) + 1_048_576,
+                         modified: .distantPast, kind: .other)
+            }
+            root.subfolders.append(child)
+        }
+        let baseline = Self.time("disk-large-legacy-96k") {
+            var files: [LargeFile] = []
+            var stack = [root]
+            while let folder = stack.popLast() {
+                let path = folder.path
+                files += folder.listedFiles.map { LargeFile(path: path + "/" + $0.name, name: $0.name, folder: path, size: $0.size, modified: $0.modified, kind: $0.kind) }
+                stack += folder.subfolders
+            }
+            files.sort { $0.size > $1.size }
+            return Array(files.prefix(5_000))
+        }
+        let bounded = Self.time("disk-large-bounded-96k") { StorageModel.collectLargeFiles(root) }
+        #expect(baseline.map(\.path) == bounded.map(\.path))
+        let stopped = Self.time("disk-large-cancelled") { StorageModel.collectLargeFiles(root, stop: { true }) }
+        #expect(stopped.isEmpty)
+    }
+
     private final class Box {
         let root = FileManager.default.temporaryDirectory.appending(path: "bench-\(UUID().uuidString)")
         var path: String { root.path }

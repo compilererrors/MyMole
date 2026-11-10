@@ -23,6 +23,8 @@ public struct FileItem: Sendable, Hashable {
 /// (`name`, `parent`, `path`, `inheritedKind`, `rebuildable`). After that a
 /// tree changes only on the main actor, when trashed items are pruned. That
 /// single-writer discipline is why the class can be `@unchecked Sendable`.
+/// A retired walk may retain unpublished branches; `partialPresentation`
+/// transfers only published branches to the presentation actor's new root.
 public final class Folder: Identifiable, @unchecked Sendable {
     public static let listedFileSize: Int64 = 1_048_576
 
@@ -35,6 +37,9 @@ public final class Folder: Identifiable, @unchecked Sendable {
     public let rebuildable: Rebuildable?
     /// Set when the folder couldn't be read (permissions).
     public internal(set) var unreadable = false
+    /// A placeholder retained when a live reader is retired before this branch
+    /// was published. Its contents are unknown, rather than an empty directory.
+    public internal(set) var wasNotScanned = false
 
     public internal(set) var subfolders: [Folder] = []
     public internal(set) var listedFiles: [FileItem] = []
@@ -125,6 +130,36 @@ public final class Folder: Identifiable, @unchecked Sendable {
             f.listedFiles.sort { $0.size > $1.size }
             f.isFinished = true
         }
+    }
+
+    /// Transfers only already published, finished branches to a new presentation.
+    /// The old walker owns every unfinished branch and never touches a published
+    /// branch again. Both roots have the same path, so descendants keep theirs.
+    /// Call only from the presentation's owning actor after retiring its reader.
+    public func partialPresentation(published: Set<ObjectIdentifier>) -> Folder {
+        let copy = Folder(name: name, parent: nil, rootPath: path, rebuildable: rebuildable)
+        copy.unreadable = unreadable
+        copy.listedFiles = listedFiles
+        copy.smallFileCount = smallFileCount
+        copy.smallFileBytes = smallFileBytes
+        copy.ownBytes = ownBytes
+        copy.ownLatestChange = ownLatestChange
+        copy.latestChange = ownLatestChange
+        copy.ownRiskCode = ownRiskCode
+        copy.riskListed = riskListed
+        for child in subfolders {
+            if published.contains(child.id) {
+                child.parent = copy
+                copy.subfolders.append(child)
+            } else {
+                let unknown = Folder(name: child.name, parent: copy, rebuildable: child.rebuildable)
+                unknown.wasNotScanned = true
+                unknown.finish()
+                copy.subfolders.append(unknown)
+            }
+        }
+        copy.finish()
+        return copy
     }
 
     // MARK: Pruning after items are moved to the Trash (main actor)

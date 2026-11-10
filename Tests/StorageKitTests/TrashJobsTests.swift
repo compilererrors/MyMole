@@ -61,6 +61,22 @@ import Testing
 }
 
 @Suite struct TrashJobsTests {
+    @Test func preparationIsBusyAndStoppableWithoutHoldingTheExecutionTurn() async {
+        let jobs = TrashJobs()
+        let preparing = jobs.prepare(.moveToTrash)
+        #expect(jobs.isBusy && jobs.running == nil && jobs.waiting == 0)
+        let other = await jobs.begin(.putBack)
+        #expect(jobs.running === other && !preparing.isStopped)
+        jobs.end(other)
+        #expect(jobs.isBusy && jobs.running == nil)
+        jobs.stop()
+        #expect(preparing.isStopped)
+        _ = await jobs.begin(preparing)
+        #expect(jobs.running === preparing)
+        jobs.end(preparing)
+        #expect(!jobs.isBusy)
+    }
+
     @Test func aStoppedJobLeavesTheRestAndSaysSo() async throws {
         let box = try Sandbox()
         let a = try box.file("cache/a", bytes: 10).path

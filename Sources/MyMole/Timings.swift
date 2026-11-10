@@ -29,6 +29,7 @@ enum Timings {
         /// From asking a Disk Map scan to stop to it having stopped.
         case stop
         case confirmation, removalPreparation
+        case removalScanWait, removalQueue, removalMove, removalApply
 
         var title: String {
             switch self {
@@ -47,6 +48,10 @@ enum Timings {
             case .stop: String(localized: "Stop a scan")
             case .confirmation: String(localized: "Open a confirmation")
             case .removalPreparation: String(localized: "Prepare removal details")
+            case .removalScanWait: String(localized: "Stop scan before moving")
+            case .removalQueue: String(localized: "Wait for the removal queue")
+            case .removalMove: String(localized: "Move chosen items to the Trash")
+            case .removalApply: String(localized: "Update the map after removal")
             }
         }
     }

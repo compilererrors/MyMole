@@ -348,6 +348,10 @@ struct UninstallView: View {
                 if chosen.count == 1 { selected = chosen[0] } else if !chosen.isEmpty { batch = BatchRequest(apps: chosen.filter { !$0.isProtected }) }
             },
             onMark: { ids in for a in ids.compactMap({ byPath[$0] }) where !picked.contains(a.path) { toggle(a) } },
+            onSetMarks: { ids, checked in
+                let eligible = ids.compactMap { byPath[$0] }.filter { !$0.isProtected && !$0.sizePending }.map(\.path)
+                if checked { picked.formUnion(eligible) } else { picked.subtract(eligible) }
+            },
             menu: { ids in
                 let chosen = ids.compactMap { byPath[$0] }.filter { !$0.sizePending }
                 guard let first = chosen.first else { return [] }
@@ -668,7 +672,15 @@ struct UninstallSheet: View {
                                 if !item.canRemove { selection = [id] }
                                 if hasManualSelection { systemChosen = [] }
                             },
-                            onOpen: { FileActions.reveal($0) }
+                            onOpen: { FileActions.reveal($0) },
+                            onSetMarks: { ids, checked in
+                                guard checking == nil, !model.uninstalling, !reviewUnavailable else { return }
+                                let paths = Set(ids)
+                                let eligible = (leftovers ?? []).filter { paths.contains($0.path) && canChoose($0) }.map(\.path)
+                                choiceCommitted = true
+                                if checked { chosen.formUnion(eligible) } else { chosen.subtract(eligible) }
+                                if hasManualSelection { systemChosen = [] }
+                            }
                         )
                         .frame(height: system.isEmpty ? 240 : 170)
                         UninstallRowDetails(item: inspectedLeftover, canChoose: inspectedLeftover.map(canChoose) ?? false)
@@ -902,7 +914,12 @@ struct UninstallSheet: View {
                 guard model.canRemoveSystemLeftovers, !hasManualSelection, !kept.contains(id) else { return }
                 if systemChosen.contains(id) { systemChosen.remove(id) } else { systemChosen.insert(id) }
             },
-            onOpen: { FileActions.reveal($0) })
+            onOpen: { FileActions.reveal($0) },
+            onSetMarks: { ids, checked in
+                guard model.canRemoveSystemLeftovers, !hasManualSelection, !model.uninstalling else { return }
+                let eligible = ids.filter { !kept.contains($0) }
+                if checked { systemChosen.formUnion(eligible) } else { systemChosen.subtract(eligible) }
+            })
         .frame(height: 120)
     }
 

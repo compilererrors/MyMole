@@ -16,6 +16,38 @@ import Testing
         }
     }
 
+    @Test func aResizedScrollableGridReportsAndReachesItsLastCard() async throws {
+        let host = NSHostingView(rootView: ScrollPanel())
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 720, height: 400), styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        defer { window.close() }
+        for width in [CGFloat(720), 1120, 560, 900] {
+            window.setContentSize(NSSize(width: width, height: 400))
+            host.frame = NSRect(x: 0, y: 0, width: width, height: 400)
+            for _ in 0..<6 {
+                host.layoutSubtreeIfNeeded()
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            var views = [NSView](), pending = [host as NSView]
+            while let view = pending.popLast() { views.append(view); pending += view.subviews }
+            let probes = views.compactMap { $0 as? ProbeView }
+            #expect(probes.count == StatusCardID.allCases.count)
+            let scroll = try #require(views.compactMap { $0 as? NSScrollView }.first)
+            let document = try #require(scroll.documentView)
+            let last = try #require(probes.first { $0.card == .processes })
+            let bottom = last.convert(last.bounds, to: document).maxY
+            #expect(bottom <= document.bounds.maxY + 1)
+            #expect(document.bounds.height > scroll.contentView.bounds.height)
+            scroll.contentView.scroll(to: NSPoint(x: 0, y: document.bounds.maxY - scroll.contentView.bounds.height))
+            scroll.reflectScrolledClipView(scroll.contentView)
+            try await Task.sleep(for: .milliseconds(20))
+            let reached = last.convert(last.bounds, to: scroll.contentView)
+            #expect(reached.maxY <= scroll.contentView.bounds.maxY + 1)
+            #expect(reached.minY >= scroll.contentView.bounds.minY - 1)
+        }
+    }
+
     private func checkCardFrames(compact: Bool, spacing: CGFloat, editing: Bool) async throws {
         let host = NSHostingView(rootView: Panel(expanded: false, compact: compact, spacing: spacing, editing: editing))
         host.frame = NSRect(x: 0, y: 0, width: 720, height: 1800)
@@ -52,6 +84,17 @@ import Testing
     }
 }
 
+private struct ScrollPanel: View {
+    private let cards = StatusLayout().visible
+    var body: some View {
+        DSPage {
+            StatusGridView(cards: cards, spacing: 15) { card in
+                Color.clear.background(Probe(card: card.id))
+            }
+        }
+    }
+}
+
 private struct Panel: View {
     let expanded: Bool
     let compact: Bool
@@ -59,8 +102,7 @@ private struct Panel: View {
     let editing: Bool
     private let layout = StatusLayout()
     var body: some View {
-        StatusGrid(cards: layout.visible, compactDensity: compact, editing: editing, spacing: spacing) {
-            ForEach(layout.visible) { card in
+        StatusGridView(cards: layout.visible, compactDensity: compact, editing: editing, spacing: spacing) { card in
                 StatusCard(card: card.id, editing: editing, drag: StatusCardDrag(card: card.id, session: UUID())) {
                     if expanded {
                         ForEach(0..<30) { index in
@@ -73,7 +115,6 @@ private struct Panel: View {
                     Button("Example action") {}
                 }
                 .background(Probe(card: card.id))
-            }
         }
         .frame(width: 720)
     }

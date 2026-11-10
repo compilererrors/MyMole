@@ -186,6 +186,11 @@ struct OrphansSheet: View {
             onToggleMark: { model.toggle($0) },
             onOpen: { FileActions.reveal($0) },
             onMark: { model.choose($0) },
+            onSetMarks: { paths, checked in
+                guard !model.trashing, !apps.uninstalling else { return }
+                if checked { model.choose(paths) } else { model.chosen.subtract(paths) }
+            },
+            bulkChoicesEnabled: !model.trashing && !apps.uninstalling,
             menu: { ids in menu(ids) })
             .frame(height: 300)
             .overlay { emptyState.allowsHitTesting(false) }

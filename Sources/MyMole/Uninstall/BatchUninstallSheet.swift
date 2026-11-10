@@ -128,7 +128,8 @@ struct BatchUninstallSheet: View {
                 selection: $selection,
                 marks: chosen,
                 onToggleMark: toggle,
-                onOpen: { FileActions.reveal($0) }
+                onOpen: { FileActions.reveal($0) },
+                onSetMarks: setListedMarks
             )
             .frame(height: 320)
             DSActionGroup {
@@ -238,6 +239,29 @@ struct BatchUninstallSheet: View {
             guard (found?[owner.path] ?? []).contains(where: { $0.path == id && $0.canRemove }) else { return }
             if chosen.contains(id) { chosen.remove(id) } else { chosen.insert(id) }
         }
+    }
+
+    private func setListedMarks(_ ids: [String], checked: Bool) {
+        guard !ran, !model.uninstalling, !submitted else { return }
+        choiceCommitted = true
+        let paths = Set(ids)
+        var next = chosen
+        for app in apps where reason(app.path) == nil && !kept.contains(app.path) {
+            let leftovers = found?[app.path] ?? []
+            if paths.contains(app.path) {
+                if checked {
+                    next.insert(app.path)
+                    next.formUnion(leftovers.filter { $0.chosenByDefault && !kept.contains($0.path) }.map(\.path))
+                } else {
+                    next.remove(app.path)
+                    next.subtract(leftovers.map(\.path))
+                }
+            }
+            guard next.contains(app.path) else { continue }
+            let eligible = leftovers.filter { paths.contains($0.path) && $0.canRemove && !kept.contains($0.path) }.map(\.path)
+            if checked { next.formUnion(eligible) } else { next.subtract(eligible) }
+        }
+        chosen = next
     }
 
     private func load() async {

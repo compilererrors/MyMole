@@ -40,7 +40,62 @@ import Testing
         throw NSError(domain: "SyntheticReviewTimeout", code: 1)
     }
 
-    @Test func reviewIsImmediateAndAcceptedMoveJoinsTheScanBeforeTouchingFiles() async throws {
+    @Test func uncheckingListedFoldersClearsTheirPartsAndPreservesChoicesElsewhere() throws {
+        let box = try Box()
+        let model = box.model()
+        let folder = Marked(path: box.home + "/build", name: "Build", size: 1, isFolder: true)
+        let child = Marked(path: folder.path + "/large.bin", name: "File", size: 1, isFolder: false)
+        let elsewhere = Marked(path: box.home + "/small.txt", name: "Small", size: 1, isFolder: false)
+        model.mark([child, elsewhere])
+        model.setListedMarks([folder], checked: false)
+        #expect(Set(model.marked.keys) == [elsewhere.path])
+        model.setListedMarks([folder, child], checked: true)
+        #expect(Set(model.marked.keys) == [folder.path, elsewhere.path])
+        model.setListedMarks([child], checked: false)
+        #expect(Set(model.marked.keys) == [folder.path, elsewhere.path])
+    }
+
+    @Test func aBlockedRefreshIsRetiredWithoutJoiningOrRecollecting() async throws {
+        let box = try Box()
+        let model = box.model()
+        let collections = Mutex(0)
+        model.collectFiles = { root, stop in
+            collections.withLock { $0 += 1 }
+            return StorageModel.collectLargeFiles(root, stop: stop)
+        }
+        model.scan(path: box.home)
+        await model.scanJob?.value
+        let before = try #require(model.root)
+        let listed = model.largeFiles
+        #expect(collections.withLock { $0 } == 1)
+        let held = DispatchSemaphore(value: 0)
+        let read = Atomic(false)
+        model.scanFolder = { path, progress, workers, root, subtree, skip in
+            let result = StorageScanner.scan(path: path, progress: progress, workers: workers, onRoot: root, onSubtree: subtree, skip: skip)
+            read.store(true, ordering: .relaxed)
+            held.wait()
+            return result
+        }
+        defer { held.signal() }
+        model.rescan()
+        try await wait { read.load(ordering: .relaxed) }
+        let item = Marked(path: box.home + "/build", name: "Build", size: 1, isFolder: true)
+        model.mark([item])
+        let reader = model.scanJob
+        model.trashMarked()
+        try await wait { !model.trashing }
+        #expect(model.root === before && !model.scanning && !box.exists("build/large.bin"))
+        #expect(collections.withLock { $0 } == 1)
+        #expect(!model.largeFiles.contains { $0.path.hasPrefix(item.path + "/") })
+        #expect(model.largeFiles.count < listed.count)
+        held.signal()
+        await reader?.value
+        #expect(model.root === before && model.root?.find(path: item.path) == nil)
+        #expect(!model.jobs.isBusy)
+
+    }
+
+    @Test func reviewAndMoveDoNotWaitForARetiredReadAndUndoStillRestoresTheFolder() async throws {
         let box = try Box()
         let model = box.model()
         let held = DispatchSemaphore(value: 0)
@@ -61,13 +116,15 @@ import Testing
         #expect(model.showReview && model.scanning && model.canTrash)
         #expect(box.exists("build/large.bin"))
         model.showReview = false
+        let reader = model.scanJob
         model.trashMarked()
         #expect(model.trashing && model.removalPhase == .preparing)
-        await Task.yield()
-        #expect(box.exists("build/large.bin"))
-        held.signal()
-        await model.trashJob?.value
+        try await wait { !model.trashing }
         #expect(!box.exists("build") && box.exists("small.txt"))
+        let presentation = model.root
+        held.signal()
+        await reader?.value
+        #expect(model.root === presentation && model.root?.find(path: item.path) == nil)
         model.undoTrash()
         try await wait { !model.trashing }
         #expect(box.exists("build/large.bin"))
@@ -93,6 +150,86 @@ import Testing
         await model.scanJob?.value
         #expect(box.exists("build/large.bin") && box.exists("small.txt") && box.exists(".hidden"))
         #expect(model.root?.fileCount == 3)
+    }
+
+    @Test func aLateUnpublishedBranchCannotChangeTheMapAfterRemoval() async throws {
+        let box = try Box()
+        let model = box.model()
+        let held = DispatchSemaphore(value: 0)
+        let entered = Atomic(false)
+        let branches = Mutex<(Folder, Folder)?>(nil)
+        model.scanFolder = { path, progress, _, publish, subtree, _ in
+            let root = Folder(name: "home", parent: nil, rootPath: path)
+            let ready = Folder(name: "build", parent: root)
+            ready.listedFiles = [FileItem(name: "large.bin", size: 2_000_000, modified: .distantPast, kind: .other)]
+            ready.ownBytes[.other] = 2_000_000
+            ready.riskListed = true
+            ready.finish()
+            let pending = Folder(name: "blocked", parent: root)
+            let nested = Folder(name: "nested", parent: pending)
+            pending.subfolders = [nested]
+            root.subfolders = [ready, pending]
+            root.riskListed = true
+            branches.withLock { $0 = (pending, nested) }
+            publish(root)
+            subtree(ready)
+            entered.store(true, ordering: .releasing)
+            held.wait()
+            pending.listedFiles = [FileItem(name: "late.bin", size: 9_000_000, modified: .distantPast, kind: .other)]
+            pending.ownBytes[.other] = 9_000_000
+            pending.finish()
+            subtree(pending)
+            return ScanResult(root: root, deniedPaths: [], duration: 0, cancelled: progress.isCancelled)
+        }
+        defer { held.signal() }
+        model.scan(path: box.home)
+        try await wait { entered.load(ordering: .acquiring) && model.root?.subfolders.first.map { model.isReady($0) } == true }
+        let (pending, nested) = try #require(branches.withLock { $0 })
+        #expect(!model.isReady(pending) && !model.isReady(nested))
+        let original = try #require(model.root)
+        model.show(folder: nested.path)
+        #expect(model.current === original)
+        model.mark([Marked(path: box.home + "/build", name: "Build", size: 2_000_000, isFolder: true)])
+        let reader = model.scanJob
+        model.trashMarked()
+        try await wait { !model.trashing }
+        let presentation = try #require(model.root)
+        let placeholder = try #require(presentation.find(path: pending.path))
+        #expect(presentation !== original && placeholder !== pending && placeholder.wasNotScanned)
+        #expect(!model.isReady(placeholder) && model.incomplete && !box.exists("build"))
+        held.signal()
+        await reader?.value
+        #expect(model.root === presentation && placeholder.listedFiles.isEmpty && placeholder.subfolders.isEmpty)
+        #expect(presentation.size == 0 && presentation.find(path: box.home + "/build") == nil)
+        #expect(!model.scanning && !model.jobs.isBusy)
+    }
+
+    @Test func anAdmittedMetadataReaderMustFinishAndScopedStopPreservesOtherJobs() async throws {
+        let box = try Box()
+        let model = box.model()
+        let held = DispatchSemaphore(value: 0)
+        let entered = Atomic(false)
+        model.collectFiles = { root, stop in
+            entered.store(true, ordering: .releasing)
+            held.wait()
+            return StorageModel.collectLargeFiles(root, stop: stop)
+        }
+        defer { held.signal() }
+        model.scan(path: box.home)
+        try await wait { entered.load(ordering: .acquiring) && model.root?.subfolders.first.map { model.isReady($0) } == true }
+        model.mark([Marked(path: box.home + "/build", name: "Build", size: 2_000_000, isFolder: true)])
+        let other = await model.jobs.begin(.moveToTrash)
+        model.trashMarked()
+        await Task.yield()
+        #expect(model.trashing && model.canStopRemoval && box.exists("build"))
+        model.stopRemoval()
+        #expect(model.removalStopping && !model.canStopRemoval && !other.isStopped)
+        held.signal()
+        await model.trashJob?.value
+        #expect(!model.trashing && !model.canUndo && box.exists("build/large.bin"))
+        #expect(model.jobs.running === other && !other.isStopped)
+        model.jobs.end(other)
+        #expect(!model.jobs.isBusy)
     }
 
     @Test func anAcceptedMoveCanBeStoppedWhileWaitingWithoutTouchingFiles() async throws {

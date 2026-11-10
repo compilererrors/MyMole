@@ -163,6 +163,19 @@ final class SimilarModel {
 
     func choose(_ paths: some Sequence<String>) { for p in paths where !chosen.contains(p) { toggle(p) } }
 
+    func setListedCopies(_ paths: [String], checked: Bool) {
+        guard !scanning, !trashing else { return }
+        let listed = Set(paths)
+        if !checked { chosen.subtract(listed); return }
+        var next = chosen
+        for group in groups where group.images.contains(where: { listed.contains($0.path) }) {
+            guard let retained = group.best else { continue }
+            next.remove(retained.path)
+            next.formUnion(group.images.filter { listed.contains($0.path) && $0.path != retained.path && !keep.protects($0.path) }.map(\.path))
+        }
+        chosen = next
+    }
+
     /// In the selected groups, or in all when none is selected: every picture
     /// but the best one, the one with the most pixels.
     func chooseAllButBest(in groupIDs: Set<String>? = nil) {

@@ -22,12 +22,13 @@ public struct ScanIndex: Sendable {
     public private(set) var truncated = false
     public static let standardLimit = 400_000
 
-    public init(_ root: Folder, limit: Int = standardLimit) {
+    public init(_ root: Folder, limit: Int = standardLimit, stop: () -> Bool = { false }) {
         rootPath = root.path
         // Breadth first, so a cut drops the deepest, not a whole branch.
         var queue: [(Folder, Int32)] = [(root, -1)]
         var head = 0
         while head < queue.count {
+            if stop() { truncated = true; break }
             let (folder, parent) = queue[head]
             head += 1
             let here = Int32(entries.count)
@@ -39,13 +40,17 @@ public struct ScanIndex: Sendable {
                 name: folder.name, parent: parent, size: folder.size, modified: folder.latestChange,
                 kind: folder.inheritedKind ?? .other, isFolder: true))
             for f in folder.listedFiles {
+                if stop() { truncated = true; break }
                 guard entries.count < limit else {
                     truncated = true
                     break
                 }
                 entries.append(Entry(name: f.name, parent: here, size: f.size, modified: f.modified, kind: f.kind, isFolder: false))
             }
-            for sub in folder.subfolders.sorted(by: { $0.size > $1.size }) { queue.append((sub, here)) }
+            for sub in folder.subfolders.sorted(by: { $0.size > $1.size }) {
+                if stop() { truncated = true; break }
+                queue.append((sub, here))
+            }
         }
     }
 

@@ -93,7 +93,7 @@ struct InstallersView: View {
                     .disabled(model.files.isEmpty)
             }
             DSControlField("Choose for removal") {
-                Button("Choose All") { model.chooseAll() }
+                Button("Check All Results") { model.chooseAll() }
                     .disabled(model.files.isEmpty)
                     .fixedSize()
             }
@@ -127,7 +127,7 @@ struct InstallersView: View {
             Spacer(minLength: 0)
         }
         .contextualControls(
-            "Review installers", detail: "Choose All ticks all installers from this scan, including those hidden by the filter. Review your choice before moving anything.")
+            "Review installers", detail: "Check All Results includes installers hidden by the filter. The checkbox above the list checks only listed results. Nothing moves until you confirm.")
     }
 
     private var ago: String? {
@@ -157,6 +157,11 @@ struct InstallersView: View {
             onToggleMark: { model.toggle($0) },
             onOpen: { FileActions.reveal($0) },
             onMark: { model.choose($0) },
+            onSetMarks: { paths, checked in
+                guard !model.trashing else { return }
+                if checked { model.choose(paths) } else { model.chosen.subtract(paths) }
+            },
+            bulkChoicesEnabled: !model.trashing,
             menu: { ids in menu(ids.compactMap { byID[$0] }) })
         .task(id: FilterKey(files: model.files, query: query)) {
             let (files, query) = (model.files, query)

@@ -47,7 +47,7 @@ public enum PrivilegedReply: Codable, Sendable, Equatable {
 public enum PrivilegedTool {
     /// The tool and the app ship in one bundle; a mismatch means a tool from
     /// another build was asked, which is refused.
-    public static let version = "7"
+    public static let version = "8"
     public static let name = "MyMoleHelper"
 
     /// The command-line argument for `envelope`.
