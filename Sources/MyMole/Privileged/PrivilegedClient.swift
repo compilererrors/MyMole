@@ -100,17 +100,25 @@ final class PrivilegedClient {
     /// it needs no password.
     func checkMaintenance(_ tasks: [MaintenanceTask]) async -> [TaskReport] {
         guard isAvailable else { return tasks.map { TaskReport($0, .needsHelper, String(localized: "Not part of this edition.")) } }
+        #if SMOKE
+        return tasks.filter(\.needsRoot).map { TaskReport($0, .needsHelper, "Administrator operations are simulated in this test build.") }
+        #else
         return await Task.detached(priority: .userInitiated) {
             let engine = MaintenanceEngine(role: .root, home: "/var/root")
             return tasks.filter(\.needsRoot).map { engine.check($0) }
         }.value
+        #endif
     }
 
     /// System caches and logs as far as the user can read them; what can't
     /// be read is marked, and measured for real only when removed.
     func scanSystem(progress: ScanProgress = ScanProgress()) async throws -> SystemCleanListing {
         guard isAvailable else { throw Failure.unavailable }
+        #if SMOKE
+        throw Failure.unavailable
+        #else
         return await Task.detached(priority: .userInitiated) { SystemCleanRules.list(progress: progress) }.value
+        #endif
     }
 
     // MARK: As root
@@ -228,11 +236,12 @@ final class PrivilegedClient {
 
     nonisolated static let adminPrompt: @Sendable (String, String, String) -> (code: Int32, output: String) = { tool, argument, prompt in
         #if SMOKE
-        if let answer = smokeAnswer(to: argument) { return answer }
-        #endif
+        return smokeAnswer(to: argument) ?? (-1, "Administrator execution is disabled in synthetic test builds.")
+        #else
         // Removal of a large cache can take a while; a stuck run is stopped.
         return CommandRunner.processes(timeLimit: 30 * 60).run(
             "/usr/bin/osascript", ["-e", script(tool: tool, argument: argument, prompt: prompt)])
+        #endif
     }
     #else
     /// The App Store edition never asks for root: no prompt, no tool.

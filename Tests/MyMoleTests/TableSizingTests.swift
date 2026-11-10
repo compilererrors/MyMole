@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 import Testing
 
 @testable import MyMole
@@ -68,7 +69,103 @@ import Testing
         await Task.yield()
         #expect(name.width == 900 && kind.width == 800)
         #expect(scroll.hasHorizontalScroller && table.allowsColumnResizing)
+        #expect(table.headerView?.frame.width == table.frame.width)
         #expect(table.tableColumns.allSatisfy { $0.resizingMask.contains(.userResizingMask) && $0.maxWidth >= 4_096 })
+    }
+
+    @Test func switchingDensityInPlacePreservesSelectionAndUserColumnWidths() {
+        let before = Density.current
+        defer { Density.current = before }
+        Density.current = .spacious
+        var selected: Set<String> = ["sample"]
+        let binding = Binding(get: { selected }, set: { selected = $0 })
+        let view = FileTable(rows: [], columns: [.name, .size], autosave: "synthetic.density", selection: binding)
+        let coordinator = view.makeCoordinator()
+        let table = FileTableView()
+        table.dataSource = coordinator
+        table.delegate = coordinator
+        coordinator.table = table
+        table.addTableColumn(NSTableColumn(identifier: .init("name")))
+        table.addTableColumn(NSTableColumn(identifier: .init("size")))
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
+        scroll.documentView = table
+        table.configureUserColumns()
+        table.tableColumns[0].width = 900
+        let column = table.tableColumns[0]
+        coordinator.load([FileRow(id: "sample", name: "Sample", size: 1024)], marks: nil, selection: selected)
+        for density in [Density.compact, .spacious, .compact, .spacious] {
+            Density.current = density
+            coordinator.applyDensity(density)
+            #expect(table.tableColumns[0] === column && column.width == 900)
+            #expect(table.rowHeight == DS.Table.row && table.style == DS.Table.style)
+            #expect(selected == ["sample"] && table.selectedRow == 0)
+        }
+    }
+
+    @Test(arguments: [0, 1, 2]) func transientWideLayoutDoesNotHideColumnsAndOnlyAutomaticFillerRetracts(_ kind: Int) throws {
+        let table: NSTableView = kind == 0 ? FileTableView() : kind == 1 ? DiskOutlineView() : FootprintOutlineView()
+        let name = NSTableColumn(identifier: .init("name"))
+        name.width = 200
+        table.addTableColumn(name)
+        let size = NSTableColumn(identifier: .init("size"))
+        size.width = 100
+        table.addTableColumn(size)
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 1_200, height: 200))
+        scroll.documentView = table
+        table.configureUserColumns()
+        var observers = table.keepFitting("name")
+        defer { NSTableView.stopFitting(&observers) }
+        let state = try #require((table as? any UserColumnTable)?.columnViewport)
+        state.fit()
+        #expect(name.width > 1_000)
+        scroll.setFrameSize(NSSize(width: 500, height: 200))
+        scroll.tile()
+        state.fit()
+        #expect(name.width >= 200 && name.width < 400)
+        #expect(size.width == 100 && table.rect(ofColumn: 1).maxX <= scroll.contentView.bounds.width + 1)
+        name.width = 900
+        NotificationCenter.default.post(name: NSTableView.columnDidResizeNotification, object: table)
+        scroll.setFrameSize(NSSize(width: 1_400, height: 200))
+        scroll.tile()
+        state.fit()
+        #expect(name.width > 1_000)
+        scroll.setFrameSize(NSSize(width: 420, height: 200))
+        scroll.tile()
+        state.fit()
+        #expect(name.width == 900 && size.width == 100)
+        #expect(table.frame.width > scroll.contentView.bounds.width)
+    }
+
+    @Test func savedUserWidthIsDistinctFromTheLastAutomaticallyFilledWidth() throws {
+        let box = FileManager.default.temporaryDirectory.appending(path: "table-width-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: box) }
+        let defaults = testDefaults(in: box)
+        let table = FileTableView()
+        let name = NSTableColumn(identifier: .init("name"))
+        name.width = 200
+        table.addTableColumn(name)
+        table.autosaveName = "synthetic.width"
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 1_200, height: 200))
+        scroll.documentView = table
+        table.configureUserColumns()
+        var observers = table.keepFitting("name", defaults: defaults)
+        defer { NSTableView.stopFitting(&observers) }
+        let state = try #require(table.columnViewport)
+        state.fit()
+        #expect(name.width > 1_000)
+        #expect(defaults.double(forKey: "table.flexibleWidth.v1.synthetic.width.name") == 200)
+        // Native outlines can postpone the end-of-drag notification until
+        // after the first viewport event. Fit must recognize the new width.
+        NSTableView.stopFitting(&observers)
+        name.width = 650
+        state.fit()
+        #expect(defaults.double(forKey: "table.flexibleWidth.v1.synthetic.width.name") == 650)
+        #expect(name.width > 1_000)
+        let restored = ColumnViewport(table: table, id: "name", defaults: defaults)
+        scroll.setFrameSize(NSSize(width: 420, height: 200))
+        scroll.tile()
+        restored.fit()
+        #expect(name.width == 650)
     }
 
     @Test func clippedCellsExposeFullTextAndClearItWhenReused() throws {

@@ -47,9 +47,13 @@ final class TrashModel {
         if !force, let measuredAt, Date().timeIntervalSince(measuredAt) < Self.freshFor { return }
         listing = await measure()
         // The App Sandbox can't look at other disks' Trash.
+        #if SMOKE
+        return
+        #else
         guard !Edition.current.isSandboxed else { return }
         let volumes = Volumes.mounted().map { (path: $0.path, name: $0.name) }
         otherTrashes = await Task.detached(priority: .utility) { TrashEmptier.otherTrashes(on: volumes) }.value
+        #endif
     }
 
     /// Your Trash on other disks, only measured: Finder empties those.

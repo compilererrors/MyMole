@@ -249,7 +249,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
 struct RootView: View {
     @Bindable var app: AppModel
-    /// A change of density makes every view, and the AppKit tables, again.
+    /// Density changes layout while native views keep their identity.
     @AppStorage(Density.key) private var density = Density.standard.rawValue
     @AppStorage(ThemeFamily.key) private var theme = ThemeFamily.standard.rawValue
     @AppStorage(AppearanceMode.key) private var mode = AppearanceMode.system.rawValue
@@ -300,11 +300,12 @@ struct RootView: View {
         // nothing is made again and no scan restarts.
         .environment(\.palette, palette)
         .environment(\.tableLines, TableLines(rawValue: lines) ?? .standard)
+        .environment(\.layoutDensity, Density(rawValue: density) ?? .standard)
+        .onChange(of: density) { _, value in Density.current = Density(rawValue: value) ?? .standard }
         .environment(\.findRequest, app.findRequest)
         // For Back and Forward in every pane's toolbar (`paneToolbar`).
         .environment(app)
         .sheet(isPresented: $app.showPalette) { CommandPalette(app: app).environment(\.palette, palette) }
-        .id(density)
         .emptyTrashFlow(app.trash)
         .overlay(alignment: .topTrailing) {
             if !app.apps.uninstalling, !app.deepClean.trashing, !app.installers.trashing,

@@ -48,7 +48,7 @@ import Testing
         let first = Task {
             await list.update(count: 5_000) {
                 starts.withLock { $0.append("first") }
-                _ = gate.wait(timeout: .now() + 5)
+                gate.wait()
                 return "first"
             }
         }
@@ -83,7 +83,7 @@ import Testing
         let first = Task {
             await list.update(count: 5_000) {
                 started.withLock { $0 = true }
-                _ = gate.wait(timeout: .now() + 5)
+                gate.wait()
                 return 1
             }
         }

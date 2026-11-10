@@ -3,6 +3,7 @@ import SwiftUI
 
 @MainActor protocol UserColumnTable: AnyObject {
     var defaultHiddenColumns: Set<String> { get set }
+    var columnViewport: ColumnViewport? { get set }
 }
 
 extension NSTableView {

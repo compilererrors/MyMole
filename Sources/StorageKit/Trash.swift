@@ -52,6 +52,9 @@ public struct TrashBackend: Sendable {
     }
 
     public static let system = TrashBackend { path in
+        #if SMOKE
+        return (nil, "System Trash is disabled in synthetic test builds.")
+        #else
         var result: NSURL?
         do {
             try FileManager.default.trashItem(at: URL(fileURLWithPath: path), resultingItemURL: &result)
@@ -59,11 +62,15 @@ public struct TrashBackend: Sendable {
         } catch {
             return (nil, error.localizedDescription)
         }
+        #endif
     }
 
     /// The coordinator supplies a checked URL, retaining any Powerbox grant.
     /// This backend uses ordinary permissions and never deletes permanently.
     public static func systemOutcome(for source: URL, area: ErrorCode.Area) -> TrashOutcome {
+        #if SMOKE
+        return TrashOutcome(moved: [], failed: [(source.path, "System Trash is disabled in synthetic test builds.")])
+        #else
         var result: NSURL?
         do {
             try FileManager.default.trashItem(at: source, resultingItemURL: &result)
@@ -75,6 +82,7 @@ public struct TrashBackend: Sendable {
             return TrashOutcome(moved: [], failed: [(source.path, error.localizedDescription)],
                                 failureInfo: [source.path: .init(error, area: area)])
         }
+        #endif
     }
 
     /// Moves items into `dir`, which must be on the same volume, each under
@@ -84,10 +92,27 @@ public struct TrashBackend: Sendable {
     /// to that copy.
     public static var live: TrashBackend {
         #if SMOKE
-        if let dir = ProcessInfo.processInfo.environment["MYMOLE_SMOKE_TRASH"], dir.hasPrefix("/") { return .folder(dir) }
-        #endif
+        guard let scope = try? SyntheticRun.current() else { return TrashBackend { _ in (nil, "Synthetic run ownership is missing or invalid.") } }
+        return .synthetic(scope)
+        #else
         return .system
+        #endif
     }
+
+    #if DEBUG || SMOKE
+    public static func synthetic(_ scope: SyntheticRun) -> TrashBackend {
+        TrashBackend { path in
+            do {
+                return try scope.moving(path) { source, name, destination, target in
+                    guard renameatx_np(source, name, destination, target, UInt32(RENAME_EXCL)) == 0 else {
+                        return (nil, String(cString: strerror(errno)))
+                    }
+                    return (URL(fileURLWithPath: scope.trash + "/" + target), nil)
+                }
+            } catch { return (nil, "Outside the verified synthetic scope, or the scope changed.") }
+        }
+    }
+    #endif
 
     public static func folder(_ dir: String) -> TrashBackend {
         TrashBackend { path in

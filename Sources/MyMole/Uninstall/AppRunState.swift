@@ -15,9 +15,17 @@ struct RunningAppSnapshot {
     func matchingPaths(in apps: [AppBundle]) -> Set<String> { Set(apps.lazy.filter(contains).map(\.path)) }
 
     @MainActor static func read() -> Self {
+        #if SMOKE
+        guard let scope = try? SyntheticRun.current() else { return Self(paths: [], bundleIDs: []) }
+        let running = NSWorkspace.shared.runningApplications.filter {
+            !$0.isTerminated && $0.bundleURL?.path.hasPrefix(scope.home + "/Applications/") == true
+        }
+        return Self(paths: Set(running.compactMap { $0.bundleURL?.path }), bundleIDs: Set(running.compactMap(\.bundleIdentifier)))
+        #else
         let running = NSWorkspace.shared.runningApplications.filter { !$0.isTerminated }
         return Self(paths: Set(running.compactMap { $0.bundleURL?.standardizedFileURL.path }),
                     bundleIDs: Set(running.compactMap(\.bundleIdentifier)))
+        #endif
     }
 }
 

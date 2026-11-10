@@ -13,10 +13,14 @@ struct StatusAppTarget: Equatable {
     }
 
     @MainActor static func capture(_ pid: pid_t) -> Self? {
+        #if SMOKE
+        return nil
+        #else
         guard !Edition.current.isSandboxed, pid != ProcessInfo.processInfo.processIdentifier,
             let app = NSRunningApplication(processIdentifier: pid)
         else { return nil }
         return identity(app)
+        #endif
     }
 
     @MainActor private static func identity(_ app: NSRunningApplication) -> Self? {
@@ -29,10 +33,14 @@ struct StatusAppTarget: Equatable {
     }
 
     @MainActor func quit() -> Bool {
+        #if SMOKE
+        return false
+        #else
         guard !Edition.current.isSandboxed, pid != ProcessInfo.processInfo.processIdentifier,
             let app = NSRunningApplication(processIdentifier: pid), matches(Self.identity(app))
         else { return false }
         return app.terminate()
+        #endif
     }
 }
 
@@ -41,7 +49,9 @@ struct StatusAppTarget: Equatable {
     static func openSystemSettings() { open("com.apple.systempreferences") }
 
     private static func open(_ id: String) {
+        #if !SMOKE
         guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: id) else { return }
         NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
+        #endif
     }
 }

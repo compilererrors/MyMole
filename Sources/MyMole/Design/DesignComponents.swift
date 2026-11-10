@@ -21,15 +21,34 @@ enum Density: String, CaseIterable, Identifiable {
 
     static let key = "appearance.density"
     static let standard = Density.spacious
-    /// Read once at launch and set by Settings before the views are made
-    /// again; every measure is a plain lookup, on the main actor only.
-    @MainActor static var current = Density(rawValue: UserDefaults.standard.string(forKey: key) ?? "") ?? standard
+    /// Observing the metrics redraws layout without destroying view identity,
+    /// native column widths, open branches or a pending dialog.
+    @MainActor static var current: Density {
+        get { DensityState.shared.value }
+        set { DensityState.shared.value = newValue }
+    }
 
     var id: String { rawValue }
     var title: String { self == .compact ? String(localized: "Compact") : String(localized: "Spacious") }
 
     @MainActor static func pick(_ compact: CGFloat, _ spacious: CGFloat) -> CGFloat {
         current == .compact ? compact : spacious
+    }
+}
+
+@MainActor @Observable private final class DensityState {
+    static let shared = DensityState()
+    var value = Density(rawValue: UserDefaults.standard.string(forKey: Density.key) ?? "") ?? .standard
+}
+
+private struct LayoutDensityKey: EnvironmentKey {
+    static let defaultValue = Density.standard
+}
+
+extension EnvironmentValues {
+    var layoutDensity: Density {
+        get { self[LayoutDensityKey.self] }
+        set { self[LayoutDensityKey.self] = newValue }
     }
 }
 

@@ -431,7 +431,7 @@ struct ProjectDetail: View {
             Divider()
             FootprintOutline(
                 model: model, footprint: footprint, chosen: model.chosen, age: model.age,
-                measured: Set(model.contents.keys), menu: menu)
+                measured: Set(model.contents.keys), contentsRevision: model.contentsRevision, menu: menu)
         }
     }
 
@@ -471,19 +471,27 @@ struct ProjectDetail: View {
                     agePicker
                     chooseRebuildable
                     Spacer(minLength: DS.Space.sm)
-                    if model.rescanning.contains(footprint.id) { PulseDot().help("Measuring again…") }
+                    measuringIndicator
                     more
                 }
                 VStack(alignment: .leading, spacing: DS.Space.sm) {
                     HStack(spacing: DS.Space.sm) {
                         agePicker
                         Spacer(minLength: DS.Space.sm)
+                        measuringIndicator
                         more
                     }
                     chooseRebuildable
                 }
             }
         }
+    }
+
+    private var measuringIndicator: some View {
+        ZStack {
+            if model.rescanning.contains(footprint.id) { PulseDot().help("Measuring again…") }
+        }
+        .frame(width: 8, height: 8)
     }
 
     @ViewBuilder private func heatBadges(_ heat: Heat) -> some View {

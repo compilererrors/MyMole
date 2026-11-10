@@ -152,19 +152,24 @@ extension ProjectsModel {
 
     /// Measures what's inside an entry, once, for opening it in the list.
     func loadContents(_ path: String) {
-        guard contents[path] == nil, !loadingContents.contains(path) else { return }
-        loadingContents.insert(path)
+        guard contents[path] == nil, loadingContents[path] == nil else { return }
+        let run = UUID()
+        loadingContents[path] = run
+        contentsVersions[path] = contentsVersions[path, default: 0]
         let level = PerformanceLevel.current()
         let workers = level.workers(background: false)
+        let read = readContents
         Task.detached(priority: level.priority(background: false)) { [weak self] in
-            let tree = StorageScanner.scan(path: path, workers: workers).root
-            await self?.contentsLoaded(path, tree)
+            let tree = read(path, workers)
+            await self?.contentsLoaded(path, tree, run: run)
         }
     }
 
-    private func contentsLoaded(_ path: String, _ tree: Folder) {
-        guard loadingContents.remove(path) != nil else { return }
+    private func contentsLoaded(_ path: String, _ tree: Folder, run: UUID) {
+        guard loadingContents[path] == run else { return }
+        loadingContents[path] = nil
         contents[path] = tree
+        contentsRevision += 1
         contentsOrder.removeAll { $0 == path }
         contentsOrder.append(path)
         while contentsOrder.count > Self.keptContents {
@@ -177,11 +182,13 @@ extension ProjectsModel {
 
     /// Forgets measured contents that changed, so they're measured again.
     func dropContents(touching paths: some Collection<String>) {
-        let stale = contents.keys.filter { e in paths.contains { $0 == e || $0.hasPrefix(e + "/") || e.hasPrefix($0 + "/") } }
+        let stale = Set(contents.keys).union(loadingContents.keys).union(contentsVersions.keys).filter { e in paths.contains { $0 == e || $0.hasPrefix(e + "/") || e.hasPrefix($0 + "/") } }
         for e in stale {
             contents.removeValue(forKey: e)
-            loadingContents.remove(e)
+            loadingContents[e] = nil
+            contentsVersions[e, default: 0] += 1
         }
         contentsOrder.removeAll { stale.contains($0) }
+        if !stale.isEmpty { contentsRevision += 1 }
     }
 }

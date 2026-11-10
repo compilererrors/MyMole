@@ -24,7 +24,7 @@ while IFS= read -r file; do
   grep -qE 'CommandRunner\.live\b|MaintenanceEngine\(role: *\.(user|root)\)$' "$file" && fail "Tests must inject a command runner: $name"
   grep -qE 'SystemCleanRules\.(scan|remove)\(\)' "$file" && fail "System cleanup tests must use their own roots: $name"
   # Moves go to a test's own "Trash" folder; the real Trash only in the test that's off unless asked for.
-  grep -nE 'Trasher\.(move|moveToTrash)\(' "$file" | grep -v 'backend' | grep -q . && ! grep -q 'MYMOLE_REAL_TRASH' "$file" &&
+  grep -nE 'Trasher\.(move|moveToTrash)\(' "$file" | grep -v 'backend' | grep . >/dev/null && ! grep -q 'MYMOLE_REAL_TRASH' "$file" &&
     fail "Tests must move into their own Trash folder (backend:): $name"
   grep -qE 'TrashBackend\.system|backend: *\.system' "$file" && fail "Tests must not use the system Trash backend: $name"
   grep -qE 'homeDirectoryForCurrentUser' "$file" && fail "Tests must not use the real home folder: $name"

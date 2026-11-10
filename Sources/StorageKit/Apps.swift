@@ -168,16 +168,18 @@ public enum AppFinder {
 
     public static func defaultFolders(home: String = Home.path) -> [String] {
         #if SMOKE
-        // The smoke and screenshot build's own copy can be kept to folders
-        // of its run, so the Mac's real apps never show; shipping builds
-        // have no such switch.
+        guard let scope = try? SyntheticRun.current() else { return [] }
         if let list = ProcessInfo.processInfo.environment["MYMOLE_SMOKE_APPS"] {
-            return list.split(separator: ":").map(String.init).filter { $0.hasPrefix("/") }
+            let folders = list.split(separator: ":").map(String.init)
+            guard folders.allSatisfy({ $0 == scope.home || $0.hasPrefix(scope.home + "/") }) else { return [] }
+            return folders
         }
-        #endif
+        return [scope.home + "/Applications"]
+        #else
         // macOS's own apps too: they can't be removed, but their caches
         // and settings can be reset.
         return ["/Applications", home + "/Applications", systemApplications]
+        #endif
     }
 
     /// Where macOS's own apps are; shown only when asked for.

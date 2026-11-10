@@ -28,20 +28,30 @@ enum FileActions {
     }
 
     static func reveal(_ paths: [String]) {
+        #if !SMOKE
         let paths = Self.paths(paths)
         guard !paths.isEmpty else { return }
         NSWorkspace.shared.activateFileViewerSelecting(paths.map { URL(fileURLWithPath: $0) })
+        #endif
     }
 
     static func open(_ path: String) {
+        #if !SMOKE
         NSWorkspace.shared.open(URL(fileURLWithPath: path))
+        #endif
     }
 
     static func copy(_ paths: [String], as style: CopyStyle = .path) {
         let value = copyText(paths, as: style, home: Home.path)
         guard !value.isEmpty else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(value, forType: .string)
+        #if SMOKE
+        let pasteboard = NSPasteboard.withUniqueName()
+        defer { pasteboard.releaseGlobally() }
+        #else
+        let pasteboard = NSPasteboard.general
+        #endif
+        pasteboard.clearContents()
+        pasteboard.setString(value, forType: .string)
     }
 
     /// Formatting does no filesystem access, canonicalization or shell execution.

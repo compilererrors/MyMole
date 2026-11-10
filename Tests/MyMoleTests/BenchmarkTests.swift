@@ -363,4 +363,94 @@ struct BenchmarkTests {
             }
         }
     }
+
+    @MainActor @Test func sortingLargeProjectBranchesWithoutBlockingPresentation() async {
+        let item = FootprintItem(id: "synthetic-build", category: .build, title: "Build output",
+                                 location: "/synthetic/project", attribution: .inside, entries: [])
+        let nodes = (0..<50_000).map { index in
+            let path = "/synthetic/project/build/file-\(index).bin"
+            return FootprintOutline.Node(.file(item, path: path, size: Int64(index), modified: .distantPast), key: path)
+        }
+        let owner = FootprintOutline.Node(.item(item), key: "synthetic-build")
+        owner.children = nodes
+        let worker = FootprintSorting()
+        defer { worker.stop() }
+        let sortTimes = Mutex<[Double]>([])
+        var selected: [String] = []
+        var delays: [Double] = []
+        let heartbeat = Task { @MainActor in
+            var previous = ContinuousClock.now
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .milliseconds(1)) } catch { break }
+                let now = ContinuousClock.now
+                delays.append(Double((now - previous) / .microseconds(1)) / 1_000)
+                previous = now
+            }
+        }
+        let start = ContinuousClock.now
+        worker.enqueue(nodes, owner: owner, column: .name, ascending: false, sort: { rows, column, ascending in
+            #expect(!Thread.isMainThread)
+            let start = ContinuousClock.now
+            let result = FileTable.sorted(rows, by: column, ascending: ascending)
+            sortTimes.withLock { $0.append(Double((ContinuousClock.now - start) / .microseconds(1)) / 1_000) }
+            return result
+        }) { _, keys in selected = keys }
+        await worker.job?.value
+        heartbeat.cancel()
+        await heartbeat.value
+        #expect(selected.count == nodes.count && selected.first?.hasSuffix("file-49999.bin") == true)
+        Self.report("project branch 50k total", Double((ContinuousClock.now - start) / .microseconds(1)) / 1_000)
+        Self.report("project branch 50k worker", sortTimes.withLock { $0.first })
+        Self.report("project branch main heartbeat", delays.max())
+    }
+
+    @MainActor @Test func presentingAndSortingANativeProjectOutline() async throws {
+        let box = try Box()
+        let entries = (0..<50_000).map {
+            FootprintEntry(path: "/synthetic/project/build/file-\($0).bin", bytes: Int64($0),
+                           modified: Date(timeIntervalSince1970: Double($0)), isDirectory: false)
+        }
+        let item = FootprintItem(id: "build", category: .build, title: "Build output", location: "/synthetic/project",
+                                 attribution: .inside, entries: entries)
+        let footprint = ProjectFootprint(project: DevProject(path: "/synthetic/project", markers: ["Package.swift"]), items: [item])
+        let model = ProjectsModel(footprints: [footprint], base: box.root, defaults: testDefaults(in: box.root),
+                                  logURL: box.root.appending(path: "history.json"), keepList: box.root.appending(path: "keep.json"))
+        let parent = FootprintOutline(model: model, footprint: footprint, chosen: [], age: .any, measured: [], menu: { target in
+            switch target {
+            case .item(let item): FileActions.menu(item.entries.prefix(50).map(\.path), canOpen: false)
+            case .path(_, let path): FileActions.menu([path], canOpen: false)
+            }
+        })
+        let coordinator = parent.makeCoordinator()
+        defer { coordinator.sorting.stop() }
+        let outline = FootprintOutlineView()
+        outline.configureRows(height: DS.Table.compactRow)
+        let name = NSTableColumn(identifier: .init("name"))
+        name.width = 300
+        outline.addTableColumn(name)
+        outline.outlineTableColumn = name
+        outline.addTableColumn(NSTableColumn(identifier: .init("size")))
+        outline.dataSource = coordinator
+        outline.delegate = coordinator
+        coordinator.outline = outline
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 500, height: 240))
+        scroll.documentView = outline
+        outline.configureUserColumns()
+        coordinator.rebuild()
+        let branch = try #require(outline.item(atRow: 1))
+        var start = ContinuousClock.now
+        outline.expandItem(branch)
+        await coordinator.sorting.job?.value
+        Self.report("native project first 50k", Double((ContinuousClock.now - start) / .microseconds(1)) / 1_000)
+        #expect(outline.numberOfRows == 50_002)
+        start = .now
+        outline.sortDescriptors = [NSSortDescriptor(key: "name", ascending: true)]
+        await coordinator.sorting.job?.value
+        Self.report("native project sort 50k", Double((ContinuousClock.now - start) / .microseconds(1)) / 1_000)
+        outline.selectRowIndexes(IndexSet(integer: 2), byExtendingSelection: false)
+        Self.repeated("native project menu 50k") {
+            let menu = coordinator.keyboardMenu()
+            #expect(menu.items.contains { $0.title == "Copy Absolute Path" })
+        }
+    }
 }

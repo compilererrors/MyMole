@@ -5,12 +5,19 @@ import AppKit
 }
 
 extension NSTableView {
+    func configureRows(height: CGFloat) {
+        usesAutomaticRowHeights = false
+        rowSizeStyle = .custom
+        rowHeight = height
+    }
+
     func configureUserColumns(hiddenByDefault: Set<String> = []) {
         (self as? any UserColumnTable)?.defaultHiddenColumns = hiddenByDefault
         tableColumn(withIdentifier: .init(FileColumn.name.rawValue))?.isHidden = false
         allowsColumnResizing = true
         allowsColumnReordering = true
         columnAutoresizingStyle = .noColumnAutoresizing
+        (self as? NSOutlineView)?.autoresizesOutlineColumn = false
         for column in tableColumns {
             column.resizingMask = .userResizingMask
             if let field = FileColumn(rawValue: column.identifier.rawValue) { column.maxWidth = field.width.max }
@@ -21,6 +28,10 @@ extension NSTableView {
 
     /// Fill unused space without shrinking any user-chosen column width.
     func fitFlexibleColumn(_ id: String) {
+        if let viewport = (self as? any UserColumnTable)?.columnViewport, viewport.id == id {
+            viewport.fit()
+            return
+        }
         guard let clip = enclosingScrollView?.contentView, clip.bounds.width > 0,
               let flexible = tableColumn(withIdentifier: .init(id)), !flexible.isHidden else { return }
         let extra = clip.bounds.width - columnsWidth
@@ -28,7 +39,7 @@ extension NSTableView {
         updateScrollableWidth()
     }
 
-    private var columnsWidth: CGFloat {
+    fileprivate var columnsWidth: CGFloat {
         let visible = tableColumns.indices.filter { !tableColumns[$0].isHidden }
         guard let first = visible.first, let last = visible.last else { return 0 }
         return rect(ofColumn: last).maxX + rect(ofColumn: first).minX
@@ -37,6 +48,21 @@ extension NSTableView {
     func updateScrollableWidth() {
         let width = max(enclosingScrollView?.contentView.bounds.width ?? 0, columnsWidth)
         if abs(frame.width - width) > 0.5 { setFrameSize(NSSize(width: width, height: frame.height)) }
+        if let headerView, abs(headerView.frame.width - width) > 0.5 {
+            headerView.setFrameSize(NSSize(width: width, height: headerView.frame.height))
+        }
+        // Native column tracking can precede layout by one event. Lay out
+        // existing cells now, without reloading data or making offscreen rows.
+        needsLayout = true
+        headerView?.needsLayout = true
+        layoutSubtreeIfNeeded()
+        headerView?.layoutSubtreeIfNeeded()
+        enumerateAvailableRowViews { row, _ in
+            row.needsLayout = true
+            row.layoutSubtreeIfNeeded()
+            row.needsDisplay = true
+        }
+        if let scroll = enclosingScrollView { scroll.reflectScrolledClipView(scroll.contentView) }
     }
 
     /// Use existing visible views only: never enumerate a large data source,
@@ -62,6 +88,7 @@ extension NSTableView {
         menu.addItem(ClosureMenuItem(String(localized: "Fit Visible Contents")) { [weak self] in
             guard let self else { return }
             for (index, column) in tableColumns.enumerated() where !column.isHidden { column.width = visibleContentWidth(of: index) }
+            (self as? any UserColumnTable)?.columnViewport?.rememberUserWidth()
             updateScrollableWidth()
         })
         menu.addItem(ClosureMenuItem(String(localized: "Reset Column Widths")) { [weak self] in
@@ -69,6 +96,7 @@ extension NSTableView {
             for column in tableColumns {
                 if let field = FileColumn(rawValue: column.identifier.rawValue) { column.width = field.width.ideal }
             }
+            (self as? any UserColumnTable)?.columnViewport?.rememberUserWidth()
             fitFlexibleColumn(FileColumn.name.rawValue)
         })
     }
@@ -80,31 +108,85 @@ extension NSTableView {
 
     /// Viewport growth may fill the name column; manual drags never trigger
     /// a fit or take width away from another column.
-    func keepFitting(_ id: String) -> [NSObjectProtocol] {
+    func keepFitting(_ id: String, defaults: UserDefaults = .standard) -> [NSObjectProtocol] {
         guard let clip = enclosingScrollView?.contentView else { return [] }
-        let state = ColumnViewport(table: self, id: id)
+        let state = ColumnViewport(table: self, id: id, defaults: defaults)
+        (self as? any UserColumnTable)?.columnViewport = state
         clip.postsFrameChangedNotifications = true
         DispatchQueue.main.async { state.resized() }
         return [
             NotificationCenter.default.addObserver(forName: NSView.frameDidChangeNotification, object: clip, queue: .main) { _ in
                 MainActor.assumeIsolated { state.resized() }
             },
-            NotificationCenter.default.addObserver(forName: NSTableView.columnDidResizeNotification, object: self, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.updateScrollableWidth() }
+            NotificationCenter.default.addObserver(forName: NSTableView.columnDidResizeNotification, object: self, queue: .main) { _ in
+                MainActor.assumeIsolated { state.columnResized() }
             },
         ]
     }
 }
 
-@MainActor private final class ColumnViewport {
+@MainActor final class ColumnViewport {
     weak var table: NSTableView?
     let id: String
     private var width: CGFloat = -1
+    private var userWidth: CGFloat
+    private var expectedWidth: CGFloat
+    private var fitting = false
+    private let defaults: UserDefaults
+    private let storageKey: String?
 
-    init(table: NSTableView, id: String) { self.table = table; self.id = id }
+    init(table: NSTableView, id: String, defaults: UserDefaults) {
+        self.table = table
+        self.id = id
+        self.defaults = defaults
+        storageKey = table.autosaveName.map { "table.flexibleWidth.v1." + $0 + "." + id }
+        let column = table.tableColumn(withIdentifier: .init(id))
+        let nativeWidth = column?.width ?? 200
+        let saved = storageKey.flatMap { defaults.object(forKey: $0) as? Double }
+        userWidth = saved.flatMap { $0.isFinite && $0 >= (column?.minWidth ?? 0) && $0 <= (column?.maxWidth ?? 32_768) ? CGFloat($0) : nil } ?? nativeWidth
+        expectedWidth = nativeWidth
+        saveUserWidth()
+    }
+
     func resized() {
         guard let table, let current = table.enclosingScrollView?.contentView.bounds.width, abs(width - current) > 0.5 else { return }
         width = current
-        table.fitFlexibleColumn(id)
+        fit()
+    }
+
+    func fit() {
+        guard !fitting, let table, let clip = table.enclosingScrollView?.contentView, clip.bounds.width > 0,
+              let column = table.tableColumn(withIdentifier: .init(id)), !column.isHidden else { return }
+        // Some outline tracking paths deliver their resize notification after
+        // the viewport changes. Capture that native drag before fitting again.
+        if abs(column.width - expectedWidth) > 0.5 { rememberUserWidth() }
+        fitting = true
+        defer { fitting = false }
+        // Only automatic filler retracts when the viewport shrinks. A native
+        // divider drag establishes a new minimum, preserved by narrow panes.
+        let available = clip.bounds.width - (table.columnsWidth - column.width)
+        let target = min(column.maxWidth, max(column.minWidth, max(userWidth, available)))
+        expectedWidth = target
+        if abs(column.width - target) > 0.5 { column.width = target }
+        table.updateScrollableWidth()
+    }
+
+    func columnResized() {
+        guard let table, let column = table.tableColumn(withIdentifier: .init(id)) else { return }
+        if !fitting, abs(column.width - expectedWidth) > 0.5 {
+            rememberUserWidth()
+        }
+        table.updateScrollableWidth()
+    }
+
+    func rememberUserWidth() {
+        guard let column = table?.tableColumn(withIdentifier: .init(id)) else { return }
+        userWidth = column.width
+        expectedWidth = column.width
+        saveUserWidth()
+    }
+
+    private func saveUserWidth() {
+        if let storageKey { defaults.set(Double(userWidth), forKey: storageKey) }
     }
 }

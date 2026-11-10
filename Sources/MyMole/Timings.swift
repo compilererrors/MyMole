@@ -59,7 +59,7 @@ enum Timings {
     static let key = "timings.keep"
     /// Durations kept of each step, the newest.
     static let kept = 200
-    static let signposter = OSSignposter(subsystem: "com.viktornyberg.MyMole", category: "Interface")
+    static let signposter = OSSignposter(subsystem: "com.mymole.app", category: "Interface")
 
     private static let samples = Mutex<[Step: [Double]]>([:])
 

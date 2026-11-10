@@ -664,7 +664,12 @@ final class AppsModel {
 
     func quit(_ app: AppBundle) {
         guard let id = app.bundleID else { return }
-        for r in NSRunningApplication.runningApplications(withBundleIdentifier: id) { r.terminate() }
+        for r in NSRunningApplication.runningApplications(withBundleIdentifier: id) {
+            #if SMOKE
+            guard let scope = try? SyntheticRun.current(), r.bundleURL?.path.hasPrefix(scope.home + "/Applications/") == true else { continue }
+            #endif
+            r.terminate()
+        }
     }
 
     enum Result: Equatable {
@@ -1291,6 +1296,9 @@ final class AppsModel {
     /// Copies Launch Services knows by the exact ID, and copies and
     /// editions Spotlight finds by its start.
     nonisolated static func liveOtherCopies(_ app: AppBundle) -> [AppBundle]? {
+        #if SMOKE
+        return []
+        #else
         guard let id = app.bundleID else { return [] }
         let known = NSWorkspace.shared.urlsForApplications(withBundleIdentifier: id)
             .map { $0.standardizedFileURL.path }
@@ -1298,6 +1306,7 @@ final class AppsModel {
             .map { AppBundle(path: $0, name: app.name, bundleID: id, version: nil, bytes: 0, fromAppStore: false) }
         guard let found = AppSiblings.find(for: app, runner: .processes(timeLimit: 10)) else { return nil }
         return known + found.filter { f in !known.contains { $0.path == f.path } }
+        #endif
     }
 
     static func finderRecycle(_ paths: [String]) async -> TrashOutcome {
@@ -1315,6 +1324,11 @@ final class AppsModel {
     }
 
     static func finderRecycleURLs(_ sources: [URL]) async -> TrashOutcome {
+        #if SMOKE
+        return await Task.detached(priority: .userInitiated) {
+            Trasher.moveToTrash(sources.map(\.path), through: TrashGate(still: { _ in true }, protections: TrashGate.keepsNothing), backend: .live)
+        }.value
+        #else
         var seen = Set<URL>()
         let urls = sources.filter { seen.insert($0).inserted }
         return await withCheckedContinuation { continuation in
@@ -1324,6 +1338,7 @@ final class AppsModel {
                 continuation.resume(returning: recycleOutcome(urls: urls, map: map, error: error))
             }
         }
+        #endif
     }
 
     nonisolated static func recycleOutcome(urls: [URL], map: [URL: URL], error: (any Error)?) -> TrashOutcome {
