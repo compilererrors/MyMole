@@ -269,6 +269,7 @@ struct SimilarView: View {
                         r.badgeHelp = String(localized: "Not alike the best picture itself, only alike another picture of the group. Look at it closely.")
                     }
                     model.keep.mark(&r)
+                    r.bulkCheckable = i.path != g.best?.path
                     return r
                 }
             },
@@ -277,10 +278,12 @@ struct SimilarView: View {
             autosave: "similar.pictures",
             defaultSort: .name,
             selection: $model.fileSelection,
-            marks: model.chosen,
+            marks: model.scanning ? nil : model.chosen,
             onToggleMark: { model.toggle($0) },
             onOpen: { FileActions.reveal($0) },
             onMark: { model.choose($0) },
+            onSetMarks: { model.setListedCopies($0, checked: $1) },
+            bulkChoiceHelp: String(localized: "Check extra pictures in this list. The best picture in each group stays unchecked, and protected pictures stay. Unchecking clears this list only; nothing is moved."),
             menu: { ids in
                 [
                     .quickLook,

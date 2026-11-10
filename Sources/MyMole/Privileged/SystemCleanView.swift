@@ -127,6 +127,11 @@ struct SystemCleanView: View {
             onToggleMark: { model.toggle($0) },
             onOpen: { FileActions.reveal($0) },
             onMark: { model.choose($0) },
+            onSetMarks: { paths, checked in
+                guard !model.removing else { return }
+                if checked { model.choose(paths) } else { model.chosen.subtract(paths) }
+            },
+            bulkChoicesEnabled: !model.removing,
             menu: { ids in menu(ids.compactMap { byID[$0] }) })
         .overlay {
             if model.candidates.isEmpty {

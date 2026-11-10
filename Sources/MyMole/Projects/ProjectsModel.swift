@@ -422,6 +422,16 @@ final class ProjectsModel {
         chosen = chosen.filter { !mine($0) }
     }
 
+    func setListedItems(_ items: [FootprintItem], checked: Bool) {
+        guard !trashing, !scanning else { return }
+        let items = items.filter(\.removable)
+        let ids = Set(items.map(\.id))
+        let mine = { (path: String) in self.owner(of: path).map { ids.contains($0.item.id) } == true }
+        excluded = excluded.filter { !mine($0) }
+        chosen = chosen.filter { !mine($0) }
+        if checked { choose(items.flatMap { eligible($0).map(\.path) }) }
+    }
+
     /// Chooses the rebuildable data (dependencies, build output, caches) of
     /// the given projects, and the folders the user added for cleaning,
     /// within the age filter.

@@ -265,6 +265,7 @@ struct DuplicatesView: View {
                         r.badgeHelp = String(localized: "Shares its space with \(clones) other cop\(clones == 1 ? "y" : "ies") here: moving it frees space only when they all go.")
                     }
                     model.keep.mark(&r)
+                    r.bulkCheckable = f.path != g.files.last?.path
                     if model.scanning {
                         r.canChoose = false
                         r.choiceHelp = String(localized: "Wait for the search to finish before choosing copies.")
@@ -281,6 +282,8 @@ struct DuplicatesView: View {
             onToggleMark: { model.toggle($0) },
             onOpen: { FileActions.reveal($0) },
             onMark: { model.choose($0) },
+            onSetMarks: { model.setListedCopies($0, checked: $1) },
+            bulkChoiceHelp: String(localized: "Check extra copies in this list. The newest copy in each group stays unchecked, and protected copies stay. Unchecking clears this list only; nothing is moved."),
             menu: { ids in
                 let paths = ids.filter { byPath[$0] != nil }
                 return [

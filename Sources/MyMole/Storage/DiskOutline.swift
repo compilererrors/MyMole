@@ -21,6 +21,7 @@ struct DiskOutline: NSViewRepresentable {
     let onToggle: (DiskEntry) -> Void
     let onOpen: ([DiskEntry]) -> Void
     let onMark: ([DiskEntry]) -> Void
+    var onSetMarks: (([DiskEntry], Bool) -> Void)?
     let onHover: (DiskEntry?) -> Void
     let menu: ([DiskEntry], [DiskEntry]) -> [TableMenuEntry]
     let onSmallFiles: (String) -> Void
@@ -85,6 +86,7 @@ struct DiskOutline: NSViewRepresentable {
         outline.delegate = c
         outline.target = c
         outline.doubleAction = #selector(Coordinator.doubleClicked)
+        TableChoiceHeader.install(on: outline)
         let menu = NSMenu()
         menu.delegate = c
         outline.menu = menu
@@ -172,6 +174,7 @@ struct DiskOutline: NSViewRepresentable {
                 syncing = false
             }
             schedule(node)
+            refreshChoiceHeader()
         }
 
         func stop() {
@@ -286,6 +289,33 @@ struct DiskOutline: NSViewRepresentable {
             parent.state.visible = entries
             parent.state.byPath = Dictionary(entries.map { ($0.path, $0) }, uniquingKeysWith: { a, _ in a })
             parent.state.readyCount = entries.filter { !$0.pending }.count
+            refreshChoiceHeader()
+        }
+
+        private var listedChoices: [DiskEntry] {
+            // Expanded descendants are already covered by their listed parent.
+            rootNode?.children?.compactMap(\.entry).filter { !$0.pending } ?? []
+        }
+
+        private func refreshChoiceHeader() {
+            guard let header = outline?.headerView as? TableChoiceHeader else { return }
+            let marks = parent.marks ?? []
+            let entries = listedChoices
+            let included = marks.contains(parent.root.path) || Marked.parent(of: parent.root.path, in: marks) != nil
+            let all = !entries.isEmpty && entries.allSatisfy { marks.contains($0.path) }
+            let parts = marks.contains { $0.hasPrefix(parent.root.path + "/") }
+            let state: ListedChoices.State = included || all ? .on : parts ? .mixed : .off
+            header.update(state: state, visible: parent.marks != nil && parent.onSetMarks != nil,
+                          enabled: isCurrent && !entries.isEmpty && !included,
+                          help: included ? String(localized: "Included with a chosen folder. Unchoose the containing folder before changing these items.") : nil) { [weak self] in self?.setListedMarks() }
+        }
+
+        func setListedMarks(_ checked: Bool? = nil) {
+            guard isCurrent, let marks = parent.marks,
+                  !marks.contains(parent.root.path), Marked.parent(of: parent.root.path, in: marks) == nil else { return }
+            let entries = listedChoices
+            let checked = checked ?? !entries.allSatisfy { marks.contains($0.path) }
+            parent.onSetMarks?(entries, checked)
         }
 
         func select(force: Bool = false) {
@@ -305,6 +335,7 @@ struct DiskOutline: NSViewRepresentable {
 
         func refreshVisible(appearance: Bool = false) {
             guard let outline else { return }
+            refreshChoiceHeader()
             if appearance { outline.reloadRowsWithViews(); return }
             guard !marksKnown || lastMarks != parent.marks else { return }
             lastMarks = parent.marks

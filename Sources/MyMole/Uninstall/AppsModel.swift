@@ -807,7 +807,7 @@ final class AppsModel {
         guard let appRecord = appOutcome.moved.first else {
             appMoveFailures[app.path] = appOutcome.failureInfo[app.path]
             if appOutcome.failureInfo[app.path]?.permissionDenied == true, let sourceProof,
-               await Task.detached(priority: .userInitiated, operation: { ApplicationTrash.Request.capture(app, source: sourceProof) != nil }).value {
+               await Task.detached(priority: .userInitiated, operation: { ApplicationTrash.Request.isEligible(app, source: sourceProof) }).value {
                 appMoveNeedsAdministrator.insert(app.path)
             }
             return .failed(

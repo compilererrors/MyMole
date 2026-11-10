@@ -129,7 +129,13 @@ struct SelfRemovalSheet: View {
                     onToggleMark: { path in
                         guard !model.kept.contains(path), model.leftovers.contains(where: { $0.path == path && $0.canRemove }) else { return }
                         if model.chosen.contains(path) { model.chosen.remove(path) } else { model.chosen.insert(path) }
-                    }, onOpen: { FileActions.reveal($0) }
+                    }, onOpen: { FileActions.reveal($0) },
+                    onSetMarks: { ids, checked in
+                        guard !model.running, !model.removed else { return }
+                        let paths = Set(ids)
+                        let eligible = model.leftovers.filter { paths.contains($0.path) && $0.canRemove && !model.kept.contains($0.path) }.map(\.path)
+                        if checked { model.chosen.formUnion(eligible) } else { model.chosen.subtract(eligible) }
+                    }
                 )
                 .frame(height: 240)
                 .disabled(model.running || model.removed)

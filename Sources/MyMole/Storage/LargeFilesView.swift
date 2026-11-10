@@ -105,10 +105,14 @@ struct LargeFilesView: View {
                 hiddenByDefault: [.kind],
                 autosave: "diskMap.largeFiles",
                 selection: $selection,
-                marks: Set(model.marked.keys),
+                marks: model.opened == nil ? Set(model.marked.keys) : nil,
                 onToggleMark: { id in byID[id].map { model.toggle($0.marked) } },
                 onOpen: { ids in FileActions.reveal(ids) },
                 onMark: { ids in model.mark(ids.compactMap { byID[$0] }.map(\.marked)) },
+                onSetMarks: { ids, checked in
+                    if checked { model.mark(ids.compactMap { byID[$0] }.map(\.marked)) }
+                    else { model.unmark(ids) }
+                },
                 menu: { ids in menu(ids.compactMap { byID[$0] }, rows: shown) })
                 .overlay { emptyState.allowsHitTesting(false) }
             Divider()
@@ -118,7 +122,7 @@ struct LargeFilesView: View {
                     DSText(counts(shown: shown, picked: picked), .metadata)
                 }
             } trailing: {
-                Button("Choose All") { model.mark(shown.map(\.marked)) }
+                Button("Check All Listed") { model.mark(shown.map(\.marked)) }
                     .disabled(shown.isEmpty || shown.allSatisfy { model.marked[$0.path] != nil })
                     .help("Choose only the files shown by the current filters. Nothing moves until you confirm.")
                 Button(picked.isEmpty ? "Choose Selected" : "Choose \(picked.count) Selected") {
@@ -281,6 +285,14 @@ struct DownloadsReviewSheet: View {
                         }
                     },
                     onOpen: { FileActions.reveal($0) },
+                    onSetMarks: { ids, checked in
+                        guard canChoose else { return }
+                        if checked {
+                            model.mark(ids.compactMap { byID[$0] }.map {
+                                Marked(path: $0.path, name: $0.name, size: $0.bytes, isFolder: $0.isFolder)
+                            })
+                        } else { model.unmark(ids) }
+                    },
                     menu: { ids in
                         var out: [TableMenuEntry] = [.quickLook, .divider] + FileActions.menu(ids)
                         if canChoose {

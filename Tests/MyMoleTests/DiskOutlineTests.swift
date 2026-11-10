@@ -29,6 +29,7 @@ import Testing
                         expanded: Binding(get: { self.expanded }, set: { self.expanded = $0 }), marks: marks,
                         row: { FileRow(id: $0.path, name: $0.name, size: $0.pending ? nil : $0.size) },
                         onToggle: { self.chosen = [$0] }, onOpen: { _ in }, onMark: { self.chosen = $0 },
+                        onSetMarks: { entries, _ in self.chosen = entries },
                         onHover: { _ in }, menu: { _, _ in [] }, onSmallFiles: { _ in }, sortRows: sorter)
         }
 
@@ -68,6 +69,23 @@ import Testing
         }
         root.finish()
         return root
+    }
+
+    @Test func checkAllCoversListedParentsOnceAndAnOutsideContainingChoiceStaysProtected() async throws {
+        let h = Harness(root())
+        defer { h.stop() }
+        h.start()
+        await h.coordinator.job?.value
+        let top = try #require(h.coordinator.rootNode?.children?.first)
+        h.outline.expandItem(top)
+        await h.coordinator.job?.value
+        h.coordinator.setListedMarks(true)
+        #expect(Set(h.chosen.map(\.path)) == Set(h.root.subfolders.map(\.path)))
+        h.chosen = []
+        h.marks = [h.root.path]
+        h.coordinator.parent = h.view
+        h.coordinator.setListedMarks(false)
+        #expect(h.chosen.isEmpty && h.marks == [h.root.path])
     }
 
     @Test func openingBranchesIsLazyAndTheirRowsCanBeSelectedAndChosen() async throws {

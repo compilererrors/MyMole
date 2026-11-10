@@ -294,6 +294,19 @@ final class DuplicatesModel {
 
     func choose(_ paths: some Sequence<String>) { for p in paths where !chosen.contains(p) { toggle(p) } }
 
+    func setListedCopies(_ paths: [String], checked: Bool) {
+        guard !scanning, !trashing else { return }
+        let listed = Set(paths)
+        if !checked { chosen.subtract(listed); return }
+        var next = chosen
+        for group in groups where group.files.contains(where: { listed.contains($0.path) }) {
+            guard let retained = group.files.last else { continue }
+            next.remove(retained.path)
+            next.formUnion(group.files.filter { listed.contains($0.path) && $0.path != retained.path && !keep.protects($0.path) }.map(\.path))
+        }
+        chosen = next
+    }
+
     /// In the selected groups, or in all when none is selected: every copy but the newest or the oldest.
     func chooseAll(keeping keep: Keep) {
         guard !scanning else { return }

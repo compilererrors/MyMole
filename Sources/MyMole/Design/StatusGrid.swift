@@ -1,12 +1,7 @@
 import SwiftUI
 
 /// Geometry depends on preferences and width, never on live text or readings.
-struct StatusGrid: Layout {
-    let cards: [StatusLayout.Card]
-    var compactDensity = false
-    var editing = false
-    let spacing: CGFloat
-
+enum StatusGrid {
     nonisolated static func columnCount(width: CGFloat, spacing: CGFloat) -> Int {
         let width = width.isFinite ? max(1, width) : 900
         return max(1, min(3, Int((width + spacing) / (280 + spacing))))
@@ -46,16 +41,36 @@ struct StatusGrid: Layout {
         return frames
     }
 
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        let width = proposal.width.flatMap { $0.isFinite ? $0 : nil } ?? 900
-        let frames = Self.frames(cards: cards, width: width, spacing: spacing, compactDensity: compactDensity, editing: editing)
-        return CGSize(width: width, height: frames.map(\.maxY).max() ?? 0)
-    }
+}
 
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        for (view, frame) in zip(subviews, Self.frames(cards: cards, width: bounds.width, spacing: spacing, compactDensity: compactDensity, editing: editing)) {
-            view.place(at: CGPoint(x: bounds.minX + frame.minX, y: bounds.minY + frame.minY), anchor: .topLeading, proposal: ProposedViewSize(frame.size))
+/// The scrollable height and each card's frame use the same measured width.
+/// Native frame/position modifiers keep drawing and hit testing in agreement.
+struct StatusGridView<Content: View>: View {
+    let cards: [StatusLayout.Card]
+    var compactDensity = false
+    var editing = false
+    let spacing: CGFloat
+    @ViewBuilder var content: (StatusLayout.Card) -> Content
+    @State private var width: CGFloat = 900
+
+    var body: some View {
+        let measured = StatusGrid.frames(cards: cards, width: width, spacing: spacing,
+                                         compactDensity: compactDensity, editing: editing)
+        GeometryReader { geometry in
+            let frames = StatusGrid.frames(cards: cards, width: geometry.size.width, spacing: spacing,
+                                           compactDensity: compactDensity, editing: editing)
+            ZStack(alignment: .topLeading) {
+                ForEach(Array(cards.enumerated()), id: \.element.id) { index, card in
+                    content(card)
+                        .frame(width: frames[index].width, height: frames[index].height, alignment: .topLeading)
+                        .contentShape(.rect)
+                        .position(x: frames[index].midX, y: frames[index].midY)
+                }
+            }
+            .frame(width: geometry.size.width, height: frames.map(\.maxY).max() ?? 0, alignment: .topLeading)
+            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = max(1, $0) }
         }
+        .frame(height: measured.map(\.maxY).max() ?? 0)
     }
 }
 

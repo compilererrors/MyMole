@@ -180,6 +180,20 @@ import Testing
         #expect(model.chosen.count == 2 && !model.chosen.contains(group.files.first!.path))
     }
 
+    @Test func bulkCheckingListedCopiesKeepsNewestAndPreservesUnlistedChoices() async throws {
+        let box = Box()
+        let model = try await searched(box)
+        let group = try #require(model.groups.first)
+        let retained = try #require(group.files.last)
+        let hidden = box.home + "/Elsewhere/unlisted.bin"
+        model.chosen = [retained.path, hidden]
+        model.setListedCopies(group.files.map(\.path), checked: true)
+        #expect(!model.chosen.contains(retained.path))
+        #expect(model.chosen == Set(group.files.dropLast().map(\.path)).union([hidden]))
+        model.setListedCopies(group.files.map(\.path), checked: false)
+        #expect(model.chosen == [hidden])
+    }
+
     @Test func theChosenCopiesGoToTheTrashAndUndoPutsThemBack() async throws {
         let box = Box()
         let model = try await searched(box)

@@ -183,7 +183,7 @@ public final class TrashJob: Sendable {
     /// The steps so far, as carried out.
     public var plans: [TrashPlan] { state.withLock { $0.plans } }
 
-    func stop() { state.withLock { $0.stopped = true } }
+    public func stop() { state.withLock { $0.stopped = true } }
 
     /// Moves `paths` to the Trash through the gate, as one step of the job.
     public func moveToTrash(_ paths: [String], through gate: TrashGate, backend: TrashBackend = .system) -> TrashOutcome {
@@ -226,11 +226,12 @@ public final class TrashJob: Sendable {
     }
 }
 
-/// Runs destructive jobs one at a time, whichever pane asks, in the order
-/// they asked: a move, an Undo and a system removal never overlap, so no
+/// Runs ready destructive jobs one at a time, in admission order:
+/// a move, an Undo and a system removal never overlap, so no
 /// two jobs act on the same files at once and an Undo waits for the move
 /// before it. A job holds its turn from `begin` to `end`; `stop` asks the
 /// running job and those waiting to leave the rest of their items alone.
+/// Preparations remain busy and stoppable without holding the execution turn.
 /// Nothing of a job is written to disk: the history keeps counts only.
 public final class TrashJobs: Sendable {
     public static let shared = TrashJobs()
@@ -239,16 +240,30 @@ public final class TrashJobs: Sendable {
 
     private struct State {
         var running: TrashJob?
+        var preparing: [UUID: TrashJob] = [:]
         var queue: [(job: TrashJob, resume: CheckedContinuation<Void, Never>)] = []
     }
 
     public init() {}
 
+    /// Registers cancellation and quit protection without occupying the move
+    /// queue while a caller stops a reader or prepares its selected paths.
+    public func prepare(_ action: TrashAction) -> TrashJob {
+        let job = TrashJob(action: action)
+        state.withLock { $0.preparing[job.id] = job }
+        return job
+    }
+
     /// Waits for the job's turn, then holds it until `end`.
     public func begin(_ action: TrashAction) async -> TrashJob {
-        let job = TrashJob(action: action)
+        await begin(prepare(action))
+    }
+
+    /// Admits only this manager's registered preparation, keeping its stop token.
+    public func begin(_ job: TrashJob) async -> TrashJob {
         await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
             let now = state.withLock { s -> Bool in
+                guard s.preparing.removeValue(forKey: job.id) === job else { job.stop(); return true }
                 if s.running == nil {
                     s.running = job
                     return true
@@ -264,6 +279,7 @@ public final class TrashJobs: Sendable {
     /// Gives the turn to the next job waiting.
     public func end(_ job: TrashJob) {
         let next = state.withLock { s -> CheckedContinuation<Void, Never>? in
+            s.preparing[job.id] = nil
             guard s.running === job else {
                 s.queue.removeAll { $0.job === job }
                 return nil
@@ -289,7 +305,7 @@ public final class TrashJobs: Sendable {
     /// The job holding the turn now.
     public var running: TrashJob? { state.withLock { $0.running } }
     /// Whether a job holds the turn or waits for one.
-    public var isBusy: Bool { state.withLock { $0.running != nil || !$0.queue.isEmpty } }
+    public var isBusy: Bool { state.withLock { $0.running != nil || !$0.queue.isEmpty || !$0.preparing.isEmpty } }
 
     /// How many jobs wait their turn behind the running one.
     public var waiting: Int { state.withLock { $0.queue.count } }
@@ -297,13 +313,17 @@ public final class TrashJobs: Sendable {
     /// Asks the running job and every waiting one to stop before their next
     /// item. A put-back already asked for still runs in full.
     public func stop() {
-        let jobs = state.withLock { s in (s.running.map { [$0] } ?? []) + s.queue.map(\.job) }
+        let jobs = state.withLock { s in (s.running.map { [$0] } ?? []) + s.queue.map(\.job) + Array(s.preparing.values) }
         for j in jobs { j.stop() }
     }
 
-    /// Returns once every job that held or waited for a turn has ended.
+    /// Returns once preparations and admitted jobs have ended, even if this
+    /// waiter's task is cancelled. Cancellation never means a move has finished.
     public func idle() async {
-        let job = await begin(.putBack)
-        end(job)
+        while isBusy {
+            await withCheckedContinuation { continuation in
+                DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + .milliseconds(10)) { continuation.resume() }
+            }
+        }
     }
 }

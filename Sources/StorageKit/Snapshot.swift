@@ -40,17 +40,20 @@ public struct Snapshot: Codable, Sendable {
         self.incomplete = incomplete
     }
 
-    public init(of root: Folder, date: Date = .now, incomplete: Bool = false, excluded: [String] = []) {
+    public init(of root: Folder, date: Date = .now, incomplete: Bool = false, excluded: [String] = [], stop: () -> Bool = { false }) {
         var sizes: [String: Int64] = ["": root.size]
         var files: [String: Int64] = [:]
+        var cancelled = false
         func addFiles(_ f: Folder, _ rel: String) {
             for item in f.listedFiles where item.size >= Self.minimumFileSize {
+                if stop() { cancelled = true; return }
                 files[rel.isEmpty ? item.name : rel + "/" + item.name] = item.size
             }
         }
         addFiles(root, "")
         var stack: [(Folder, String, Int)] = root.subfolders.map { ($0, $0.name, 1) }
         while let (f, rel, depth) = stack.popLast() {
+            if stop() { cancelled = true; break }
             // Big files can sit anywhere, so walk every folder that could
             // hold one; folder sizes are kept only near the top.
             guard f.size >= Self.minimumFileSize || (depth <= Self.depth && f.size >= Self.minimumSize) else { continue }
@@ -60,7 +63,7 @@ public struct Snapshot: Codable, Sendable {
         }
         self.init(
             rootPath: root.path, date: date, sizes: sizes, files: files, folderDepth: Self.depth, tracksFiles: true,
-            incomplete: incomplete)
+            incomplete: incomplete || cancelled || stop())
         self.excluded = excluded.sorted()
     }
 

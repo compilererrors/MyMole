@@ -153,6 +153,11 @@ struct StartupView: View {
             onToggleMark: { model.toggle($0) },
             onOpen: { FileActions.reveal($0) },
             onMark: { model.choose($0) },
+            onSetMarks: { paths, checked in
+                guard !model.trashing else { return }
+                if checked { model.choose(paths) } else { model.chosen.subtract(paths) }
+            },
+            bulkChoicesEnabled: !model.trashing,
             menu: { ids in menu(ids.compactMap { byID[$0] }) })
         .overlay {
             if !model.items.isEmpty, shown.isEmpty, !query.isEmpty {

@@ -98,7 +98,7 @@ struct InspectorList: View {
     // MARK: Header and filters
 
     private func header(_ cur: Folder) -> some View {
-        let rebuildable = cur.subfolders.filter { $0.rebuildable != nil && !model.isPending($0) }
+        let rebuildable = cur.subfolders.filter { $0.rebuildable != nil && model.isReady($0) }
         return VStack(alignment: .leading, spacing: 6) {
             DSName(cur.name, .heading)
             DSText(
@@ -248,7 +248,8 @@ struct InspectorList: View {
         let current = treeState.rootID == root.id && treeState.revision == model.revision
         let visible = current ? treeState.visible : []
         let selected = current ? model.selection.compactMap { treeState.byPath[$0] } : []
-        let chosen = current ? model.marked.keys.filter { treeState.byPath[$0]?.pending == false }.count : 0
+        let marks = Set(model.marked.keys)
+        let allChosen = current && visible.allSatisfy { $0.pending || marks.contains($0.path) || Marked.parent(of: $0.path, in: marks) != nil }
         return VStack(spacing: 0) {
             DiskOutline(
                 root: root, revision: model.revision, ready: model.isReady,
@@ -261,11 +262,12 @@ struct InspectorList: View {
                     else { FileActions.reveal(entries.map(\.path)) }
                 },
                 onMark: { model.mark($0.map(\.marked)) },
+                onSetMarks: { entries, checked in model.setListedMarks(entries.map(\.marked), checked: checked) },
                 onHover: { entry in model.hovered = entry?.folder.map(Segment.folder) },
                 menu: menu, onSmallFiles: { smallFilesOf = $0 }, sortRequest: model.browseSort)
             Divider()
             footer(root, rows: visible, all: visible, treeSelection: selected,
-                   allChosen: !current || chosen >= treeState.readyCount)
+                   allChosen: !current || allChosen)
         }
     }
 
@@ -278,7 +280,7 @@ struct InspectorList: View {
             autosave: "diskMap.browse.2",
             sortRequest: model.browseSort,
             selection: $model.selection,
-            marks: Set(model.marked.keys),
+            marks: model.opened == nil ? Set(model.marked.keys) : nil,
             onToggleMark: { id in byID[id].map { model.toggle($0.marked) } },
             onOpen: { ids in
                 let chosen = ids.compactMap { byID[$0] }.filter { !$0.pending }
@@ -289,6 +291,10 @@ struct InspectorList: View {
                 }
             },
             onMark: { ids in model.mark(ids.compactMap { byID[$0] }.filter { !$0.pending }.map(\.marked)) },
+            onSetMarks: { ids, checked in
+                if checked { model.mark(ids.compactMap { byID[$0] }.filter { !$0.pending }.map(\.marked)) }
+                else { model.setListedMarks(ids.compactMap { byID[$0]?.marked }, checked: false) }
+            },
             onHover: { id in
                 let seg = id.flatMap { byID[$0]?.folder }.map(Segment.folder)
                 if model.hovered != seg { model.hovered = seg }
@@ -309,7 +315,9 @@ struct InspectorList: View {
             tint: f == nil ? NSColor(ChartColors.kind(e.kind)) : palette.accentText.ns,
             badge: f?.rebuildable == nil ? nil : String(localized: "Rebuildable"),
             badgeHelp: f?.rebuildable.map { "\($0.label): \($0.reason)" },
-            locked: !e.pending && f?.unreadable == true)
+            locked: !e.pending && f?.unreadable == true,
+            choiceHelp: f?.wasNotScanned == true ? String(localized: "Not scanned before stopping. Scan Again to include this folder.") : nil,
+            sizePlaceholder: f?.wasNotScanned == true ? String(localized: "Not scanned") : nil)
     }
 
     // MARK: Actions
@@ -328,6 +336,8 @@ struct InspectorList: View {
         let readyPaths = Set(rows.filter { !$0.pending }.map(\.path))
         out.append(.action(String(localized: "Select All Listed")) { model.selection = readyPaths })
         out.append(.action(String(localized: "Invert Selection")) { model.selection = readyPaths.subtracting(model.selection) })
+        out.append(.action(String(localized: "Check All Listed")) { model.setListedMarks(rows.filter { !$0.pending }.map(\.marked), checked: true) })
+        out.append(.action(String(localized: "Uncheck All Listed")) { model.setListedMarks(rows.filter { !$0.pending }.map(\.marked), checked: false) })
         out.append(.divider)
         let marks = Set(model.marked.keys)
         let parents = Set(chosen.compactMap { Marked.parent(of: $0.path, in: marks) })
@@ -399,7 +409,7 @@ struct InspectorList: View {
                 .help("Choose every direct item in this folder, including hidden and smaller files. Filters don't limit this choice. The folder itself stays; nothing moves until you review and confirm.")
                 .fixedSize()
                 // Choosing ticks rows for the Trash; selecting (⌘A, ⇧-click) only highlights them.
-                Button("Choose Listed") { model.mark(rows.filter { !$0.pending }.map(\.marked)) }
+                Button("Check All Listed") { model.mark(rows.filter { !$0.pending }.map(\.marked)) }
                     .disabled(model.opened != nil || (allChosen ?? rows.allSatisfy { $0.pending || model.isMarked($0.path) }))
                     .help("Tick every item listed here for the Trash. Nothing moves until you review and confirm.")
                     .fixedSize()
@@ -484,7 +494,7 @@ private struct WholeScanSearch: View {
                 autosave: "diskMap.search",
                 sortRequest: model.browseSort,
                 selection: $model.selection,
-                marks: Set(model.marked.keys),
+                marks: model.opened == nil ? Set(model.marked.keys) : nil,
                 onToggleMark: { id in byID[id].map { model.toggle($0.marked) } },
                 onOpen: { ids in
                     let chosen = ids.compactMap { byID[$0] }
@@ -496,6 +506,10 @@ private struct WholeScanSearch: View {
                     }
                 },
                 onMark: { ids in model.mark(ids.compactMap { byID[$0] }.map(\.marked)) },
+                onSetMarks: { ids, checked in
+                    if checked { model.mark(ids.compactMap { byID[$0] }.map(\.marked)) }
+                    else { model.setListedMarks(ids.compactMap { byID[$0]?.marked }, checked: false) }
+                },
                 menu: { ids in
                     let chosen = ids.compactMap { byID[$0] }
                     guard !chosen.isEmpty else { return [] }

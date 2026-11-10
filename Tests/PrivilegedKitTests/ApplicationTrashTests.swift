@@ -36,7 +36,7 @@ import Testing
             try Data("synthetic fixture".utf8).write(to: URL(fileURLWithPath: app + "/Contents/MacOS/SyntheticEditor"))
             _ = chmod(app + "/Contents/MacOS/SyntheticEditor", 0o755)
             request = .init(path: app, bundleID: "com.example.SyntheticEditor", identity: try #require(Trasher.identity(of: app)),
-                parentIdentity: try #require(Trasher.identity(of: applications)), uid: getuid(), trashName: UUID().uuidString + "-Synthetic Editor.app")
+                parentIdentity: try #require(Trasher.identity(of: applications)), uid: getuid(), trashName: "Synthetic Editor.app")
         }
         deinit { try? FileManager.default.removeItem(at: root) }
         func keep(_ paths: Set<String>) throws {
@@ -79,6 +79,7 @@ import Testing
             return result
         }
         let receipt = try ApplicationTrash.move(f.request, context: context)
+        #expect(receipt.record.trashed.lastPathComponent == "Synthetic Editor.app")
         #expect(PrivilegedTool.reply(from: PrivilegedTool.output(.applicationTrash(receipt))) == .applicationTrash(receipt))
         #expect(!f.exists && receipt.record.original.path == f.app && receipt.record.trashed.path == f.trash)
         #expect(Trasher.identity(of: f.trash) == f.request.identity)
@@ -376,6 +377,45 @@ import Testing
         context.stopBackgroundAgents = { _ in running = false; try f.keep([f.app]) }
         #expect(throws: ApplicationTrash.Failure.self) { try ApplicationTrash.move(f.request, context: context) }
         #expect(!running && f.exists && !FileManager.default.fileExists(atPath: f.trash))
+    }
+
+    @Test func trashNamesStayReadableAndUnknownOrOccupiedDestinationsAreNeverAssumedFree() {
+        var checked: [String] = []
+        let chosen = ApplicationTrash.Request.availableTrashName(for: "Synthetic Editor.app") { candidate in
+            checked.append(candidate)
+            return candidate != "Synthetic Editor 3.app"
+        }
+        #expect(chosen == "Synthetic Editor 3.app")
+        #expect(checked == ["Synthetic Editor.app", "Synthetic Editor 2.app", "Synthetic Editor 3.app"])
+        #expect(ApplicationTrash.Request.availableTrashName(for: "Synthetic.app", occupied: { _ in nil }) == nil)
+        #expect(ApplicationTrash.Request.availableTrashName(for: "Synthetic.app", occupied: { _ in true }) == nil)
+        for unsafe in ["../Synthetic.app", "Other.app", "Synthetic Editor 0.app", "Synthetic Editor 02.app", "Synthetic Editor 10000.app"] {
+            #expect(!ApplicationTrash.Request.acceptsTrashName(unsafe, original: "Synthetic Editor.app", restoring: false))
+        }
+    }
+
+    @Test func aNumberedDestinationCanMoveAndRestoreWithoutReplacingAnEarlierCopy() throws {
+        let f = try Fixture()
+        try Data("previous copy".utf8).write(to: URL(fileURLWithPath: f.trash))
+        let request = ApplicationTrash.Request(path: f.request.path, bundleID: f.request.bundleID,
+            identity: f.request.identity, parentIdentity: f.request.parentIdentity, uid: f.request.uid, trashName: "Synthetic Editor 2.app")
+        let receipt = try ApplicationTrash.move(request, context: f.context)
+        #expect(receipt.record.trashed.lastPathComponent == "Synthetic Editor 2.app")
+        #expect(try String(contentsOfFile: f.trash, encoding: .utf8) == "previous copy")
+        #expect(try ApplicationTrash.move(request, restoring: true, context: f.context) == receipt)
+        #expect(f.exists)
+    }
+
+    @Test func legacyUUIDNamesRemainRestorableButAreNeverProposedForNewMoves() throws {
+        let f = try Fixture()
+        let name = UUID().uuidString + "-Synthetic Editor.app"
+        #expect(!ApplicationTrash.Request.acceptsTrashName(name, original: "Synthetic Editor.app", restoring: false))
+        #expect(ApplicationTrash.Request.acceptsTrashName(name, original: "Synthetic Editor.app", restoring: true))
+        try FileManager.default.moveItem(atPath: f.app, toPath: f.home + "/.Trash/" + name)
+        let request = ApplicationTrash.Request(path: f.request.path, bundleID: f.request.bundleID,
+            identity: f.request.identity, parentIdentity: f.request.parentIdentity, uid: f.request.uid, trashName: name)
+        _ = try ApplicationTrash.move(request, restoring: true, context: f.context)
+        #expect(f.exists)
     }
 
     @Test func malformedNamesAppleIDsAndOtherAccountsAreRefused() throws {

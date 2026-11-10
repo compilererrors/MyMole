@@ -55,6 +55,17 @@ import Testing
         #expect(m.chosenBytes == 8192)
     }
 
+    @Test func bulkChoiceResolvesPartialItemsWithoutChangingOtherProjectItems() throws {
+        let box = try Box()
+        let (m, local, build) = model(box)
+        m.toggle(build)
+        m.toggle(path: box.project + "/.local/a")
+        m.setListedItems([local], checked: true)
+        #expect(m.check(local) == .on && m.check(build) == .on)
+        m.setListedItems([local], checked: false)
+        #expect(m.check(local) == .off && m.check(build) == .on)
+    }
+
     @Test func unchoosingInsideAChosenEntryKeepsTheRestChosen() throws {
         let box = try Box()
         let (m, local, _) = model(box)

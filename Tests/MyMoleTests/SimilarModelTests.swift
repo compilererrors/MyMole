@@ -57,6 +57,13 @@ import UniformTypeIdentifiers
         model.chooseAllButBest()
         #expect(model.chosen == [small])
 
+        model.chosen = [big]
+        model.setListedCopies([big, small], checked: true)
+        #expect(model.chosen == [small])
+        model.setListedCopies([small], checked: false)
+        #expect(model.chosen.isEmpty)
+        model.chooseAllButBest()
+
         model.trashChosen()
         await model.trashJob?.value
         #expect(!FileManager.default.fileExists(atPath: small) && FileManager.default.fileExists(atPath: big))

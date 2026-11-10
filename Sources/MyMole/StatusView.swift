@@ -14,7 +14,7 @@ struct StatusView: View {
     @State private var confirmingQuit = false
     @State private var quitTarget: StatusAppTarget?
     @State private var actionProblem: String?
-    @State private var scrollRequest = 0
+    @State private var showingProcesses = false
     @State private var editingLayout = false
     @State private var dragSession = UUID()
     @State private var dropTarget: StatusCardID?
@@ -43,7 +43,7 @@ struct StatusView: View {
                 .padding(.bottom, DS.Space.sm)
             }
             Divider()
-            ScrollViewReader { proxy in
+            Group {
                 DSPage {
                     if layout.visible.isEmpty {
                         ContentUnavailableView {
@@ -55,8 +55,7 @@ struct StatusView: View {
                             Button("Show All Cards") { change { $0.showAll() } }
                         }
                     } else if let snapshot = app.status {
-                        StatusGrid(cards: layout.visible, compactDensity: Density.current == .compact, editing: editingLayout, spacing: DS.Space.md) {
-                            ForEach(layout.visible) { card in
+                        StatusGridView(cards: layout.visible, compactDensity: Density.current == .compact, editing: editingLayout, spacing: DS.Space.md) { card in
                                 StatusCard(card: card.id, editing: editingLayout, size: card.size,
                                            canResize: StatusGrid.columnCount(width: gridWidth, spacing: DS.Space.md) > 1,
                                            drag: StatusCardDrag(card: card.id, session: dragSession),
@@ -88,26 +87,17 @@ struct StatusView: View {
                                     }
                                 }
                                 .contentShape(Rectangle())
-                                .dropDestination(for: StatusCardDrag.self) { items, _ in
+                                .modifier(StatusCardDropTarget(enabled: editingLayout, accept: { items in
                                     accept(items, before: card.id)
-                                } isTargeted: { targeted in
-                                    if targeted && editingLayout { dropTarget = card.id }
+                                }, targeted: { targeted in
+                                    if targeted { dropTarget = card.id }
                                     else if dropTarget == card.id { dropTarget = nil }
-                                }
-                            }
+                                }))
                         }
                         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { gridWidth = $0 }
                         if editingLayout { endDropTarget }
                     } else {
                         DSLoading("Reading your Mac's status…").padding(DS.Space.xl * 2)
-                    }
-                }
-                .task(id: scrollRequest) {
-                    guard scrollRequest > 0 else { return }
-                    await Task.yield()
-                    guard !Task.isCancelled else { return }
-                    withAnimation(reduceMotion ? nil : Motion.snappy) {
-                        proxy.scrollTo(StatusCardID.processes, anchor: .top)
                     }
                 }
             }
@@ -134,6 +124,7 @@ struct StatusView: View {
             }
         }
         .sheet(isPresented: $customizing) { StatusLayoutEditor(layout: layoutBinding) }
+        .sheet(isPresented: $showingProcesses) { StatusProcessesSheet(app: app, order: $order) }
         .actionConfirmation(
             String(localized: "Quit \(quitTarget?.name ?? "")?"), isPresented: $confirmingQuit,
             button: String(localized: "Quit App"),
@@ -233,8 +224,7 @@ struct StatusView: View {
 
     private func showProcesses(_ order: ProcessOrder) {
         self.order = order
-        change { $0.setVisible(true, for: .processes) }
-        scrollRequest += 1
+        showingProcesses = true
     }
 
     @ViewBuilder private func cardActions(_ card: StatusLayout.Card) -> some View {

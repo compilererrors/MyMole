@@ -97,7 +97,7 @@ import Testing
     }
 
     private static func simulatedAdministratorMove(_ app: AppBundle, _ source: RemovedApp.Source, home: String) throws -> ApplicationTrash.Receipt {
-        let name = UUID().uuidString + "-" + (app.path as NSString).lastPathComponent
+        let name = (app.path as NSString).lastPathComponent
         let request = ApplicationTrash.Request(path: app.path, bundleID: try #require(app.bundleID),
             identity: source.originalIdentity, parentIdentity: source.originalParentIdentity, uid: getuid(), trashName: name)
         let trash = home + "/.Trash"
