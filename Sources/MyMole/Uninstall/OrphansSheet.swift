@@ -26,7 +26,7 @@ struct OrphansSheet: View {
     }
     @State private var presentedSearch: Search?
     private var search: Search { Search(revision: model.presentationRevision, query: query, kind: kind) }
-    private var visible: [FileRow] { filtered.value }
+    private var visible: [FileRow] { model.items.isEmpty ? [] : filtered.value }
 
     nonisolated static func project(_ items: [Orphan], keep: SharedKeep, query: String, kind: Int) -> [FileRow] {
         let prepared = TextQuery(query)
@@ -128,7 +128,9 @@ struct OrphansSheet: View {
         .frame(width: DS.Size.reviewWidth)
         .dialogControls()
         .dialogKeyboard(canClose: !model.trashing && !apps.uninstalling)
-        .overlay(alignment: .bottom) {
+        .dsBottom(showing: false) {
+            EmptyView()
+        } toast: {
             VStack(spacing: DS.Space.sm) {
                 if let n = model.notice {
                     DSUndoToast(text: n.text, canUndo: n.canUndo, undo: { model.undoTrash() }, dismiss: { model.dismissNotice() })
@@ -137,7 +139,6 @@ struct OrphansSheet: View {
                     DSUndoToast(text: n.text, canUndo: apps.canUndo, undo: { apps.undoUninstall() }, dismiss: { apps.dismissNotice() })
                 }
             }
-            .padding(.bottom, DS.Space.lg)
         }
         .liveRefresh(every: .seconds(60), events: [.applications, .volumes]) {
             model.loadIfNeeded()
@@ -193,7 +194,7 @@ struct OrphansSheet: View {
             bulkChoicesEnabled: !model.trashing && !apps.uninstalling,
             menu: { ids in menu(ids) })
             .frame(height: 300)
-            .overlay { emptyState.allowsHitTesting(false) }
+            .dsEmptyOverlay(showing: visible.isEmpty) { emptyState.allowsHitTesting(false) }
     }
 
     @ViewBuilder private var emptyState: some View {

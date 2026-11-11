@@ -146,10 +146,11 @@ extension View {
                 : String(localized: "\(listing.count) item\(listing.count == 1 ? "" : "s"), \(ByteSize.format(listing.bytes)), will be deleted for good. This can't be undone. Anything you move to the Trash after this stays there."))
         }
         .confirmationKeyboard(isPresented: Binding(get: { trash.confirming != nil }, set: { if !$0 { trash.confirming = nil } }))
-        .overlay(alignment: .bottom) {
+        .dsBottom(showing: false) {
+            EmptyView()
+        } toast: {
             if let notice = trash.notice {
                 DSUndoToast(text: notice, canUndo: false, undo: {}) { trash.notice = nil }
-                    .padding(.bottom, DS.Space.lg)
             }
         }
         .animation(Motion.snappy, value: trash.notice)

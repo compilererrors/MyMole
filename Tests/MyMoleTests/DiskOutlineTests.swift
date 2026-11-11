@@ -71,6 +71,22 @@ import Testing
         return root
     }
 
+    @Test func switchingFoldersKeepsThePreviousRowsUntilTheNewBranchIsReady() async throws {
+        let h = Harness(root(count: 2))
+        defer { h.stop() }
+        h.start()
+        await h.coordinator.job?.value
+        let previous = try #require(h.coordinator.rootNode)
+        h.root = root("replacement", count: 1_024)
+        h.refresh()
+        #expect(h.coordinator.rootNode === previous && h.outline.numberOfRows == 2)
+        h.coordinator.setListedMarks(true)
+        #expect(h.chosen.isEmpty)
+        await h.coordinator.job?.value
+        #expect(h.outline.numberOfRows == 1_024 && h.coordinator.rootNode?.folder === h.root)
+        #expect(h.state.rootID == h.root.id && h.state.visible.count == 1_024)
+    }
+
     @Test func checkAllCoversListedParentsOnceAndAnOutsideContainingChoiceStaysProtected() async throws {
         let h = Harness(root())
         defer { h.stop() }

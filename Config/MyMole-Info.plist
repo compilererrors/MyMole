@@ -2,6 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>MyMole asks Finder to move only the app you confirmed to the Trash, or to restore that app when you choose Undo. Finder may ask for administrator approval.</string>
     <key>NSAppBundlesUsageDescription</key>
     <string>MyMole inspects apps and moves only the apps you choose to the Trash when you confirm an uninstall.</string>
     <key>NSAppDataUsageDescription</key>

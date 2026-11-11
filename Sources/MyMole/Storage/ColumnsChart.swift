@@ -7,11 +7,13 @@ import SwiftUI
 struct ColumnsChart: View {
     @Bindable var model: StorageModel
     @State private var arcs: [Arc] = []
+    @State private var drawing: SunburstChart.LayoutKey?
 
     private static let levels = 4
 
     var body: some View {
         GeometryReader { geo in
+            let arcs = arcs
             let colWidth = geo.size.width / CGFloat(Self.levels)
             let h = geo.size.height
             Canvas { ctx, _ in
@@ -31,6 +33,7 @@ struct ColumnsChart: View {
                     }
                 }
             }
+            .dsCrossfade(value: drawing)
             .contentShape(Rectangle())
             .onContinuousHover { phase in
                 switch phase {
@@ -45,9 +48,11 @@ struct ColumnsChart: View {
                 if case .folder(let f)? = hit(p, colWidth: colWidth, height: h)?.segment { model.open(f) }
             }
             .task(id: Key(base: SunburstChart.LayoutKey(model), height: Int(h))) {
-                guard let cur = model.current, h > 0 else { return arcs = [] }
-                // Drop blocks under a pixel tall: same rule as the rings, in this geometry.
-                arcs = Sunburst.layout(cur, rings: Self.levels, minAngle: 2 * .pi / Double(h), include: model.isReady)
+                let next = model.current.flatMap { cur in h > 0 ? Sunburst.layout(cur, rings: Self.levels, minAngle: 2 * .pi / Double(h), include: model.isReady) : nil } ?? []
+                withAnimation(model.showingLive ? nil : Motion.content) {
+                    self.arcs = next
+                    drawing = SunburstChart.LayoutKey(model)
+                }
             }
         }
         .padding(DS.Space.lg)

@@ -53,6 +53,7 @@ only '(removeItem|moveItem|replaceItem)\(at(Path)?:|replaceItemAt\(|(^|[^a-zA-Z_
 only '(^|[^a-zA-Z_.])(rename|renamex_np|renameat|renameatx_np)\(' Sources/StorageKit/Trash.swift Sources/PrivilegedKit/Staging.swift Sources/PrivilegedKit/ApplicationTrash.swift
 # Root is asked for in one place only, and never in the App Store edition.
 only 'administrator privileges|/usr/bin/osascript|NSAppleScript' Sources/MyMole/Privileged/PrivilegedClient.swift
+only 'AEDeterminePermissionToAutomateTarget|AESendMessage' Sources/MyMole/Access/FinderAppTrash.swift
 grep -q '#if !APPSTORE' Sources/MyMole/Privileged/PrivilegedClient.swift ||
   fail "The administrator prompt must be left out of the App Store edition (#if !APPSTORE)."
 # The sandboxed edition's home is the user's real one, not the container.

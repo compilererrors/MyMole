@@ -138,17 +138,25 @@ struct StorageView: View {
         ZStack {
             if model.root == nil {
                 CenterCard(symbol: nil, title: "Scanning…", subtitle: "\(model.liveFiles.formatted()) files so far") {}
+            } else if model.currentIsEmpty {
+                ContentUnavailableView("No Mapped Contents", systemImage: "folder",
+                    description: Text("This folder has no files or folders in the current map."))
+                    .transition(.opacity)
             } else {
-                switch model.chart {
-                case .rings: SunburstChart(model: model)
-                case .wheel: SliceChart(model: model, style: .wheel)
-                case .pie: SliceChart(model: model, style: .pie)
-                case .boxes: TreemapChart(model: model)
-                case .columns: ColumnsChart(model: model)
-                case .bars: BarsChart(model: model)
+                Group {
+                    switch model.chart {
+                    case .rings: SunburstChart(model: model)
+                    case .wheel: SliceChart(model: model, style: .wheel)
+                    case .pie: SliceChart(model: model, style: .pie)
+                    case .boxes: TreemapChart(model: model)
+                    case .columns: ColumnsChart(model: model)
+                    case .bars: BarsChart(model: model)
+                    }
                 }
+                .transition(.opacity)
             }
         }
+        .animation(Motion.content, value: model.currentIsEmpty)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .overlay(alignment: .bottomLeading) {
             if model.colorByKind { KindLegend().padding(Theme.pad) }
@@ -161,11 +169,16 @@ struct StorageView: View {
             model.current.map { String(localized: "\(model.chart.title) of \($0.name)") }
                 ?? String(localized: "\(model.chart.title) of the disk"))
         .accessibilityChildren {
-            ForEach((model.current?.subfolders ?? []).sorted { $0.size > $1.size }.prefix(30), id: \.path) { f in
-                Text(f.name)
-                    .accessibilityValue(Self.share(f, of: model.current))
-                    .accessibilityAddTraits(.isButton)
-                    .accessibilityAction { model.open(f) }
+            if model.currentIsEmpty {
+                Text("No Mapped Contents")
+                    .accessibilityValue(Text("This folder has no files or folders in the current map."))
+            } else {
+                ForEach((model.current?.subfolders ?? []).sorted { $0.size > $1.size }.prefix(30), id: \.path) { f in
+                    Text(f.name)
+                        .accessibilityValue(Self.share(f, of: model.current))
+                        .accessibilityAddTraits(.isButton)
+                        .accessibilityAction { model.open(f) }
+                }
             }
         }
     }

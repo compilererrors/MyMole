@@ -113,19 +113,19 @@ struct AppCopiesSheet: View {
                         Spacer()
                         if model.loading || model.measuring || projected.working { ProgressView().controlSize(.small) }
                     }
-                    if visible.isEmpty && model.loading {
-                        DSLoading("Finding app copies…").frame(height: 240)
-                    } else if visible.isEmpty {
-                        ContentUnavailableView("No Matching Apps", systemImage: "square.on.square",
-                                               description: Text("Try All discovered apps or choose a folder containing your test builds."))
-                            .frame(height: 240)
-                    } else {
-                        FileTable(rows: visible.map(row), columns: [.name, .kind, .items, .modified, .location],
+                    FileTable(rows: visible.map(row), columns: [.name, .kind, .items, .modified, .location],
                                   titles: [.kind: String(localized: "Version / Build"), .items: String(localized: "Copies")],
                                   autosave: "uninstall.copies", defaultSort: .name, selection: $selection, marks: nil,
                                   onOpen: { paths in if let path = paths.first { selection = [path]; openReview() } },
                                   menu: { paths in FileActions.menu(paths, canOpen: false) })
-                            .frame(height: 260)
+                        .frame(height: 260)
+                        .dsEmptyOverlay(showing: visible.isEmpty) {
+                            if model.loading {
+                                DSLoading("Finding app copies…")
+                            } else {
+                                ContentUnavailableView("No Matching Apps", systemImage: "square.on.square",
+                                                       description: Text("Try All discovered apps or choose a folder containing your test builds."))
+                            }
                     }
                     if let selected {
                         DSPath(selected.app.path, .metadata)
@@ -191,10 +191,11 @@ struct AppCopiesSheet: View {
             .dialogKeyboard()
         }
         .onDisappear { model.stop(); reviewJob?.cancel() }
-        .overlay(alignment: .bottom) {
+        .dsBottom(showing: false) {
+            EmptyView()
+        } toast: {
             if let notice = apps.notice {
                 DSUndoToast(text: notice.text, canUndo: apps.canUndo, undo: { apps.undoLatest() }, dismiss: { apps.dismissNotice() })
-                    .padding(.bottom, DS.Space.lg)
             }
         }
     }

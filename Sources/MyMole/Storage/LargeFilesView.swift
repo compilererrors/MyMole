@@ -45,7 +45,7 @@ struct LargeFilesView: View {
 
     /// The files the filters let through, worked out off the main thread.
     @State private var filtered = OffMain<[LargeFile]>([])
-    private var rows: [LargeFile] { filtered.value }
+    private var rows: [LargeFile] { model.largeFiles.isEmpty ? [] : filtered.value }
 
     private struct FilterKey: Equatable {
         let files: [LargeFile]
@@ -114,7 +114,7 @@ struct LargeFilesView: View {
                     else { model.unmark(ids) }
                 },
                 menu: { ids in menu(ids.compactMap { byID[$0] }, rows: shown) })
-                .overlay { emptyState.allowsHitTesting(false) }
+                .dsEmptyOverlay(showing: rows.isEmpty) { emptyState.allowsHitTesting(false) }
             Divider()
             DSActionGroup {
                 HStack(spacing: DS.Space.sm) {

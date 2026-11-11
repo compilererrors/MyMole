@@ -11,6 +11,7 @@ struct SliceChart: View {
     @Bindable var model: StorageModel
     let style: Style
     @State private var slices: [Slice] = []
+    @State private var drawing: SunburstChart.LayoutKey?
 
     struct Slice {
         let segment: Segment?  // nil for "Other"
@@ -27,6 +28,7 @@ struct SliceChart: View {
 
     var body: some View {
         GeometryReader { geo in
+            let slices = slices
             let g = Geo(size: geo.size, style: style)
             ZStack {
                 Canvas { ctx, _ in
@@ -36,8 +38,9 @@ struct SliceChart: View {
                         ctx.fill(path, with: .color(hot ? s.color.mix(with: .white, by: 0.3) : s.color))
                         ctx.stroke(path, with: .color(palette.workspace.color), lineWidth: 1.5)
                     }
-                    drawLabels(ctx, g)
+                    drawLabels(ctx, g, slices: slices)
                 }
+                .dsCrossfade(value: drawing)
                 if style == .wheel { center(g) }
             }
             .contentShape(Rectangle())
@@ -58,7 +61,13 @@ struct SliceChart: View {
                 }
             }
         }
-        .task(id: SunburstChart.LayoutKey(model)) { slices = layout() }
+        .task(id: SunburstChart.LayoutKey(model)) {
+            let next = layout()
+            withAnimation(model.showingLive ? nil : Motion.content) {
+                slices = next
+                drawing = SunburstChart.LayoutKey(model)
+            }
+        }
         .padding(DS.Space.lg)
     }
 
@@ -92,7 +101,7 @@ struct SliceChart: View {
     /// A slice wide enough gets its name inside it; on the pie, the rest of
     /// the bigger slices are named outside on a short leader line. Names
     /// are whole either way (see `ChartLabel`).
-    private func drawLabels(_ ctx: GraphicsContext, _ g: Geo) {
+    private func drawLabels(_ ctx: GraphicsContext, _ g: Geo, slices: [Slice]) {
         let background = palette.workspace.color
         var outside: [(slice: Slice, y: CGFloat)] = []
         for s in slices {

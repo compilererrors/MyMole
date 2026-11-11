@@ -40,11 +40,48 @@ public struct RemovedApp: Sendable, Identifiable {
         }
 
         public var isAtOriginalPath: Bool {
+            originalParentIsCurrent && sameBundle(at: app.path)
+        }
+
+        /// Only the original bundle may move back, and an occupied original
+        /// location always stays. A partial Finder restore can be retried from
+        /// a verified location directly in the original Applications folder.
+        public func canRestore(_ record: TrashRecord, from path: String, home: String) -> Bool {
+            guard restoreLocationIsCurrent(path, record: record, home: home) else { return false }
+            var destination = stat()
+            guard lstat(app.path, &destination) != 0, errno == ENOENT else { return false }
             let parent = (app.path as NSString).deletingLastPathComponent
-            return Trasher.identity(of: parent) == parentIdentity
-                && Trasher.realPath(parent) == parentLocation
-                && Trasher.identity(of: app.path) == identity
-                && AppIdentity.bundleInfo(atPath: app.path)?["CFBundleIdentifier"] as? String == app.bundleID
+            if (path as NSString).deletingLastPathComponent != parent {
+                let intermediate = parent + "/" + (path as NSString).lastPathComponent
+                var entry = stat()
+                guard lstat(intermediate, &entry) != 0, errno == ENOENT else { return false }
+            }
+            return true
+        }
+
+        public func restoreLocationIsCurrent(_ path: String, record: TrashRecord, home: String) -> Bool {
+            guard record.original.isFileURL, record.trashed.isFileURL,
+                  record.original.query == nil, record.original.fragment == nil,
+                  record.trashed.query == nil, record.trashed.fragment == nil,
+                  record.original.path == app.path, Trasher.isPlainPath(record.trashed.path),
+                  record.trashed.deletingLastPathComponent().path == home + "/.Trash",
+                  Trasher.isPlainPath(path), path.lowercased().hasSuffix(".app"),
+                  !Trasher.isProtectedResolved(app.path, home: home), originalParentIsCurrent else { return false }
+            let parent = (path as NSString).deletingLastPathComponent
+            let originalParent = (app.path as NSString).deletingLastPathComponent
+            guard parent == home + "/.Trash" || parent == originalParent,
+                  Trasher.noLinksBetween(parent == originalParent ? originalParent : home, and: path) else { return false }
+            return sameBundle(at: path)
+        }
+
+        private var originalParentIsCurrent: Bool {
+            let parent = (app.path as NSString).deletingLastPathComponent
+            return Trasher.identity(of: parent) == parentIdentity && Trasher.realPath(parent) == parentLocation
+        }
+
+        private func sameBundle(at path: String) -> Bool {
+            Trasher.identity(of: path) == identity
+                && AppIdentity.bundleInfo(atPath: path)?["CFBundleIdentifier"] as? String == app.bundleID
         }
     }
     public let app: AppBundle

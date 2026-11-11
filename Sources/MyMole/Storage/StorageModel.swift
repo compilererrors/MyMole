@@ -185,6 +185,7 @@ final class StorageModel {
             refreshing = false
             scanning = false
             marked.removeAll()
+            allContentsChoice = nil
             denied = []
             skipped = []
             history = []
@@ -222,6 +223,10 @@ final class StorageModel {
     private(set) var refreshing = false
     /// The tree on screen is the one a running scan is still writing.
     var showingLive: Bool { scanning && !refreshing }
+    var currentIsEmpty: Bool {
+        guard let current, isReady(current), !current.unreadable, !showingLive || current.isFinished else { return false }
+        return current.subfolders.isEmpty && current.listedFiles.isEmpty && current.smallFileCount == 0
+    }
     private(set) var liveFiles = 0
     private(set) var liveBytes: Int64 = 0
     private(set) var denied: [String] = []
@@ -285,6 +290,7 @@ final class StorageModel {
     private enum Pruned {
         case folder(parent: Folder, child: Folder)
         case file(parent: Folder, item: FileItem)
+        case smallFiles(parent: Folder, bytes: KindBytes, files: Int)
     }
 
     private var progress: ScanProgress?
@@ -352,6 +358,7 @@ final class StorageModel {
             return
         }
         showReview = false
+        allContentsChoice = nil
         scanSession?.retire()
         progress?.cancel()
         epoch += 1
@@ -843,6 +850,7 @@ final class StorageModel {
 
     private(set) var choosingContents = false
     @ObservationIgnored private var contentsChoice: UUID?
+    @ObservationIgnored private var allContentsChoice: (folder: String, paths: Set<String>)?
 
     func chooseAllContents() async {
         guard let current, opened == nil, !trashing, !choosingContents else { return }
@@ -871,6 +879,7 @@ final class StorageModel {
                    size: item.isFolder ? (sizes[item.path] ?? 0) : item.bytes, isFolder: item.isFolder,
                    needsRefresh: !item.isFolder && !knownFiles.contains(item.path), proof: item)
         })
+        allContentsChoice = (path, Set(listed.map(\.path)))
     }
 
     // MARK: Trash
@@ -1039,6 +1048,7 @@ final class StorageModel {
     }
 
     private func applyTrash(_ outcome: TrashOutcome, items: [Marked]) {
+        let oldLineage = current?.lineage ?? []
         var pruned: [Pruned] = []
         var freed: Int64 = 0
         let movedPaths = Set(outcome.moved.map(\.original.path))
@@ -1054,9 +1064,18 @@ final class StorageModel {
                 pruned.append(.file(parent: parent, item: file))
             }
         }
+        if let choice = allContentsChoice, !choice.paths.isEmpty, choice.paths.isSubset(of: movedPaths),
+           let folder = root?.find(path: choice.folder), folder.smallFileCount > 0 {
+            let small = folder.removeSmallFiles()
+            pruned.append(.smallFiles(parent: folder, bytes: small.bytes, files: small.files))
+        }
+        allContentsChoice = nil
         // Inner marks went along with their folder.
         let removed = { (path: String) in movedPaths.contains(path) || Marked.parent(of: path, in: movedPaths) != nil }
         marked = marked.filter { !removed($0.key) }
+        selection = selection.filter { !removed($0) }
+        hovered = nil
+        treeExpanded = treeExpanded.filter { !removed($0) }
         let previousFiles = RetiredValue(largeFiles)
         largeFiles = largeFiles.filter { !removed($0.path) }
         previousFiles.releaseLater()
@@ -1067,7 +1086,7 @@ final class StorageModel {
         CleanupLog.submit(record, to: logURL)
         // If the open folder went to the Trash, step out to its parent.
         if let c = current, removed(c.path) {
-            current = root?.find(path: (c.path as NSString).deletingLastPathComponent) ?? root
+            current = oldLineage.reversed().first { !removed($0.path) && root?.find(path: $0.path) === $0 } ?? root
         }
         revision += 1
         var text = outcome.moved.isEmpty && !outcome.failed.isEmpty
@@ -1116,6 +1135,9 @@ final class StorageModel {
             case .file(let parent, let item) where !failed.contains(parent.path + "/" + item.name):
                 parent.restoreFile(item)
                 bytes += item.size
+            case .smallFiles(let parent, let small, let files) where failed.isEmpty:
+                parent.restoreSmallFiles(bytes: small, files: files)
+                bytes += small.total
             default:
                 stillOut.append(p)
             }

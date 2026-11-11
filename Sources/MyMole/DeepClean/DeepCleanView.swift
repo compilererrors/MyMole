@@ -215,7 +215,7 @@ struct DeepCleanView: View {
             },
             bulkChoicesEnabled: !model.trashing,
             menu: { ids in menu(ids.compactMap { byID[$0] }) })
-        .overlay {
+        .dsEmptyOverlay(showing: shown.isEmpty) {
             if !listed.isEmpty, shown.isEmpty {
                 ContentUnavailableView.search(text: query)
             } else if listed.isEmpty {

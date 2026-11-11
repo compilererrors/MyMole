@@ -19,8 +19,12 @@ struct SystemCleanView: View {
                 header
                 Divider()
                 table
-                if !model.chosen.isEmpty { actionBar }
             }
+        }
+        .dsBottom(showing: model.privileged.isAvailable && !model.chosen.isEmpty) {
+            actionBar
+        } toast: {
+            EmptyView()
         }
         .paneToolbar("System Clean", subtitle: "System-wide caches and old logs") {
             ToolbarItem(placement: .primaryAction) {
@@ -133,7 +137,7 @@ struct SystemCleanView: View {
             },
             bulkChoicesEnabled: !model.removing,
             menu: { ids in menu(ids.compactMap { byID[$0] }) })
-        .overlay {
+        .dsEmptyOverlay(showing: model.candidates.isEmpty) {
             if model.candidates.isEmpty {
                 if model.scanning {
                     DSLoading("Looking through system caches and logs…")

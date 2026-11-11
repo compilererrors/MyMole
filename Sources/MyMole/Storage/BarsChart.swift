@@ -24,6 +24,7 @@ struct BarsChart: View {
                         DSText("\(parts.count - Self.limit) smaller items not shown — see the list on the right.", .metadata)
                     }
                 }
+                .animation(model.showingLive ? nil : Motion.content, value: model.revision)
                 .padding(DS.Space.page)
             }
         }
