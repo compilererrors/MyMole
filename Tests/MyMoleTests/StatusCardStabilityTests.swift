@@ -77,7 +77,9 @@ import Testing
         var result: [StatusCardID: CGRect] = [:]
         var remaining = [host]
         while let view = remaining.popLast() {
-            if let probe = view as? ProbeView { result[probe.card] = probe.convert(probe.bounds, to: host) }
+            if let probe = view as? ProbeView, let frame = probe.measuredFrame {
+                result[probe.card] = frame
+            }
             remaining += view.subviews
         }
         return result
@@ -96,6 +98,7 @@ private struct ScrollPanel: View {
 }
 
 private struct Panel: View {
+    private static let coordinateSpace = "status-card-stability"
     let expanded: Bool
     let compact: Bool
     let spacing: CGFloat
@@ -114,14 +117,20 @@ private struct Panel: View {
                 } actions: {
                     Button("Example action") {}
                 }
-                .background(Probe(card: card.id))
+                .background {
+                    GeometryReader { geometry in
+                        Probe(card: card.id, measuredFrame: geometry.frame(in: .named(Self.coordinateSpace)))
+                    }
+                }
         }
         .frame(width: 720)
+        .coordinateSpace(name: Self.coordinateSpace)
     }
 }
 
 private final class ProbeView: NSView {
     let card: StatusCardID
+    var measuredFrame: CGRect?
     init(card: StatusCardID) {
         self.card = card
         super.init(frame: .zero)
@@ -131,6 +140,7 @@ private final class ProbeView: NSView {
 
 private struct Probe: NSViewRepresentable {
     let card: StatusCardID
+    var measuredFrame: CGRect? = nil
     func makeNSView(context: Context) -> ProbeView { ProbeView(card: card) }
-    func updateNSView(_ view: ProbeView, context: Context) {}
+    func updateNSView(_ view: ProbeView, context: Context) { view.measuredFrame = measuredFrame }
 }
