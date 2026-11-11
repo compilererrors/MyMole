@@ -12,6 +12,11 @@ if [ "${1:-}" = --appstore ]; then build=(--scratch-path .build/appstore-tests -
 scripts/check-test-policy.sh
 swift build --build-tests ${build[@]+"${build[@]}"}
 bin=$(swift build --show-bin-path ${build[@]+"${build[@]}"})
+test_targets=()
+for target in MyMoleTests MyMolePackageTests; do
+  if [ -x "$bin/$target.xctest/Contents/MacOS/$target" ]; then test_targets+=("$target"); fi
+done
+[ ${#test_targets[@]} -gt 0 ] || { echo 'E2E test bundle missing; the build did not produce it.' >&2; exit 1; }
 helper="$(dirname "$(xcrun --find swift)")/../libexec/swift/pm/swiftpm-testing-helper"
 helper="$(cd "$(dirname "$helper")" && pwd -P)/$(basename "$helper")"
 root=$(mktemp -d /private/tmp/mymole-ui-smoke-e2e-XXXXXXXX)
@@ -104,11 +109,13 @@ probe "exec 3>'$root/tmp/allowed'" || { cat "$root/probe-error.txt" >&2; echo 'E
 probe '/usr/bin/true' && { echo 'E2E refused: external programs were allowed.' >&2; exit 1; }
 echo 'E2E guard verified: owned fixtures and nonce-bound atomic staging only; outside canary protected; external commands, Apple events and remote network blocked.'
 developer=$(xcode-select -p)
-TMPDIR="$root/tmp/" HOME="$root/home" CFFIXED_USER_HOME="$root/home" XDG_CACHE_HOME="$root/cache" \
-  MYMOLE_GUARDED_TEST=1 MYMOLE_E2E=1 MYMOLE_E2E_ROOT="$root" MYMOLE_E2E_TOKEN="$token" MYMOLE_E2E_CANARY="$outside/sentinel" \
-  PLATFORM="$developer/Platforms/MacOSX.platform/Developer" /usr/bin/sandbox-exec -f "$profile" /bin/sh -c \
-  'DYLD_FRAMEWORK_PATH="$PLATFORM/Library/Frameworks" DYLD_LIBRARY_PATH="$PLATFORM/usr/lib" exec "$@"' sh \
-  "$helper" --test-bundle-path "$bin/MyMoleTests.xctest/Contents/MacOS/MyMoleTests" \
-  --testing-library swift-testing --filter AppEndToEndTests --no-parallel \
-  --event-stream-output-path "$root/events.jsonl"
-python3 -I "$repo/scripts/check-test-events.py" "$root/events.jsonl" --no-skips
+for target in "${test_targets[@]}"; do
+  TMPDIR="$root/tmp/" HOME="$root/home" CFFIXED_USER_HOME="$root/home" XDG_CACHE_HOME="$root/cache" \
+    MYMOLE_GUARDED_TEST=1 MYMOLE_E2E=1 MYMOLE_E2E_ROOT="$root" MYMOLE_E2E_TOKEN="$token" MYMOLE_E2E_CANARY="$outside/sentinel" \
+    PLATFORM="$developer/Platforms/MacOSX.platform/Developer" /usr/bin/sandbox-exec -f "$profile" /bin/sh -c \
+    'DYLD_FRAMEWORK_PATH="$PLATFORM/Library/Frameworks" DYLD_LIBRARY_PATH="$PLATFORM/usr/lib" exec "$@"' sh \
+    "$helper" --test-bundle-path "$bin/$target.xctest/Contents/MacOS/$target" \
+    --testing-library swift-testing --filter AppEndToEndTests --no-parallel \
+    --event-stream-output-path "$root/$target.events.jsonl"
+  python3 -I "$repo/scripts/check-test-events.py" "$root/$target.events.jsonl" --no-skips
+done

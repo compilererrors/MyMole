@@ -109,10 +109,22 @@ if [ "${build[0]:-}" = --sanitize=thread ]; then
 fi
 status=0
 matched=0
+targets=()
+# SwiftPM can link one package test bundle or separate target bundles.
+# Run every supported product present so an older layout cannot hide a newer one.
+combined="$bin/MyMolePackageTests.xctest/Contents/MacOS/MyMolePackageTests"
+[ ! -x "$combined" ] || targets+=(MyMolePackageTests)
 for dir in Tests/*/; do
   target=$(basename "$dir")
   bundle="$bin/$target.xctest/Contents/MacOS/$target"
-  [ -x "$bundle" ] || fail "Test bundle missing for $target; the build didn't produce it."
+  if [ -x "$bundle" ]; then
+    targets+=("$target")
+  elif [ ! -x "$combined" ]; then
+    fail "Test bundle missing for $target; the build didn't produce it."
+  fi
+done
+for target in "${targets[@]}"; do
+  bundle="$bin/$target.xctest/Contents/MacOS/$target"
   echo "== $target"
   # macOS drops DYLD_ variables when it starts a system program such as
   # sandbox-exec, so they're set inside, right before the helper starts.
