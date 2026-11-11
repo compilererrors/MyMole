@@ -7,41 +7,40 @@ import Testing
 @Suite struct ScanBudgetTests {
     @Test func noMoreThanTheSlotsRunAtOnce() async {
         let budget = ScanBudget(slots: 2)
-        let now = Atomic<Int>(0)
-        let most = Atomic<Int>(0)
+        let counts = RunningScans()
         await withTaskGroup(of: Void.self) { group in
             for _ in 0..<8 {
                 group.addTask {
                     await budget.run(background: false) {
-                        let n = now.add(1, ordering: .relaxed).newValue
-                        _ = most.max(n, ordering: .relaxed)
+                        let n = counts.now.add(1, ordering: .relaxed).newValue
+                        _ = counts.most.max(n, ordering: .relaxed)
                         try? await Task.sleep(for: .milliseconds(20))
-                        now.subtract(1, ordering: .relaxed)
+                        counts.now.subtract(1, ordering: .relaxed)
                     }
                 }
             }
         }
-        #expect(most.load(ordering: .relaxed) == 2)
+        #expect(counts.most.load(ordering: .relaxed) == 2)
         #expect(budget.running == 0 && budget.waiting == 0)
     }
 
     @Test func aForegroundScanGoesBeforeWaitingBackgroundOnes() async throws {
         let budget = ScanBudget(slots: 1)
-        let order = Mutex<[String]>([])
+        let order = ScanOrder()
         let (stream, release) = AsyncStream<Void>.makeStream()
         defer { release.yield(()); release.finish() }
         let hold = Task {
             await budget.run(background: false) { for await _ in stream { break } }
         }
         try #require(await waitUntil { budget.running == 1 })
-        let first = Task { await budget.run(background: true) { order.withLock { $0.append("background") } } }
+        let first = Task { await budget.run(background: true) { order.entries.withLock { $0.append("background") } } }
         try #require(await waitUntil { budget.waiting == 1 })
-        let second = Task { await budget.run(background: false) { order.withLock { $0.append("foreground") } } }
+        let second = Task { await budget.run(background: false) { order.entries.withLock { $0.append("foreground") } } }
         try #require(await waitUntil { budget.waiting == 2 })
         release.yield(())
         release.finish()
         _ = await (hold.value, first.value, second.value)
-        #expect(order.withLock { $0 } == ["foreground", "background"])
+        #expect(order.entries.withLock { $0 } == ["foreground", "background"])
     }
 
     @Test func stoppingAQueuedScanDoesNotWaitForOrReleaseAnotherScansSlot() async throws {
@@ -110,5 +109,16 @@ import Testing
             try? await Task.sleep(for: .milliseconds(10))
         }
         return ready()
+    }
+
+    // Share Sendable references instead of capturing local noncopyable values
+    // across tasks, which Swift 6.3 rejects.
+    private final class RunningScans: Sendable {
+        let now = Atomic<Int>(0)
+        let most = Atomic<Int>(0)
+    }
+
+    private final class ScanOrder: Sendable {
+        let entries = Mutex<[String]>([])
     }
 }
