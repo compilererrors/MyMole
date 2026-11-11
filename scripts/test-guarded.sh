@@ -125,13 +125,22 @@ for dir in Tests/*/; do
 done
 for target in "${targets[@]}"; do
   bundle="$bin/$target.xctest/Contents/MacOS/$target"
+  parallel=()
+  if [ "$target" = MyMolePackageTests ]; then
+    # Blocking fixtures from all modules can exhaust the cooperative pool.
+    # Serial cases still exercise the concurrency each individual test creates.
+    parallel=(--no-parallel)
+    for argument in "$@"; do
+      case "$argument" in --parallel | --no-parallel) parallel=(); break ;; esac
+    done
+  fi
   echo "== $target"
   # macOS drops DYLD_ variables when it starts a system program such as
   # sandbox-exec, so they're set inside, right before the helper starts.
   if TMPDIR="$root/tmp/" MYMOLE_GUARDED_TEST=1 XDG_CACHE_HOME="$root/cache" PLATFORM="$developer/Platforms/MacOSX.platform/Developer" \
     INSERT="$insert" /usr/bin/sandbox-exec -f "$profile" /bin/sh -c \
     '[ -z "$INSERT" ] || export DYLD_INSERT_LIBRARIES="$INSERT"; DYLD_FRAMEWORK_PATH="$PLATFORM/Library/Frameworks" DYLD_LIBRARY_PATH="$PLATFORM/usr/lib" exec "$@"' sh \
-    "$helper" --test-bundle-path "$bundle" --testing-library swift-testing "$@" \
+    "$helper" --test-bundle-path "$bundle" --testing-library swift-testing ${parallel[@]+"${parallel[@]}"} "$@" \
     --event-stream-output-path "$root/$target.events.jsonl"; then
     verified=0
     python3 -I "$repo/scripts/check-test-events.py" "$root/$target.events.jsonl" || verified=$?
