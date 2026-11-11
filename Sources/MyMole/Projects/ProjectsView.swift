@@ -93,7 +93,7 @@ struct ProjectsView: View {
                 Label("Project Folders", systemImage: "folder.badge.plus")
             }
             .help("Choose the folders searched for projects")
-            if model.scanning {
+            if model.refreshing {
                 Button {
                     model.stop()
                 } label: {
@@ -101,12 +101,16 @@ struct ProjectsView: View {
                 }
                 .help("Stop measuring; the last complete result stays")
             } else {
-                Button {
-                    model.scan()
+                Menu {
+                    Button(model.refreshTitle, action: model.refreshCurrent)
+                    Button("Scan All Projects") { model.scan() }
                 } label: {
-                    Label("Rescan", systemImage: "arrow.clockwise")
+                    Label(model.refreshTitle, systemImage: "arrow.clockwise")
+                } primaryAction: {
+                    model.refreshCurrent()
                 }
-                .help("Measure every project again")
+                .disabled(model.trashing)
+                .help("Refresh the current folder or project (⌘R), or choose Scan All Projects")
             }
         }
     }
@@ -276,6 +280,7 @@ struct ProjectsView: View {
             out.append(.action(String(localized: "Clear Choice")) { model.clearChoice(in: ids) })
         }
         if ids.count == 1 {
+            out.append(.action(String(localized: "Refresh Current Project")) { model.refreshProject(ids[0]) })
             out.append(.action(String(localized: "Add Folder for Cleanup…")) { model.addFolderForCleanup(to: ids[0]) })
             out.append(.action(String(localized: "Show in Disk Map")) { showInDiskMap(ids[0]) })
         }
@@ -526,6 +531,8 @@ struct ProjectDetail: View {
     /// The project's less frequent actions, in one menu.
     private var more: some View {
         Menu {
+            Button("Refresh Current Project") { model.refreshProject(footprint.id) }
+                .disabled(model.refreshing || model.trashing)
             Button("Show in Disk Map", action: showInDiskMap)
             FileMenuItems(paths: [footprint.id], canOpen: false)
             Divider()

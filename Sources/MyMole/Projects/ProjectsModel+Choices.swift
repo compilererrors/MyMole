@@ -168,6 +168,13 @@ extension ProjectsModel {
     private func contentsLoaded(_ path: String, _ tree: Folder, run: UUID) {
         guard loadingContents[path] == run else { return }
         loadingContents[path] = nil
+        keepContents(tree, at: path)
+    }
+
+    /// An open native branch can retain its tree after cache eviction. Bring
+    /// that same measured tree back before refreshing one of its subfolders.
+    func keepContents(_ tree: Folder, at path: String) {
+        guard tree.path == path else { return }
         contents[path] = tree
         contentsRevision += 1
         contentsOrder.removeAll { $0 == path }

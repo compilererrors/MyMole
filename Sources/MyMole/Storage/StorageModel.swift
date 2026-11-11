@@ -71,6 +71,10 @@ final class StorageModel {
     }
     @ObservationIgnored var scanBudget = ScanBudget.shared
     @ObservationIgnored private var scanSession: DiskScanSession?
+    @ObservationIgnored var scanSubfolder: @Sendable (String, ScanProgress, Int, Set<String>, FileKind?) -> ScanResult = {
+        StorageScanner.scan(path: $0, progress: $1, workers: $2, skip: $3, inheritedKind: $4)
+    }
+    @ObservationIgnored private var mapReader: (owner: UUID, job: Task<Void, Never>)?
     @ObservationIgnored var collectFiles: @Sendable (Folder, @Sendable () -> Bool) -> [LargeFile] = { StorageModel.collectLargeFiles($0, stop: $1) }
     /// The ways the disk map can be drawn, picked from the toolbar menu.
     enum Chart: String, CaseIterable, Identifiable {
@@ -463,6 +467,108 @@ final class StorageModel {
 
     func rescan() { scan(path: rootPath) }
 
+    var refreshTitle: String {
+        tab == .browse ? String(localized: "Refresh Current Folder") : String(localized: "Rescan Entire Map")
+    }
+
+    /// Refresh only the open folder. The enclosing map and its history keep
+    /// their existing measurements; only an explicit Rescan walks the root.
+    func refreshCurrent() {
+        guard opened == nil, !scanning, !trashing else { return }
+        guard tab == .browse else { rescan(); return }
+        guard let root, let current, current !== root else { rescan(); return }
+        guard isReady(current) else { return }
+        showReview = false
+        allContentsChoice = nil
+        progress?.cancel()
+        scanSession?.retire()
+        epoch += 1
+        let run = epoch
+        let session = DiskScanSession()
+        scanSession = session
+        let p = ScanProgress()
+        progress = p
+        refreshing = true
+        scanning = true
+        scanStarted = .now
+        stopAsked = nil
+        liveFiles = 0
+        liveBytes = 0
+        let path = current.path
+        let inheritedKind = current.inheritedKind
+        let skips = DiskMapSkips.under(path).full
+        let level = PerformanceLevel.current()
+        let workers = level.workers(background: false)
+        let read = scanSubfolder
+        let budget = scanBudget
+        poller?.cancel()
+        poller = Task { [weak self] in
+            while !Task.isCancelled {
+                self?.liveFiles = p.files
+                self?.liveBytes = p.bytes
+                try? await Task.sleep(for: .milliseconds(200))
+            }
+        }
+        scanJob = Task.detached(priority: level.priority(background: false)) { [weak self] in
+            defer { session.finish() }
+            let result = await budget.run(background: false, progress: p) {
+                read(path, p, workers, skips, inheritedKind)
+            }
+            await self?.finishFolderRefresh(result, path: path, map: root, progress: p, session: session, run: run)
+        }
+    }
+
+    private func finishFolderRefresh(_ result: ScanResult?, path: String, map: Folder,
+                                     progress: ScanProgress, session: DiskScanSession, run: Int) async {
+        guard run == epoch else { return }
+        guard let result, !result.cancelled, !progress.isCancelled, session.beginFinalization() else {
+            finish(nil, large: nil, snapshot: nil, index: nil, run: run)
+            return
+        }
+        guard !result.root.unreadable, result.deniedPaths.isEmpty else {
+            finish(nil, large: nil, snapshot: nil, index: nil, run: run)
+            showNotice(Notice(text: String(localized: "This folder couldn't be fully read. Its previous scan stays."), canUndo: false))
+            return
+        }
+        // A copy briefly reads the presented map. Serialize such readers and
+        // let removal join them even if another scan has since superseded us.
+        let predecessor = mapReader?.job
+        let owner = UUID()
+        let collect = collectFiles
+        let worker = Task.detached(priority: .userInitiated) {
+            await predecessor?.value
+            guard !progress.isCancelled,
+                  let updated = map.replacingSubtree(at: path, with: result.root, stop: { progress.isCancelled }) else { return nil as (Folder, [LargeFile], ScanIndex)? }
+            let files = collect(updated, { progress.isCancelled })
+            guard !progress.isCancelled else { return nil }
+            let index = ScanIndex(updated, stop: { progress.isCancelled })
+            return progress.isCancelled ? nil : (updated, files, index)
+        }
+        let barrier = Task { _ = await worker.value }
+        mapReader = (owner, barrier)
+        let prepared = await worker.value
+        if mapReader?.owner == owner { mapReader = nil }
+        guard run == epoch, !progress.isCancelled, let (updated, files, index) = prepared else {
+            if let prepared { RetiredValue(prepared).releaseLater() }
+            if run == epoch { finish(nil, large: nil, snapshot: nil, index: nil, run: run) }
+            return
+        }
+        let previous = RetiredValue((root, current, self.index, largeFiles))
+        let location = current?.lineage.reversed().map(\.path) ?? []
+        root = updated
+        current = location.lazy.compactMap { updated.find(path: $0) }.first ?? updated
+        self.index = index
+        largeFiles = files
+        selection = selection.filter { Self.holds(updated, $0) }
+        marked = marked.filter { key, _ in key != path && !key.hasPrefix(path + "/") && !path.hasPrefix(key + "/") }
+        denied.removeAll { $0 == path || $0.hasPrefix(path + "/") }
+        hovered = nil
+        lastDuration = nil
+        finish(nil, large: nil, snapshot: nil, index: nil, run: run)
+        previous.releaseLater()
+        readDiskSpace(of: rootPath, run: run)
+    }
+
     func cancelScan() {
         if scanning, stopAsked == nil { stopAsked = .now }
         progress?.cancel()
@@ -608,12 +714,31 @@ final class StorageModel {
     /// How the disk the map was made of is used beyond the map, read off the
     /// main thread once a scan is in.
     private(set) var diskSpace: DiskSpace?
+    @ObservationIgnored var readSpace: @Sendable (String) -> DiskSpace? = { DiskSpace.read(volumeOf: $0) }
+    @ObservationIgnored private var pendingDiskRead: (path: String, run: Int)?
+    @ObservationIgnored private var diskReadRunning = false
+    private static let diskReads = DispatchQueue(label: "mymole.disk-space", qos: .utility)
 
     private func readDiskSpace(of path: String, run: Int) {
-        Task { [weak self] in
-            let space = await Task.detached(priority: .utility) { DiskSpace.read(volumeOf: path) }.value
-            guard let self, run == self.epoch else { return }
-            self.diskSpace = space
+        pendingDiskRead = (path, run)
+        startDiskRead()
+    }
+
+    private func startDiskRead() {
+        guard !diskReadRunning, let request = pendingDiskRead else { return }
+        pendingDiskRead = nil
+        diskReadRunning = true
+        let read = readSpace
+        // DiskSpace may wait for tmutil. Keep that blocking wait outside
+        // Swift's cooperative executor, with only the latest request pending.
+        Self.diskReads.async { [weak self] in
+            let space = read(request.path)
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                diskReadRunning = false
+                if request.run == epoch { diskSpace = space }
+                startDiskRead()
+            }
         }
     }
 
@@ -1010,6 +1135,13 @@ final class StorageModel {
     /// epoch and transfer the published ones instead of waiting for kernel I/O.
     /// Finalization readers of the visible tree are cooperative and must join.
     private func readerToJoinBeforePruning() -> Task<Void, Never>? {
+        let shared = mapReader?.job
+        let active = retireReaderBeforePruning()
+        guard let shared else { return active }
+        return Task { await shared.value; await active?.value }
+    }
+
+    private func retireReaderBeforePruning() -> Task<Void, Never>? {
         guard scanning, let session = scanSession else { return nil }
         let finalizing = session.retire()
         if !refreshing && finalizing { return scanJob }
@@ -1111,7 +1243,9 @@ final class StorageModel {
         removalPhase = .restoring
         cancelScan()
         let scanningJob = scanJob
+        let sharedReader = mapReader?.job
         Task {
+            await sharedReader?.value
             await scanningJob?.value
             let failedRecords = await jobs.perform(.putBack) { $0.putBack(records) }
             trashing = false

@@ -369,7 +369,7 @@ struct RootView: View {
             || (pane == .systemClean && (app.systemClean.scanning || app.systemClean.removing))
             || (pane == .uninstall && (app.apps.loading || app.apps.uninstalling || app.orphans.loading || app.orphans.trashing))
             || (pane == .diskMap && app.storage.scanning)
-            || (pane == .projects && app.projects.scanning)
+            || (pane == .projects && app.projects.refreshing)
             || (pane == .installer && app.installers.scanning)
             || (pane == .clean && (app.deepClean.scanning || app.deepClean.trashing))
             || (pane == .duplicates && (app.duplicates.scanning || app.duplicates.trashing || app.similar.scanning || app.similar.trashing))

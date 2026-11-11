@@ -374,7 +374,7 @@ final class AppModel {
 
     /// A walk of the disk is running: a scan, a listing or the disk map.
     var anyScanRunning: Bool {
-        deepClean.scanning || installers.scanning || projects.scanning || apps.loading || storage.scanning || duplicates.scanning
+        deepClean.scanning || installers.scanning || projects.refreshing || apps.loading || storage.scanning || duplicates.scanning
             || orphans.loading || similar.scanning
     }
 

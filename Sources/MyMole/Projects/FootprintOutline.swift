@@ -165,6 +165,7 @@ struct FootprintOutline: NSViewRepresentable {
         private var sort = NSSortDescriptor(key: FileColumn.size.rawValue, ascending: false)
         private var nodesByKey: [String: Node] = [:]
         private var density = Density.current
+        private var rebuilding = false
         let sorting = FootprintSorting()
 
         init(_ parent: FootprintOutline) { self.parent = parent }
@@ -188,6 +189,8 @@ struct FootprintOutline: NSViewRepresentable {
 
         func rebuild() {
             guard let outline else { return }
+            rebuilding = true
+            defer { rebuilding = false }
             let anchor = TableScrollAnchor(outline) { (outline.item(atRow: $0) as? Node)?.key }
             let selected = outline.selectedRowIndexes.compactMap { (outline.item(atRow: $0) as? Node)?.key }
             let f = parent.footprint
@@ -490,6 +493,41 @@ struct FootprintOutline: NSViewRepresentable {
 
         // Data source
 
+        func outlineViewSelectionDidChange(_ notification: Notification) {
+            guard !rebuilding, let outline else { return }
+            let node = outline.selectedRowIndexes.count == 1 ? outline.item(atRow: outline.selectedRow) as? Node : nil
+            focusForRefresh(node)
+        }
+
+        func outlineViewItemDidExpand(_ notification: Notification) {
+            guard !rebuilding, let node = notification.userInfo?["NSObject"] as? Node, node.opens != nil else { return }
+            focusForRefresh(node)
+        }
+
+        private func focusForRefresh(_ node: Node?) {
+            guard let node, let item = node.item else { model.folderFocus = nil; return }
+            let path = folderToRefresh(node) ?? node.path.map { ($0 as NSString).deletingLastPathComponent }
+            guard let path, let entry = item.entries.first(where: { path == $0.path || path.hasPrefix($0.path + "/") }) else {
+                model.folderFocus = nil
+                return
+            }
+            if model.contents[entry.path] == nil, model.loadingContents[entry.path] == nil,
+               let owner = nodesByKey["e:" + entry.path] ?? nodesByKey["i:" + item.id],
+               owner.contentsVersion == model.contentsVersions[entry.path, default: 0],
+               let tree = owner.sourceTree, tree.path == entry.path {
+                model.keepContents(tree, at: entry.path)
+            }
+            model.folderFocus = .init(project: parent.footprint.id, entry: entry.path, path: path)
+        }
+
+        private func folderToRefresh(_ node: Node) -> String? {
+            switch node.kind {
+            case .folder(_, let folder): folder.path
+            case .smallFiles(_, let folder, _, _): folder
+            default: node.opens
+            }
+        }
+
         func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
             guard let n = item as? Node else { return roots.count }
             return children(of: n).count
@@ -659,6 +697,12 @@ struct FootprintOutline: NSViewRepresentable {
                 return
             }
             guard let item = n.item else { return }
+            if let path = folderToRefresh(n), let entry = item.entries.first(where: { path == $0.path || path.hasPrefix($0.path + "/") }) {
+                let focus = ProjectsModel.FolderFocus(project: parent.footprint.id, entry: entry.path, path: path)
+                if !model.refreshing, !model.trashing {
+                    menu.add([.action(String(localized: "Refresh This Folder")) { [weak self] in self?.model.refreshFolder(focus) }, .divider])
+                }
+            }
             let target: Target
             if case .item = n.kind {
                 target = .item(item)
