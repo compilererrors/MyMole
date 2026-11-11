@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import StorageKit
 import Synchronization
 import Testing
@@ -23,9 +24,10 @@ import Testing
 
         func exists(_ rel: String) -> Bool { FileManager.default.fileExists(atPath: home + "/" + rel) }
 
-        @MainActor func model(standardRoots: Bool = false, budget: ScanBudget = ScanBudget(slots: 1), search: @escaping DuplicatesModel.Search = DuplicatesModel.liveSearch) -> DuplicatesModel {
+        @MainActor func model(standardRoots: Bool = false, budget: ScanBudget = ScanBudget(slots: 1), search: @escaping DuplicatesModel.Search = DuplicatesModel.liveSearch,
+                              trash: TrashBackend? = nil) -> DuplicatesModel {
             let roots = standardRoots ? DuplicateFinder.standardRoots(home: home) : [home + "/Documents", home + "/Downloads"]
-            let m = DuplicatesModel(home: home, roots: roots, minimum: 10_000, logURL: log, trash: testBin(root), scanBudget: budget, search: search)
+            let m = DuplicatesModel(home: home, roots: roots, minimum: 10_000, logURL: log, trash: trash ?? testBin(root), scanBudget: budget, search: search)
             m.jobs = TrashJobs()
             m.protections = UserProtections(root: root.appending(path: "lists"))
             return m
@@ -232,6 +234,32 @@ import Testing
         #expect(!model.canUndo && model.notice?.text.hasPrefix("Nothing was moved") == true)
     }
 
+    @Test(arguments: [false, true])
+    func changedContentsAreKeptEvenWhenTheOriginalModificationDateIsRestored(keeperChanges: Bool) async throws {
+        let box = Box()
+        let model = try await searched(box)
+        let group = try #require(model.groups.first)
+        model.chooseAll(keeping: .oldest)
+        let path = try #require(keeperChanges ? group.files.first?.path : model.chosen.sorted().first)
+        var before = stat()
+        try #require(lstat(path, &before) == 0)
+        let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: path))
+        try handle.seek(toOffset: 20_000)
+        try handle.write(contentsOf: Data([8]))
+        try handle.close()
+        var times = [before.st_atimespec, before.st_mtimespec]
+        try #require(utimensat(AT_FDCWD, path, &times, AT_SYMLINK_NOFOLLOW) == 0)
+        model.trashChosen()
+        await model.trashJob?.value
+        #expect(FileManager.default.fileExists(atPath: path))
+        if keeperChanges {
+            #expect(group.files.allSatisfy { FileManager.default.fileExists(atPath: $0.path) })
+            #expect(!model.canUndo)
+        } else {
+            #expect(FileManager.default.fileExists(atPath: group.files[0].path))
+        }
+    }
+
     @Test func theCopyInAChosenFolderStays() async throws {
         let box = Box()
         let model = try await searched(box)
@@ -241,6 +269,52 @@ import Testing
         model.chosen = []
         model.chooseAll(keeping: .inFolder(box.home + "/Elsewhere"))
         #expect(model.chosen.isEmpty && model.notice != nil)
+    }
+
+    @Test func aKeeperChangedBetweenMovesStopsTheRestOfTheBatchAndUndoPreservesItsNewData() async throws {
+        let box = Box()
+        try box.file("Documents/original.bin", fill: 1)
+        try box.file("Downloads/copy.bin", fill: 1)
+        try box.file("Downloads/another copy.bin", fill: 1)
+        let keeper = box.home + "/Documents/original.bin"
+        var before = stat()
+        try #require(lstat(keeper, &before) == 0)
+        let atimeSeconds = before.st_atimespec.tv_sec, atimeNanoseconds = before.st_atimespec.tv_nsec
+        let mtimeSeconds = before.st_mtimespec.tv_sec, mtimeNanoseconds = before.st_mtimespec.tv_nsec
+        let bin = testBin(box.root)
+        let changed = Mutex(false)
+        let mutationFailed = Mutex(false)
+        let backend = TrashBackend { path in
+            let result = bin.moveOne(path)
+            if result.trashed != nil && !changed.withLock({ $0 }) {
+                do {
+                    let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: keeper))
+                    try handle.write(contentsOf: Data([9]))
+                    try handle.close()
+                    var times = [timespec(tv_sec: atimeSeconds, tv_nsec: atimeNanoseconds),
+                                 timespec(tv_sec: mtimeSeconds, tv_nsec: mtimeNanoseconds)]
+                    if utimensat(AT_FDCWD, keeper, &times, AT_SYMLINK_NOFOLLOW) != 0 { mutationFailed.withLock { $0 = true } }
+                    changed.withLock { $0 = true }
+                } catch { mutationFailed.withLock { $0 = true } }
+            }
+            return result
+        }
+        let model = box.model(trash: backend)
+        model.scan()
+        await model.scanJob?.value
+        model.chooseAll(keeping: .inFolder(box.home + "/Documents"))
+        let chosen = model.chosen
+        try #require(chosen.count == 2)
+        model.trashChosen()
+        await model.trashJob?.value
+        #expect(changed.withLock { $0 } && !mutationFailed.withLock { $0 })
+        #expect(chosen.filter { FileManager.default.fileExists(atPath: $0) }.count == 1)
+        #expect(try Data(contentsOf: URL(fileURLWithPath: keeper)).first == 9)
+        model.undoTrash()
+        await model.trashJob?.value
+        await model.scanJob?.value
+        #expect(chosen.allSatisfy { FileManager.default.fileExists(atPath: $0) })
+        #expect(try Data(contentsOf: URL(fileURLWithPath: keeper)).first == 9)
     }
 
     @Test func aKeepSavedElsewhereIsMarkedHereAtOnce() async throws {

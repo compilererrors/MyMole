@@ -180,8 +180,7 @@ final class DuplicatesModel {
         firstResultClock = groups.isEmpty ? requestedAt : nil
         let (roots, minimum) = (roots, minimum)
         let level = PerformanceLevel.current()
-        let latest = Mutex<DuplicateStep?>(nil)
-        let incoming = Mutex<[DuplicateGroup]>([])
+        let updates = DuplicateScanUpdates()
         let (budget, search) = (scanBudget, search)
         scanJob = Task { [self] in
             // Progress arrives from the search's threads; the views get the
@@ -190,8 +189,9 @@ final class DuplicatesModel {
                 while !Task.isCancelled {
                     try? await Task.sleep(for: Self.publishEvery)
                     guard progress === p, !Task.isCancelled, !p.isCancelled else { return }
-                    if let value = latest.withLock({ $0 }) { step = value }
-                    let added = incoming.withLock { value in let added = value; value = []; return added }
+                    let batch = updates.take()
+                    if let value = batch.step { step = value }
+                    let added = batch.groups
                     if !added.isEmpty, groups.isEmpty {
                         preview.append(contentsOf: added)
                         if let clock = firstResultClock { Timings.record(.firstDuplicates, since: clock); firstResultClock = nil }
@@ -208,8 +208,8 @@ final class DuplicatesModel {
                         if s.phase == .comparing, listingDone.withLock({ done in
                             guard !done else { return false }; done = true; return true
                         }) { Timings.record(.duplicateListing, since: listedAt) }
-                        latest.withLock { $0 = s }
-                    }, { g in incoming.withLock { $0.append(g) } })
+                        updates.update(s)
+                    }, { g in updates.append(g) })
                 }
             }.value
             publisher.cancel()
@@ -381,7 +381,7 @@ final class DuplicatesModel {
         trashJob = Task {
             let outcome = await jobs.perform(.moveToTrash) { job in
                 job.moveToTrash(picked, through: TrashGate(still: { p in
-                    byPath[p].map { DuplicateFinder.mayGo(p, of: $0, going: going, home: home) } ?? false
+                    byPath[p].map { DuplicateFinder.mayGo(p, of: $0, going: going, home: home, stop: { job.isStopped }) } ?? false
                 }, protections: kept), backend: backend)
             }
             trashing = false

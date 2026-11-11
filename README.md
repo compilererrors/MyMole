@@ -1,123 +1,191 @@
 # MyMole
 
-MyMole is a macOS 26 application for storage analysis, file cleanup, application
-removal and system monitoring. It is written in Swift 6.2 with SwiftUI and AppKit.
+MyMole helps you understand what uses your Mac's storage, review what can go,
+and keep an eye on system activity. Explore first, choose what to remove, and
+review the operation before anything changes.
 
-## Editions
+**[Download for Apple silicon](https://github.com/compilererrors/MyMole/releases/latest)** ·
+[Editions and permissions](#editions-and-permissions) · [License](#license)
 
-- **App Store:** runs in the App Sandbox with access to selected folders through
-  security-scoped bookmarks. It does not include the privileged helper.
-- **Direct:** includes system cleanup and maintenance through a helper launched
-  for one request after macOS administrator authorization.
+Requires **macOS 26 or later**. The interface is in English; numbers, sizes and
+dates follow your system's locale.
 
-## Storage analysis
+All screenshots below show fictional apps, files, projects, cleanup history and
+system readings.
 
-Disk Map displays folder sizes as a sunburst, treemap and file list. It supports
-large-file filtering, saved scans, exclusions and comparisons between scans.
-Places lists mounted volumes and available space.
-Browse can sort by name, size, date, kind or file count. Choose All Contents
-includes hidden and small files in the open folder while leaving the folder
-itself in place. Opening the removal review stops an active scan and preserves
-the choice; files move only after the checks finish and you confirm.
+## Dashboard and Smart Scan
 
-Projects measures build output, dependencies, caches and development files.
-Project rules and keep lists control cleanup selection. History records size
-changes between scans.
+See disk usage, system health, CPU, memory and recent cleanups in one place.
+Smart Scan checks cleanup candidates, installers, installed apps, maintenance
+and identical files, then links to each result for review. Scanning never removes
+anything by itself.
 
-Duplicates compares file sizes, partial hashes and SHA-256 hashes. Similar Photos
-compares image fingerprints. Both preserve at least one file in each group.
-The Photos library is excluded.
-Smart Scan includes identical-file detection after the cleanup scans. Opening
-Duplicates starts its first search automatically. Verified groups appear while
-the search runs; choosing copies is available after completion. Stop keeps the
-previous completed result. Requested folders remain available when access is
-granted after launch, and excluded or unreadable locations are reported.
+![Dashboard with sample storage usage, system readings, recent cleanups and Smart Scan results](.github/images/dashboard.png)
 
-## Cleanup and application removal
+## Deep Clean
 
-Deep Clean lists application caches, logs, crash reports, package-manager caches,
-Mail attachments, simulator data and device backups. Installers lists disk
-images, packages, archives and device software.
+Review application caches, logs, crash reports, developer caches and other
+supported cleanup categories. See the size and reason for each finding, choose
+what to move, and keep files or folders you want MyMole to leave alone.
+Ordinary cleanup uses the Trash and supports Undo.
 
-Uninstall lists applications and associated files identified by bundle ID,
-application name or signed app groups. It supports batch removal, application
-reset and review of files left by removed applications.
-Only identity-linked caches and logs start selected. Website data, cookies,
-saved state, scripts, launch configuration and permanent system items need
-an explicit choice. Every review also searches hidden settings and deeper name
-matches and, in the direct edition, exact app IDs in per-user cache and temporary
-folders; these results start unselected. Unverified matches remain visible.
-Select a row to inspect its full path and matching information. Eligible
-unverified files can be chosen individually; none start selected. Removing them
-always asks for a caution confirmation and uses the Trash. Known competing owners, Keep
-rules, protected locations and changed files remain blocked; manual matches
-cannot be combined with permanent system deletion. Reviews disclose search
-limits and unreadable locations.
+![Deep Clean showing fictional application caches and cleanup categories](.github/images/deep-clean.png)
 
-App Management is separate from Full Disk Access and administrator approval.
-The App Store edition also asks you to select the exact app in a file dialog
-after confirming an uninstall. Cancel or another app stops the operation.
-The review links to its setup and identifies the running copy. If macOS denies
-moving an app, Show App in Finder offers a manual route. When that same app is
-found in the home folder's Trash, its review switches to leftovers with all
-choices cleared. Granting access or moving the app never starts cleanup.
+## System Clean
 
-In Uninstall → Left by Removed Apps, search or filter leftovers from apps
-deleted in Finder. Choose App in Trash uses the removed bundle's identities
-for a more specific review while protecting files shared with installed apps.
-An emptied Trash leaves the conservative name-based search available.
+The direct edition can inspect supported system caches and logs as well as your
+own Library. System cleanup is separate from ordinary Trash moves: it requires
+confirmation and administrator approval, and permanently deleted items cannot
+be restored with Undo. This section is not available in the App Store edition.
 
-Uninstall → App Copies & Integrations compares copies by app ID, version,
-build number and path, and marks possible test builds for review. Choose a
-folder to include build outputs that the system index misses. Integrations
-shows declared Services, document/URL handlers and bundled Finder extensions.
-These declarations don't prove an integration is enabled or reproduce Siri's
-app list. Recorded paths without an app are shown separately. Removal uses
-the ordinary uninstall review, with shared data protected by discovered copies.
+![System Clean listing sample system caches and logs for review](.github/images/system-clean.png)
 
-Tables support draggable column dividers, horizontal scrolling and full-text
-hover tips. Right-click a header to fit visible contents or reset widths.
-File and folder menus offer Show in Finder, path and absolute-path copying,
-plus name, shell-quoted path and file URL formats. Inspection-only findings
-also support these browsing actions.
+## Uninstall
 
-User-level cleanup moves selected files to the Trash and supports Undo. Keep
-lists, path checks and running-application checks are applied before each move.
-History records cleanup and restore operations. Emptying the Trash requires a
-separate confirmation.
+Browse installed apps, review an app's related files, or choose several apps for
+a batch review. Identity-linked caches and logs can start selected; personal
+data, shared files and uncertain matches need your explicit choice. Select a
+finding to see its full path and why it matched.
 
-The direct edition also removes selected system caches and application leftovers
-through the privileged helper. System deletion is permanent and requires
-confirmation and administrator authorization.
+Reset an app while keeping it installed, review files left by apps removed in
+Finder, or compare app copies and declared integrations. Keep rules, running
+apps and files shared with another installed app are checked before removal.
+Ordinary app removal uses the path already shown in the review.
 
-## Monitoring and maintenance
+![Uninstall displaying a grid of fictional apps with their installed sizes](.github/images/uninstall.png)
 
-Live Status displays CPU, memory, disk, network and battery measurements. The
-overview uses compact cards with stable geometry, small history graphs and
-Details for secondary readings. Card size, order and visibility are configurable;
-network details let you choose the named interface shown in the overview. The
-direct edition also lists active processes. Startup Items lists launch jobs and
-plug-ins.
+## Startup Items
 
-The menu bar item provides status summaries and access to the app. Optional
-scheduled scans and notifications report storage findings. Background scans do
-not remove files.
+Inspect launch agents, launch daemons and supported plug-ins, including entries
+whose program is missing. Your own removable agents can go to the Trash with
+Undo; system entries remain available for inspection. App-managed login items
+are linked to macOS Login Items settings.
 
-Optimize runs a fixed set of system maintenance tasks in the direct edition.
+![Startup Items showing fictional launch agents and a missing-program entry](.github/images/startup-items.png)
 
-The interface is in English. Numbers, sizes and dates follow the system locale.
+## Optimize
+
+Check maintenance tasks before running them. Each task explains its effect and
+whether it can be undone, from refreshing Finder previews and app associations
+to reviewing old window states and broken settings files. Choose which tasks
+to enable; Optimize Now asks for confirmation. Administrator tasks are available
+in the direct edition, while the App Store edition offers supported tasks on
+your own files.
+
+![Optimize with task explanations, preview results and individual switches](.github/images/optimize.png)
+
+## Projects
+
+Find space used by build outputs, downloaded dependencies, virtual environments
+and caches across development projects. Inspect each project's contents, compare
+sizes between scans and choose rebuildable files for cleanup. Project rules and
+keep lists let you protect work you want to retain.
+
+![Projects showing fictional development projects and their generated files](.github/images/projects.png)
+
+## Installers
+
+Find downloaded disk images, packages, archives and device software. Sort and
+filter the results, inspect their locations and move chosen downloads to the
+Trash. Undo can put them back during the current session.
+
+![Installers listing sample disk images and installation packages](.github/images/installers.png)
+
+## Duplicates
+
+Identical Files groups files by their contents, even when names or extensions
+differ. Size and hash checks narrow the search, and full byte comparisons verify
+the matches. Compare copies side by side, choose which to remove and retain at
+least one copy in every group. Files are checked again before a move.
+
+![Duplicates comparing exact copies of a fictional document in different folders](.github/images/duplicates.png)
+
+### Similar Photos
+
+Find separate image files that look alike, including resized or exported
+versions. Compare previews and image dimensions before choosing what goes.
+Visual similarity is a review aid, not proof that files are identical. One image
+always stays, and the Photos library is excluded.
+
+![Similar Photos comparing generated landscape studies at different resolutions](.github/images/similar-photos.png)
+
+## Disk Map
+
+Explore folder sizes as Boxes, Rings, Columns, Wheel, Pie or Bars beside a file
+list or expandable tree. Point at nested Boxes to reveal names inside the map;
+very small blocks use their parent's label area. Filter large files, save scans,
+exclude folders and compare changes between scans.
+
+Review individual files, folders or all contents of an open folder before moving
+them. Choosing all contents leaves that folder itself in place. Hidden and small
+files are included, with keep rules and current file checks applied before a move.
+
+![Disk Map with nested rings and a folder list using fictional storage data](.github/images/disk-map.png)
+
+## Live Status
+
+Watch CPU, memory, storage, disk activity, network and battery readings when
+available. Customize card sizes, order and visibility, open Details for secondary
+readings, and choose a network interface. The direct edition also shows active
+processes. The optional menu bar item keeps status summaries close at hand.
+
+![Live Status with synthetic hardware, memory and process readings](.github/images/live-status.png)
+
+## History and Undo
+
+See what each cleanup moved or deleted, how much it handled and what was restored.
+History stores counts and sizes rather than filenames. During the current session,
+Undo is available for the last ten ordinary moves in each pane. Items still in
+the Trash can also be put back with Finder.
+
+Moving something to the Trash does not immediately free disk space. Emptying the
+Trash is a separate, permanent operation with its own confirmation.
+
+![History with fictional cleanup runs, sizes and a restored duplicate cleanup](.github/images/history.png)
+
+## Settings
+
+Choose appearance, loading behavior, confirmations and protected locations.
+Configure optional scheduled scans and notifications, or manage saved results.
+Scheduled scans report findings; they never remove files automatically.
+
+![Settings showing appearance and app preferences](.github/images/settings.png)
+
+## Editions and permissions
+
+### Direct download from GitHub
+
+The direct edition includes a signed administrator helper and runs outside the
+App Sandbox. It can request macOS administrator approval for supported protected
+app moves, system cleanup and maintenance. The helper runs for the requested
+operation; it is not installed as an always-running background service.
+
+Full Disk Access may still be needed to inspect protected data, and macOS App
+Management can still govern changes to other apps. Administrator approval does
+not replace these privacy permissions. This edition does not need App Store
+folder grants or the App Store edition's Finder Automation fallback.
+
+### App Store and TestFlight
+
+This edition runs in the App Sandbox and remembers access to folders you select.
+It does not include the administrator helper or System Clean. When ordinary app
+moves are denied, it can request permission to control Finder so Finder can move
+the already-reviewed app and request administrator approval if needed. Ordinary
+uninstalls do not ask you to select the target app again.
+
+Both editions apply keep rules and current file checks. Unreadable locations,
+search limits and blocked operations are reported rather than presented as a
+complete search or a successful cleanup.
 
 ## Keyboard navigation
 
-Use Tab and Shift-Tab to move between controls, and arrow keys in lists, trees
-and the application grid. Enable Keyboard navigation in macOS Settings to
-include ordinary buttons in the Tab order. Return opens the selected row;
-Space previews files. Control-Return or Shift-F10 opens a file row's menu,
-and Option-Command-C copies its absolute path.
-
-Escape or Command-W closes the frontmost dialog. A confirmation cancels first,
-leaving its review open. Reviews stay open while a removal is running.
-Command-K opens the command palette; Command-F focuses the current search.
+- Use Tab and Shift-Tab between controls, and arrow keys in lists, trees and the
+  app grid. Enable Keyboard navigation in macOS Settings to include ordinary buttons.
+- Return opens the selected row; Space previews files. Control-Return or Shift-F10
+  opens a file row's menu, and Option-Command-C copies its absolute path.
+- Command-K opens the command palette; Command-F focuses search.
+- Escape or Command-W closes the frontmost dialog. A running removal keeps its
+  review open until the operation finishes.
 
 ## License
 

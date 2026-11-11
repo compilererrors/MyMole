@@ -844,6 +844,12 @@ final class FileNameCell: NSTableCellView, ColumnWidthProviding {
     }
 
     func setMarked(_ marked: Bool?) {
+        let visible = marked != nil
+        if showsCheck != visible {
+            showsCheck = visible
+            check.isHidden = !visible
+            needsLayout = true
+        }
         let state: NSControl.StateValue = marked == true ? .on : .off
         markedState = state
         if check.state != state { check.state = state }

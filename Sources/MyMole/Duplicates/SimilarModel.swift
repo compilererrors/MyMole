@@ -1,7 +1,6 @@
 import Foundation
 import StorageKit
 import SwiftUI
-import Synchronization
 
 /// Pictures that look alike in the user's own folders: which are chosen
 /// for the Trash, and what the last move can undo. Nothing is chosen until
@@ -86,7 +85,7 @@ final class SimilarModel {
         step = nil
         let (roots, minimum, cacheURL) = (roots, minimum, cacheURL)
         let level = PerformanceLevel.current()
-        let latest = Mutex<DuplicateStep?>(nil)
+        let updates = DuplicateScanUpdates()
         scanJob = Task { [self] in
             // Progress arrives from the search's threads; the views get the
             // newest a few times a second. Cancelled once the search ends.
@@ -94,14 +93,14 @@ final class SimilarModel {
                 while !Task.isCancelled {
                     try? await Task.sleep(for: DuplicatesModel.publishEvery)
                     guard progress === p else { return }
-                    step = latest.withLock { $0 }
+                    step = updates.take().step
                 }
             }
             let found = await Task.detached(priority: level.priority(background: background)) {
                 await ScanBudget.shared.run(background: background, progress: p) {
                     let cache = cacheURL.map { SharedFingerprints(FingerprintCache.load(from: $0)) }
                     let found = SimilarImages.find(in: roots, minimum: minimum, progress: p, workers: level.workers(background: background), cache: cache) { s in
-                        latest.withLock { $0 = s }
+                        updates.update(s)
                     }
                     // Only a search that ran to its end adds to what's kept.
                     if !p.isCancelled, let cacheURL, let cache { cache.current.save(to: cacheURL) }
