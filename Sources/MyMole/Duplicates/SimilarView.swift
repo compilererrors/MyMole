@@ -78,6 +78,7 @@ struct SimilarView: View {
                     }.frame(minWidth: 320, maxWidth: .infinity)
                 }
             }
+            .animation(Motion.content, value: model.groups.isEmpty)
         }
         .dsBottom(showing: !model.chosen.isEmpty) {
             DSActionBar {
@@ -186,7 +187,7 @@ struct SimilarView: View {
 
     private var groups: some View {
         FileTable(
-            rows: filtered.value.map { g in
+            rows: (model.groups.isEmpty ? [] : filtered.value).map { g in
                 FileRow(
                     id: g.id, name: g.best?.name ?? "", size: g.best?.bytes ?? 0, freeable: g.spare, items: g.images.count, symbol: "photo.on.rectangle",
                     subtitle: String(localized: "\(g.images.count) pictures"))
@@ -200,7 +201,7 @@ struct SimilarView: View {
             onOpen: { ids in FileActions.reveal(pathsInGroups(ids)) },
             menu: { ids in FileActions.menu(pathsInGroups(ids), canOpen: false) },
             filePaths: pathsInGroups)
-        .overlay {
+        .dsEmptyOverlay(showing: filtered.value.isEmpty || model.groups.isEmpty) {
             if !model.groups.isEmpty, filtered.value.isEmpty, !filtered.working {
                 ContentUnavailableView.search(text: query)
             } else if model.groups.isEmpty {

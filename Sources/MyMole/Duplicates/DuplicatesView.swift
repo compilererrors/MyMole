@@ -30,6 +30,7 @@ struct DuplicatesView: View {
                     }.frame(minWidth: 320, maxWidth: .infinity)
                 }
             }
+            .animation(Motion.content, value: model.displayGroups.isEmpty)
         }
         .dsBottom(showing: !model.chosen.isEmpty) {
             DSActionBar {
@@ -192,7 +193,7 @@ struct DuplicatesView: View {
 
     /// The groups matching the filter, worked out off the main thread.
     @State private var filtered = OffMain<[DuplicateGroup]>([])
-    private var shown: [DuplicateGroup] { filtered.value }
+    private var shown: [DuplicateGroup] { model.displayGroups.isEmpty ? [] : filtered.value }
 
     private struct FilterKey: Equatable {
         let groups: [DuplicateGroup]
@@ -223,7 +224,7 @@ struct DuplicatesView: View {
                 search.isEmpty ? groups : groups.filter { g in g.files.contains { search.matches($0.name, $0.path) } }
             }
         }
-        .overlay {
+        .dsEmptyOverlay(showing: shown.isEmpty || model.displayGroups.isEmpty) {
             if !model.displayGroups.isEmpty, shown.isEmpty, !filtered.working {
                 ContentUnavailableView.search(text: query)
             } else if model.displayGroups.isEmpty {

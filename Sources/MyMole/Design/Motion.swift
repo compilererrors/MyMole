@@ -7,4 +7,8 @@ enum Motion {
     static var snappy: Animation? {
         NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? nil : .snappy
     }
+
+    static var content: Animation? {
+        NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? nil : .easeInOut(duration: 0.2)
+    }
 }

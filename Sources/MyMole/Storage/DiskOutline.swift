@@ -192,7 +192,10 @@ struct DiskOutline: NSViewRepresentable {
             requestedRoot = node
             pending = []
             lastSelection = nil
-            if rootNode == nil || rootNode?.path != node.path {
+            // Keep the displayed branch until its replacement is prepared.
+            // Actions already require isCurrent, so old rows cannot authorize
+            // anything in the newly requested folder.
+            if rootNode == nil {
                 rootNode = node
                 known = [:]
                 syncing = true
@@ -290,6 +293,7 @@ struct DiskOutline: NSViewRepresentable {
                                                    symbol: "doc.on.doc", subtitle: String(localized: "Under 1 MB each · open to list")), smallFiles: true))
             }
             guard let outline else { return }
+            let folderChanged = node === requestedRoot && rootNode?.path != node.path
             let anchor = TableScrollAnchor(outline) { (outline.item(atRow: $0) as? Node).map(Self.key) }
             let old = node === requestedRoot ? rootNode?.children ?? [] : node.children ?? []
             let byKey = Dictionary(old.map { (Self.key($0), $0) }, uniquingKeysWith: { a, _ in a })
@@ -323,7 +327,8 @@ struct DiskOutline: NSViewRepresentable {
                 reportVisible()
                 select(force: true)
                 refreshVisible(appearance: true)
-                restore(anchor)
+                if folderChanged, outline.numberOfRows > 0 { outline.scrollRowToVisible(0) }
+                else { restore(anchor) }
             }
             syncing = false
         }
@@ -438,7 +443,7 @@ struct DiskOutline: NSViewRepresentable {
             guard let marks = parent.marks else { return }
             parent.onMark(actionable(targets(clicked: -1)).filter { Marked.parent(of: $0.path, in: marks) == nil })
         }
-        func hover(_ row: Int) { parent.onHover(row >= 0 ? (outline?.item(atRow: row) as? Node)?.entry : nil) }
+        func hover(_ row: Int) { parent.onHover(isCurrent && row >= 0 ? (outline?.item(atRow: row) as? Node)?.entry : nil) }
 
         func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
             guard let node = item as? Node ?? rootNode else { return 0 }
@@ -455,7 +460,7 @@ struct DiskOutline: NSViewRepresentable {
         }
 
         func outlineView(_ outlineView: NSOutlineView, shouldSelectItem item: Any) -> Bool {
-            guard let node = item as? Node else { return false }
+            guard isCurrent, let node = item as? Node, node.generation == generation else { return false }
             return node.entry != nil || node.smallFiles
         }
 
@@ -485,7 +490,7 @@ struct DiskOutline: NSViewRepresentable {
         }
 
         func outlineViewSelectionDidChange(_ notification: Notification) {
-            guard !syncing else { return }
+            guard !syncing, isCurrent else { return }
             parent.selection = Set(targets(clicked: -1).compactMap { $0.entry?.path })
             lastSelection = parent.selection
             if QLPreviewPanel.sharedPreviewPanelExists(), QLPreviewPanel.shared().isVisible { QLPreviewPanel.shared().reloadData() }

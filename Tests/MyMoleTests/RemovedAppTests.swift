@@ -32,6 +32,56 @@ import Testing
         #expect(source.movedToTrash(home: box.home) == nil)
     }
 
+    @Test func restoreProofRequiresTheSameBundleAVacantDestinationAndItsOriginalParent() throws {
+        let box = Box()
+        let app = try box.app("Applications/Editor.app", id: "com.example.Editor")
+        let source = try #require(RemovedApp.Source.capture(app))
+        try box.app(".Trash/Older.app", id: "com.example.Other")
+        let record = TrashRecord(original: URL(fileURLWithPath: app.path), trashed: box.root.appending(path: ".Trash/Editor 2.app"))
+        try FileManager.default.moveItem(atPath: app.path, toPath: record.trashed.path)
+        #expect(source.canRestore(record, from: record.trashed.path, home: box.home))
+        #expect(!source.canRestore(record, from: box.home + "/.Trash/Older.app", home: box.home))
+        try box.file("Applications/Editor.app/new")
+        #expect(!source.canRestore(record, from: record.trashed.path, home: box.home))
+        #expect(source.restoreLocationIsCurrent(record.trashed.path, record: record, home: box.home))
+    }
+
+    @Test func restoreProofCanTrackAnIntermediateNameButNeverAnUnrelatedLocation() throws {
+        let box = Box()
+        let app = try box.app("Applications/Editor.app", id: "com.example.Editor")
+        let source = try #require(RemovedApp.Source.capture(app))
+        try box.file(".Trash/placeholder")
+        let record = TrashRecord(original: URL(fileURLWithPath: app.path), trashed: box.root.appending(path: ".Trash/Editor 2.app"))
+        try FileManager.default.moveItem(atPath: app.path, toPath: record.trashed.path)
+        try box.file("Applications/Editor 2.app/collision")
+        #expect(!source.canRestore(record, from: record.trashed.path, home: box.home))
+        try FileManager.default.moveItem(atPath: box.home + "/Applications/Editor 2.app", toPath: box.home + "/SavedCollision.app")
+        let intermediate = box.home + "/Applications/Editor 2.app"
+        try FileManager.default.moveItem(atPath: record.trashed.path, toPath: intermediate)
+        #expect(source.canRestore(record, from: intermediate, home: box.home))
+        try FileManager.default.moveItem(atPath: intermediate, toPath: box.home + "/Elsewhere.app")
+        #expect(!source.canRestore(record, from: box.home + "/Elsewhere.app", home: box.home))
+        try FileManager.default.moveItem(atPath: box.home + "/Elsewhere.app", toPath: app.path)
+        #expect(source.isAtOriginalPath)
+    }
+
+    @Test(arguments: [false, true]) func restoreProofRejectsARecreatedOrLinkedOriginalParent(link: Bool) throws {
+        let box = Box()
+        let app = try box.app("Applications/Editor.app", id: "com.example.Editor")
+        let source = try #require(RemovedApp.Source.capture(app))
+        try box.file(".Trash/placeholder")
+        let record = TrashRecord(original: URL(fileURLWithPath: app.path), trashed: box.root.appending(path: ".Trash/Editor.app"))
+        try FileManager.default.moveItem(atPath: app.path, toPath: record.trashed.path)
+        try FileManager.default.moveItem(atPath: box.home + "/Applications", toPath: box.home + "/SavedApplications")
+        if link {
+            try FileManager.default.createSymbolicLink(atPath: box.home + "/Applications", withDestinationPath: box.home + "/SavedApplications")
+        } else {
+            try FileManager.default.createDirectory(atPath: box.home + "/Applications", withIntermediateDirectories: true)
+        }
+        #expect(!source.canRestore(record, from: record.trashed.path, home: box.home))
+        #expect(!source.isAtOriginalPath)
+    }
+
     private final class Box {
         let root = FileManager.default.temporaryDirectory.appending(path: "removed-app-\(UUID().uuidString)")
         var home: String { root.path }

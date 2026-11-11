@@ -46,6 +46,8 @@ final class AppsModel {
     private(set) var uninstalling = false
     private(set) var authorizingApp: String?
     private(set) var notice: Notice?
+    private(set) var undoProblem: Problem?
+    private(set) var undoNeedsAutomation = false
     /// System-wide items the last uninstall couldn't delete, and why.
     private(set) var systemProblems: [SystemProblem] = []
 
@@ -65,6 +67,7 @@ final class AppsModel {
     private(set) var leftoverProblems: [SystemProblem] = []
     private(set) var appMoveFailures: [String: TrashOutcome.FailureInfo] = [:]
     private(set) var appMoveNeedsAdministrator = Set<String>()
+    private(set) var appMoveNeedsAutomation = Set<String>()
 
     static var ownBundlePath: String? {
         let url = Bundle.main.bundleURL
@@ -78,7 +81,7 @@ final class AppsModel {
     /// Uses macOS's Trash operation; authorization UI is at AppKit's discretion.
     private let recycle: @MainActor (URL) async -> TrashOutcome
     private let fallbackRecycle: (@MainActor (URL) async -> TrashOutcome)?
-    private let appAccess: AppBundleAccess?
+    private let finderTrash: FinderAppTrash?
     /// Owned by the dedicated self-removal coordinator until it resumes or quits.
     var selfRemovalURL: URL?
     private let isRunning: @MainActor (AppBundle) -> Bool
@@ -166,6 +169,14 @@ final class AppsModel {
         var deleted: Int
         var sizes: [String: Int64]
         var administratorMove: ApplicationTrash.Receipt? = nil
+        var finderMove: FinderMove? = nil
+    }
+
+    private struct FinderMove {
+        let record: TrashRecord
+        let source: RemovedApp.Source
+        var location: URL
+        var reference: Data? = nil
     }
 
     private var shelf = UndoShelf<Run>()
@@ -204,7 +215,7 @@ final class AppsModel {
         recycle: (@MainActor ([String]) async -> TrashOutcome)? = nil,
         recycleURL: (@MainActor (URL) async -> TrashOutcome)? = nil,
         fallbackRecycle: (@MainActor (URL) async -> TrashOutcome)? = nil,
-        appAccess: AppBundleAccess? = nil,
+        finderTrash: FinderAppTrash? = nil,
         isRunning: (@MainActor (AppBundle) -> Bool)? = nil,
         otherCopies: @escaping @Sendable (AppBundle) -> [AppBundle]? = AppsModel.liveOtherCopies,
         system: SystemSide = .unavailable,
@@ -233,9 +244,11 @@ final class AppsModel {
         else if let recycle { self.recycle = { await recycle([$0.path]) } }
         else { self.recycle = { await Self.finderRecycleURLs([$0]) } }
         self.fallbackRecycle = fallbackRecycle ?? (recycle == nil && recycleURL == nil ? Self.foundationRecycle : nil)
-        // Injected movers own their access lifecycle. The shipping Store mover
-        // obtains an exact-file capability rather than relying on folder access.
-        self.appAccess = appAccess ?? (recycle == nil && recycleURL == nil && Edition.current.isSandboxed ? AppBundleAccess() : nil)
+        #if SMOKE
+        self.finderTrash = finderTrash
+        #else
+        self.finderTrash = finderTrash ?? (recycle == nil && recycleURL == nil && Edition.current.isSandboxed ? .live : nil)
+        #endif
         self.isRunning = isRunning ?? AppsModel.liveIsRunning
         if let isRunning {
             runningSet = { apps in Set(apps.filter(isRunning).map(\.path)) }
@@ -395,6 +408,8 @@ final class AppsModel {
 
     /// A listing started before a removal must never bring its old inventory back.
     private func beginUninstall() {
+        undoProblem = nil
+        undoNeedsAutomation = false
         if loading {
             progress?.cancel()
             progress = nil
@@ -685,6 +700,7 @@ final class AppsModel {
     func uninstall(_ app: AppBundle, leftovers: [Leftover], system chosenSystem: [SystemLeftover] = [], manualReview: ManualLeftoverReview? = nil) async -> Result {
         appMoveFailures.removeValue(forKey: app.path)
         appMoveNeedsAdministrator.remove(app.path)
+        appMoveNeedsAutomation.remove(app.path)
         guard leftovers.allSatisfy(\.canRemove) || manualReview != nil else { return .refused(String(localized: "Unverified matches are for inspection only. Search again before choosing data to remove.")) }
         // Taken before the first wait, so a second request can't slip in
         // while this one looks things up, and released however it ends.
@@ -708,11 +724,6 @@ final class AppsModel {
         // The app goes to Finder's Trash, so it's cleared through the gate
         // first: still the same app, and not kept in another pane.
         if let why = await refusal(for: app) { return .refused(why) }
-        let access = itself ? nil : appAccess
-        if let access, !access.acquire(path: app.path) {
-            return .refused(String(localized: "App access wasn't granted. Choose the same app in the file dialog to continue. Nothing was moved."))
-        }
-        defer { access?.release() }
         let needsOwnership = !leftovers.isEmpty || !chosenSystem.isEmpty
         if needsOwnership, await selectionApproval(of: app, leftovers: leftovers, hasSystem: !chosenSystem.isEmpty, manualReview: manualReview) == nil {
             return .refused(String(localized: "Ownership of \(app.name)'s leftovers couldn't be verified. Untick them to move only the app."))
@@ -754,10 +765,11 @@ final class AppsModel {
         if appLocked, !Locks.unlock(app.path) {
             return .failed(String(localized: "\(app.name) is locked, and MyMole couldn't unlock it."))
         }
-        let source = itself ? selfRemovalURL : access?.url
+        let source = itself ? selfRemovalURL : nil
         let sourceURL = source ?? URL(fileURLWithPath: app.path)
         var appOutcome = await recycle(sourceURL)
         var administratorMove: ApplicationTrash.Receipt?
+        var finderMove: FinderMove?
         // Both APIs use the user's Trash and normal permissions. An AppKit
         // denial can be retried through Foundation only for the same object,
         // after fresh protections, ownership, running-state and stop checks.
@@ -770,6 +782,50 @@ final class AppsModel {
                await sourceIsCurrent(sourceProof), !job.isStopped, (itself || !isRunning(app)) {
                 approved = refreshed
                 appOutcome = await fallbackRecycle(sourceURL)
+            }
+        }
+        if !itself, let finderTrash, appOutcome.moved.isEmpty,
+           appOutcome.failureInfo[app.path]?.permissionDenied == true, let sourceProof,
+           !job.isStopped, !isRunning(app), await sourceIsCurrent(sourceProof), await refusal(for: app) == nil {
+            authorizingApp = app.path
+            defer { authorizingApp = nil }
+            let permission = await finderTrash.authorize()
+            if permission == noErr {
+                let refreshed = needsOwnership ? await selectionApproval(of: app, leftovers: leftovers, hasSystem: !chosenSystem.isEmpty, manualReview: manualReview) : nil
+                if (!needsOwnership || refreshed != nil), !job.isStopped, !isRunning(app),
+                   await refusal(for: app) == nil, await sourceIsCurrent(sourceProof), !job.isStopped, !isRunning(app) {
+                    approved = refreshed
+                    let protections = protections
+                    let status = await finderTrash.move(.init(source: sourceURL, stillCurrent: {
+                        guard !job.isStopped, sourceProof.isAtOriginalPath,
+                              let kept = try? protections.read() else { return false }
+                        return !kept(app.path)
+                    }))
+                    let moved = await movedInFinder(sourceProof)
+                    if let moved {
+                        let record = TrashRecord(original: sourceURL, trashed: URL(fileURLWithPath: moved.app.path))
+                        appOutcome = TrashOutcome(moved: [record], failed: [])
+                        finderMove = FinderMove(record: record, source: sourceProof, location: record.trashed)
+                        if needsOwnership {
+                            approved = await selectionApproval(of: app, leftovers: leftovers, hasSystem: !chosenSystem.isEmpty,
+                                                               manualReview: manualReview, identityAt: moved.app)
+                        }
+                    } else {
+                        let error = FinderAppTrash.failure(status == noErr ? FinderAppTrash.unverified : status)
+                        appOutcome = TrashOutcome(moved: [], failed: [(app.path, error.localizedDescription)],
+                                                  failureInfo: [app.path: .init(error, area: .uninstall)])
+                        if status == FinderAppTrash.automationDenied || status == FinderAppTrash.consentRequired {
+                            appMoveNeedsAutomation.insert(app.path)
+                        }
+                    }
+                }
+            } else {
+                let error = FinderAppTrash.failure(permission)
+                appOutcome = TrashOutcome(moved: [], failed: [(app.path, error.localizedDescription)],
+                                          failureInfo: [app.path: .init(error, area: .uninstall)])
+                if permission == FinderAppTrash.automationDenied || permission == FinderAppTrash.consentRequired {
+                    appMoveNeedsAutomation.insert(app.path)
+                }
             }
         }
         if !itself, appOutcome.moved.isEmpty, appOutcome.failureInfo[app.path]?.permissionDenied == true,
@@ -888,7 +944,7 @@ final class AppsModel {
             id: record.id, records: [appRecord] + rest.moved, app: app, deleted: systemReport.removed.count,
             sizes: Dictionary(
                 [(app.path, app.bytes)] + leftovers.filter { moved.contains($0.path) }.map { ($0.path, $0.bytes) },
-                uniquingKeysWith: { a, _ in a }), administratorMove: administratorMove))
+                uniquingKeysWith: { a, _ in a }), administratorMove: administratorMove, finderMove: finderMove))
         var text = rest.moved.isEmpty
             ? String(localized: "Moved \(app.name) (\(fmt(bytes))) to the Trash")
             : String(localized: "Moved \(app.name) and \(rest.moved.count) leftover\(rest.moved.count == 1 ? "" : "s") (\(fmt(bytes))) to the Trash")
@@ -906,6 +962,7 @@ final class AppsModel {
     /// an uninstall, and Undo puts them back.
     func reset(_ app: AppBundle, leftovers: [Leftover], manualReview: ManualLeftoverReview? = nil) async -> Result {
         appMoveFailures.removeValue(forKey: app.path)
+        appMoveNeedsAutomation.remove(app.path)
         return await moveLeftovers(of: app, leftovers: leftovers, removed: nil, manualReview: manualReview)
     }
 
@@ -1035,9 +1092,21 @@ final class AppsModel {
         let records = undoRecords
         guard !records.isEmpty else { return (0, 0) }
         let administratorMove = undone?.administratorMove
+        let finderMove = undone?.finderMove
         let job = await jobs.begin(.putBack)
         defer { jobs.end(job) }
-        var failed = await Task.detached(priority: .userInitiated) { job.putBack(records) }.value
+        // A Finder receipt must be checked before any normal restore: a new
+        // item in its old Trash slot must never be restored as the removed app.
+        let ordinary = records.filter { $0 != finderMove?.record }
+        var failed = await Task.detached(priority: .userInitiated) { job.putBack(ordinary) }.value
+        if let finderMove, records.contains(finderMove.record) {
+            if await restoreFinderMove(finderMove, run: id, job: job) {
+                job.record(.putBack, done: [finderMove.record.original.path], failed: [:], refused: [])
+            } else {
+                failed.append(finderMove.record)
+                job.record(.putBack, done: [], failed: [finderMove.record.original.path: "Couldn't be put back"], refused: [])
+            }
+        }
         if let receipt = administratorMove, failed.contains(receipt.record), let restore = system.restoreApp {
             do {
                 if try await restore(receipt) {
@@ -1047,6 +1116,51 @@ final class AppsModel {
             } catch { /* Keep the verified receipt available for another explicit Undo. */ }
         }
         return applyUndo(failed, announce: announce)
+    }
+
+    private func restoreFinderMove(_ receipt: FinderMove, run: UUID, job: TrashJob) async -> Bool {
+        let home = home
+        let alreadyBack = await Task.detached(priority: .userInitiated) { receipt.source.isAtOriginalPath }.value
+        if alreadyBack { return true }
+        let valid = await Task.detached(priority: .userInitiated) {
+            receipt.source.canRestore(receipt.record, from: receipt.location.path, home: home)
+        }.value
+        var status = FinderAppTrash.changed
+        if valid, let finderTrash, let restore = finderTrash.restore {
+            authorizingApp = receipt.record.original.path
+            defer { authorizingApp = nil }
+            status = await finderTrash.authorize()
+            if status == noErr {
+                guard await Task.detached(priority: .userInitiated, operation: {
+                    receipt.source.canRestore(receipt.record, from: receipt.location.path, home: home)
+                }).value else {
+                    undoProblem = Problem(.uninstall, FinderAppTrash.restoreFailure(FinderAppTrash.changed))
+                    return false
+                }
+                let reply = await restore(.init(source: receipt.location, destination: receipt.record.original, reference: receipt.reference, stillCurrent: { url in
+                    receipt.source.canRestore(receipt.record, from: url.path, home: home)
+                }))
+                status = reply.status == noErr ? FinderAppTrash.unverified : reply.status
+                if let location = reply.location,
+                   await Task.detached(priority: .userInitiated, operation: {
+                       receipt.source.restoreLocationIsCurrent(location.path, record: receipt.record, home: home)
+                   }).value {
+                    shelf.update(run) {
+                        $0.finderMove?.location = location
+                        $0.finderMove?.reference = reply.reference
+                    }
+                }
+            }
+        } else if valid, receipt.location.path == receipt.record.trashed.path {
+            // Injected adapters can omit Finder restoration. The ordinary
+            // path still requires this receipt's identity before and after.
+            _ = await Task.detached(priority: .userInitiated) { job.putBack([receipt.record]) }.value
+            status = FinderAppTrash.unverified
+        }
+        if await Task.detached(priority: .userInitiated, operation: { receipt.source.isAtOriginalPath }).value { return true }
+        undoNeedsAutomation = status == FinderAppTrash.automationDenied || status == FinderAppTrash.consentRequired
+        undoProblem = Problem(.uninstall, FinderAppTrash.restoreFailure(status))
+        return false
     }
 
     /// A listing asked for while an uninstall or Undo ran.
@@ -1100,7 +1214,7 @@ final class AppsModel {
         }
     }
 
-    func dismissNotice() { withAnimation(Motion.snappy) { notice = nil } }
+    func dismissNotice() { withAnimation(Motion.snappy) { notice = nil; undoProblem = nil; undoNeedsAutomation = false } }
 
     // MARK: Dropped apps
 

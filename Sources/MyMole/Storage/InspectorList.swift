@@ -45,11 +45,13 @@ struct InspectorList: View {
                     let all = entries(cur)
                     let rows = all.filter(model.browseFilter.matches)
                     table(rows)
-                        .overlay {
+                        .dsEmptyOverlay(showing: rows.isEmpty && !model.scanning || model.currentIsEmpty) {
                             if rows.isEmpty, !all.isEmpty, !model.scanning {
                                 ContentUnavailableView("No Matching Items", systemImage: "line.3.horizontal.decrease",
                                     description: Text("Adjust or clear the filters above to see more files and folders."))
                                     .allowsHitTesting(false)
+                            } else if model.currentIsEmpty {
+                                emptyFolder
                             }
                         }
                     Divider()
@@ -265,10 +267,17 @@ struct InspectorList: View {
                 onSetMarks: { entries, checked in model.setListedMarks(entries.map(\.marked), checked: checked) },
                 onHover: { entry in model.hovered = entry?.folder.map(Segment.folder) },
                 menu: menu, onSmallFiles: { smallFilesOf = $0 }, sortRequest: model.browseSort)
+            .dsEmptyOverlay(showing: model.currentIsEmpty) { emptyFolder }
             Divider()
             footer(root, rows: visible, all: visible, treeSelection: selected,
                    allChosen: !current || allChosen)
         }
+    }
+
+    private var emptyFolder: some View {
+        ContentUnavailableView("No Items", systemImage: "folder",
+            description: Text("This folder has no mapped contents."))
+            .allowsHitTesting(false)
     }
 
     private func table(_ rows: [DiskEntry]) -> some View {

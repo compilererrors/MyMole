@@ -179,6 +179,15 @@ struct UninstallView: View {
                 )
             }
         } detail: {
+            if let problem = model.undoProblem {
+                DSNotice(.warning, problem.text) {
+                    if model.undoNeedsAutomation {
+                        Button("Automation Settings…") { FinderAppTrash.openSettings() }
+                    }
+                    CopyErrorCodeButton(problem.code)
+                    Button("Dismiss") { model.dismissNotice() }
+                }
+            }
             if !model.systemProblems.isEmpty {
                 let problems = model.systemProblems.map { (path: $0.path, reason: $0.reason) }
                 DSNotice(.warning, problemText(problems)) {
@@ -606,11 +615,16 @@ struct UninstallSheet: View {
                         }
                     }
                     if model.authorizingApp == app.path {
-                        Label("Waiting for administrator approval…", systemImage: "lock")
+                        Label("Waiting for macOS approval…", systemImage: "lock")
                             .font(.callout).foregroundStyle(.secondary)
                     }
                     if let problem {
-                        if let info = model.appMoveFailures[app.path], info.permissionDenied {
+                        if model.appMoveNeedsAutomation.contains(app.path) {
+                            DSNotice(.warning, problem) {
+                                Button("Automation…") { FinderAppTrash.openSettings() }
+                                CopyErrorCodeButton(model.appMoveFailures[app.path]?.code)
+                            }
+                        } else if let info = model.appMoveFailures[app.path], info.permissionDenied {
                             AppMoveAccessNotice(paths: [app.path], code: info.code,
                                                 administratorMayBeNeeded: model.appMoveNeedsAdministrator.contains(app.path))
                         } else {
@@ -731,7 +745,7 @@ struct UninstallSheet: View {
                     .primaryAction()
                     .tint(.red)
                     .disabled(
-                        needsMetadataRefresh || running || uninstaller != nil || model.uninstalling || submitted || keepsUnreadable || reviewUnavailable
+                        running || uninstaller != nil || model.uninstalling || submitted || keepsUnreadable || reviewUnavailable
                             || kept.contains(app.path))
                 }
             }

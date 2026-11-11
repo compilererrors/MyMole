@@ -8,11 +8,13 @@ struct SunburstChart: View {
     @Environment(\.palette) private var palette
     @Bindable var model: StorageModel
     @State private var arcs: [Arc] = []
+    @State private var drawing: SunburstChart.LayoutKey?
 
     private static let rings = 4
 
     var body: some View {
         GeometryReader { geo in
+            let arcs = arcs
             let g = Geometry(size: geo.size, rings: Self.rings)
             ZStack {
                 Canvas { ctx, _ in
@@ -25,6 +27,7 @@ struct SunburstChart: View {
                         ctx.stroke(path, with: .color(palette.workspace.color), lineWidth: 1)
                     }
                 }
+                .dsCrossfade(value: drawing)
                 center(g)
             }
             .contentShape(Rectangle())
@@ -46,8 +49,11 @@ struct SunburstChart: View {
             }
         }
         .task(id: LayoutKey(model)) {
-            guard let cur = model.current else { return arcs = [] }
-            arcs = Sunburst.layout(cur, rings: Self.rings, include: model.isReady)
+            let next = model.current.map { Sunburst.layout($0, rings: Self.rings, include: model.isReady) } ?? []
+            withAnimation(model.showingLive ? nil : Motion.content) {
+                arcs = next
+                drawing = LayoutKey(model)
+            }
         }
         .padding(16)
     }

@@ -181,6 +181,26 @@ public final class Folder: Identifiable, @unchecked Sendable {
         propagate(removing: bytes, files: 1)
     }
 
+    /// Presentation update after every entry in a complete directory choice
+    /// has moved. Individual small files have no nodes in the scanned tree.
+    public func removeSmallFiles() -> (bytes: KindBytes, files: Int) {
+        var bytes = ownBytes
+        for file in listedFiles { bytes[file.kind] = max(0, bytes[file.kind] - file.size) }
+        let files = smallFileCount
+        smallFileCount = 0
+        smallFileBytes = 0
+        ownBytes.subtract(bytes)
+        propagate(removing: bytes, files: files)
+        return (bytes, files)
+    }
+
+    public func restoreSmallFiles(bytes: KindBytes, files: Int) {
+        smallFileCount += files
+        smallFileBytes += bytes.total
+        ownBytes.add(bytes)
+        propagate(adding: bytes, files: files)
+    }
+
     /// Puts back a subfolder removed with `remove(_:)` (undo).
     public func restore(_ child: Folder) {
         guard !subfolders.contains(where: { $0 === child }) else { return }

@@ -6,6 +6,7 @@ import SwiftUI
 struct TreemapChart: View {
     @Bindable var model: StorageModel
     @State private var cells: [Cell] = []
+    @State private var drawing: SunburstChart.LayoutKey?
 
     struct Cell {
         let rect: CGRect
@@ -16,6 +17,7 @@ struct TreemapChart: View {
 
     var body: some View {
         GeometryReader { geo in
+            let cells = cells
             let bounds = CGRect(origin: .zero, size: geo.size)
             Canvas { ctx, _ in
                 for c in cells {
@@ -43,6 +45,7 @@ struct TreemapChart: View {
                     }
                 }
             }
+            .dsCrossfade(value: drawing)
             .contentShape(Rectangle())
             .onContinuousHover { phase in
                 switch phase {
@@ -57,7 +60,11 @@ struct TreemapChart: View {
                 if case .folder(let f)? = cells.last(where: { $0.rect.contains(p) })?.segment { model.open(f) }
             }
             .task(id: Key(model: model, size: geo.size)) {
-                cells = layout(in: bounds)
+                let next = layout(in: bounds)
+                withAnimation(model.showingLive ? nil : Motion.content) {
+                    self.cells = next
+                    drawing = SunburstChart.LayoutKey(model)
+                }
             }
         }
         .padding(16)

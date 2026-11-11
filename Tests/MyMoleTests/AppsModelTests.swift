@@ -45,7 +45,7 @@ import Testing
             recycle: (@MainActor ([String]) async -> TrashOutcome)? = nil,
             recycleURL: (@MainActor (URL) async -> TrashOutcome)? = nil,
             fallbackRecycle: (@MainActor (URL) async -> TrashOutcome)? = nil,
-            appAccess: AppBundleAccess? = nil,
+            finderTrash: FinderAppTrash? = nil,
             runningCheck: (@MainActor (AppBundle) -> Bool)? = nil,
             lookUpCopies: (@Sendable (AppBundle) -> [AppBundle]?)? = nil
         ) -> AppsModel {
@@ -53,7 +53,7 @@ import Testing
             return AppsModel(
                 home: homePath, folders: [homePath + "/Applications"], base: url.appending(path: "store"),
                 logURL: url.appending(path: "history.json"), recycle: recycle ?? { [bin = testBin(url)] in Trasher.moveToTrash($0, through: TrashGate(still: { _ in true }, protections: TrashGate.keepsNothing), backend: bin) },
-                recycleURL: recycleURL, fallbackRecycle: fallbackRecycle, appAccess: appAccess,
+                recycleURL: recycleURL, fallbackRecycle: fallbackRecycle, finderTrash: finderTrash,
                 isRunning: runningCheck ?? { _ in running },
                 otherCopies: lookUpCopies ?? { app in
                     copies?.map { AppBundle(path: $0, name: app.name, bundleID: app.bundleID, version: nil, bytes: 0, fromAppStore: false) }
@@ -125,6 +125,317 @@ import Testing
         model.undoUninstall()
         await model.undoJob?.value
         #expect(home.exists("Applications/Editor.app"))
+    }
+
+    @Test func finderMovesOnlyTheConfirmedAppAndDataWaitsForItsVerifiedTrashIdentity() async throws {
+        let home = try Home()
+        try home.addViewer()
+        let app = try #require(AppFinder.metadata(home.path + "/Applications/Editor.app"))
+        let source = try #require(RemovedApp.Source.capture(app))
+        var requests: [String] = []
+        let finder = FinderAppTrash(authorize: { 0 }, move: { request in
+            #expect(request.stillCurrent())
+            #expect(home.exists("Library/Caches/com.vendor.Editor/c"))
+            requests.append(request.source.path)
+            do { _ = try Self.simulatedAdministratorMove(app, source, home: home.path); return 0 }
+            catch { Issue.record(error); return -1 }
+        })
+        let model = home.model(recycle: Self.deniedRecycle, finderTrash: finder)
+        let leftovers = try #require(await model.leftovers(for: app)).filter(\.chosenByDefault)
+        #expect(await model.uninstall(app, leftovers: leftovers) == .done)
+        #expect(requests == [app.path] && !model.uninstalling && model.authorizingApp == nil)
+        #expect(home.exists(".Trash/Editor.app/Contents/Info.plist"))
+        #expect(!home.exists("Library/Caches/com.vendor.Editor/c"))
+        #expect(home.exists("Library/Preferences/com.vendor.Editor.plist"))
+        #expect(home.exists("Applications/Viewer.app/Contents/Info.plist"))
+        model.undoUninstall()
+        await model.undoJob?.value
+        #expect(home.exists("Applications/Editor.app/Contents/Info.plist"))
+        #expect(home.exists("Library/Caches/com.vendor.Editor/c"))
+    }
+
+    private static func simulatedFinder(in home: Home, trashName: String? = nil,
+        authorize: @escaping @MainActor () async -> Int32 = { 0 },
+        restore: @escaping @MainActor (FinderAppTrash.RestoreRequest) async -> FinderAppTrash.RestoreReply
+    ) -> FinderAppTrash {
+        FinderAppTrash(authorize: authorize, move: { request in
+            do {
+                try #require(request.stillCurrent())
+                let app = try #require(AppFinder.metadata(request.source.path))
+                let source = try #require(RemovedApp.Source.capture(app))
+                let receipt = try simulatedAdministratorMove(app, source, home: home.path)
+                if let trashName {
+                    try FileManager.default.moveItem(at: receipt.record.trashed, to: receipt.record.trashed.deletingLastPathComponent().appendingPathComponent(trashName))
+                }
+                return 0
+            } catch { Issue.record(error); return -1 }
+        }, restore: restore)
+    }
+
+    @Test func finderUndoUsesTheRecordedAppAndVerifiesItsReturnBeforeUpdatingHistory() async throws {
+        let home = try Home()
+        try home.addViewer()
+        let app = try #require(AppFinder.metadata(home.path + "/Applications/Editor.app"))
+        var restores = 0
+        let finder = Self.simulatedFinder(in: home, restore: { request in
+            restores += 1
+            #expect(request.destination.path == app.path && request.stillCurrent(request.source))
+            #expect(home.exists("Applications/Viewer.app/Contents/Info.plist"))
+            _ = chmod(home.path + "/Applications", 0o700)
+            do { try FileManager.default.moveItem(at: request.source, to: request.destination) }
+            catch { Issue.record(error) }
+            return .init(status: 0, location: request.destination)
+        })
+        let model = home.model(recycle: Self.deniedRecycle, finderTrash: finder)
+        model.jobs = TrashJobs()
+        #expect(await model.uninstall(app, leftovers: []) == .done)
+        _ = chmod(home.path + "/Applications", 0o500)
+        defer { _ = chmod(home.path + "/Applications", 0o700) }
+        model.undoUninstall()
+        await model.undoJob?.value
+        #expect(restores == 1 && home.exists("Applications/Editor.app") && !model.canUndo)
+        #expect(model.undoProblem == nil && model.authorizingApp == nil)
+        let history = CleanupLog.load(from: home.url.appending(path: "history.json"))
+        #expect(history.first?.restored == 1)
+    }
+
+    @Test(arguments: [FinderAppTrash.cancelled, FinderAppTrash.automationDenied, Int32(0)])
+    func finderUndoFailuresRemainRetryableAndAReplyAloneNeverCountsAsRestoration(_ failure: Int32) async throws {
+        let home = try Home()
+        let app = try #require(AppFinder.metadata(home.path + "/Applications/Editor.app"))
+        var undoing = false, retry = false, restores = 0
+        let finder = Self.simulatedFinder(in: home, authorize: {
+            undoing && !retry && failure == FinderAppTrash.automationDenied ? failure : 0
+        }, restore: { request in
+            restores += 1
+            #expect(request.stillCurrent(request.source))
+            if retry {
+                do { try FileManager.default.moveItem(at: request.source, to: request.destination) }
+                catch { Issue.record(error) }
+            }
+            return .init(status: retry ? 0 : failure, location: request.source)
+        })
+        let model = home.model(recycle: Self.deniedRecycle, finderTrash: finder)
+        model.jobs = TrashJobs()
+        #expect(await model.uninstall(app, leftovers: []) == .done)
+        undoing = true
+        model.undoUninstall()
+        await model.undoJob?.value
+        #expect(model.canUndo && model.undoProblem?.code != nil && !home.exists("Applications/Editor.app"))
+        #expect(model.undoNeedsAutomation == (failure == FinderAppTrash.automationDenied))
+        #expect(restores == (failure == FinderAppTrash.automationDenied ? 0 : 1))
+        retry = true
+        model.undoUninstall()
+        await model.undoJob?.value
+        #expect(!model.canUndo && model.undoProblem == nil && home.exists("Applications/Editor.app"))
+    }
+
+    @Test(arguments: ["original", "trash", "parent", "linkedParent"])
+    func finderUndoNeverRestoresAReplacementOrUsesAChangedOriginalFolder(_ change: String) async throws {
+        let home = try Home()
+        let app = try #require(AppFinder.metadata(home.path + "/Applications/Editor.app"))
+        var restores = 0
+        let finder = Self.simulatedFinder(in: home, restore: { _ in
+            restores += 1
+            return .init(status: 0, location: nil)
+        })
+        let model = home.model(recycle: Self.deniedRecycle, finderTrash: finder)
+        model.jobs = TrashJobs()
+        #expect(await model.uninstall(app, leftovers: []) == .done)
+        if change == "trash" {
+            try FileManager.default.moveItem(atPath: home.path + "/.Trash/Editor.app", toPath: home.path + "/.Trash/Saved.app")
+            try home.write(".Trash/Editor.app/Contents/MacOS/bin")
+            try (["CFBundleIdentifier": "com.vendor.Editor", "CFBundleName": "Replacement"] as NSDictionary)
+                .write(to: home.url.appending(path: ".Trash/Editor.app/Contents/Info.plist"))
+        } else if change == "original" {
+            try home.write("Applications/Editor.app/marker")
+        } else {
+            try FileManager.default.moveItem(atPath: home.path + "/Applications", toPath: home.path + "/SavedApplications")
+            if change == "linkedParent" {
+                try FileManager.default.createSymbolicLink(atPath: home.path + "/Applications", withDestinationPath: home.path + "/SavedApplications")
+            } else {
+                try FileManager.default.createDirectory(atPath: home.path + "/Applications", withIntermediateDirectories: true)
+            }
+        }
+        model.undoUninstall()
+        await model.undoJob?.value
+        #expect(restores == 0 && model.canUndo && model.undoProblem != nil)
+        #expect(home.exists(".Trash/Editor.app"))
+        if change == "original" { #expect(home.exists("Applications/Editor.app/marker")) }
+        else { #expect(!home.exists("Applications/Editor.app")) }
+    }
+
+    @Test func finderUndoRechecksItsReceiptAfterAutomationConsent() async throws {
+        let home = try Home()
+        let app = try #require(AppFinder.metadata(home.path + "/Applications/Editor.app"))
+        var undoing = false, restores = 0
+        let finder = Self.simulatedFinder(in: home, authorize: {
+            if undoing { try? home.write("Applications/Editor.app/new-installation") }
+            return 0
+        }, restore: { _ in restores += 1; return .init(status: 0, location: nil) })
+        let model = home.model(recycle: Self.deniedRecycle, finderTrash: finder)
+        model.jobs = TrashJobs()
+        #expect(await model.uninstall(app, leftovers: []) == .done)
+        undoing = true
+        model.undoUninstall()
+        await model.undoJob?.value
+        #expect(restores == 0 && model.canUndo && home.exists("Applications/Editor.app/new-installation"))
+        #expect(home.exists(".Trash/Editor.app"))
+    }
+
+    @Test func finderUndoRetainsAPartialMoveForRenameRetryAndIgnoresTheOldTrashSlot() async throws {
+        let home = try Home()
+        let app = try #require(AppFinder.metadata(home.path + "/Applications/Editor.app"))
+        var restores = 0
+        let reference = Data([1, 2, 3])
+        let finder = Self.simulatedFinder(in: home, trashName: "Editor 2.app", restore: { request in
+            restores += 1
+            #expect(request.stillCurrent(request.source))
+            do {
+                if restores == 1 {
+                    let intermediate = request.destination.deletingLastPathComponent().appendingPathComponent(request.source.lastPathComponent)
+                    try FileManager.default.moveItem(at: request.source, to: intermediate)
+                    return .init(status: FinderAppTrash.cancelled, location: intermediate, reference: reference)
+                }
+                #expect(request.source.path == home.path + "/Applications/Editor 2.app" && request.reference == reference)
+                try FileManager.default.moveItem(at: request.source, to: request.destination)
+                return .init(status: 0, location: request.destination)
+            } catch { Issue.record(error); return .init(status: -1, location: nil) }
+        })
+        let model = home.model(recycle: Self.deniedRecycle, finderTrash: finder)
+        model.jobs = TrashJobs()
+        #expect(await model.uninstall(app, leftovers: []) == .done)
+        model.undoUninstall()
+        await model.undoJob?.value
+        #expect(model.canUndo && !home.exists("Applications/Editor.app") && home.exists("Applications/Editor 2.app"))
+        try home.write(".Trash/Editor 2.app/unrelated")
+        try home.write("Applications/Editor.app/new-installation")
+        model.undoUninstall()
+        await model.undoJob?.value
+        #expect(restores == 1 && model.canUndo && home.exists("Applications/Editor.app/new-installation"))
+        try FileManager.default.moveItem(atPath: app.path, toPath: home.path + "/SavedNewInstallation.app")
+        model.undoUninstall()
+        await model.undoJob?.value
+        #expect(restores == 2 && !model.canUndo && home.exists("Applications/Editor.app"))
+        #expect(home.exists(".Trash/Editor 2.app/unrelated") && !home.exists("Applications/Editor 2.app"))
+    }
+
+    @Test func aPendingFinderUndoKeepsTheJobQueueUntilFinderReplies() async throws {
+        let home = try Home()
+        let app = try #require(AppFinder.metadata(home.path + "/Applications/Editor.app"))
+        var reply: CheckedContinuation<FinderAppTrash.RestoreReply, Never>?
+        defer { reply?.resume(returning: .init(status: FinderAppTrash.cancelled, location: nil)) }
+        let finder = Self.simulatedFinder(in: home, restore: { _ in await withCheckedContinuation { reply = $0 } })
+        let model = home.model(recycle: Self.deniedRecycle, finderTrash: finder)
+        model.jobs = TrashJobs()
+        #expect(await model.uninstall(app, leftovers: []) == .done)
+        model.undoUninstall()
+        for _ in 0..<100 where reply == nil { try await Task.sleep(for: .milliseconds(5)) }
+        try #require(reply != nil)
+        var admitted = false
+        let next = Task { let job = await model.jobs.begin(.moveToTrash); admitted = true; model.jobs.end(job) }
+        model.jobs.stop()
+        await Task.yield()
+        #expect(!admitted && model.uninstalling)
+        reply?.resume(returning: .init(status: FinderAppTrash.cancelled, location: nil)); reply = nil
+        await model.undoJob?.value
+        await next.value
+        #expect(admitted && model.canUndo && !model.uninstalling)
+    }
+
+    @Test func deniedFinderAutomationNeverSendsAMoveAndAConfirmedRetryCanProceed() async throws {
+        let home = try Home()
+        let app = try #require(AppFinder.metadata(home.path + "/Applications/Editor.app"))
+        let source = try #require(RemovedApp.Source.capture(app))
+        let permission = Mutex(FinderAppTrash.automationDenied)
+        var moves = 0
+        let finder = FinderAppTrash(authorize: { permission.withLock { $0 } }, move: { _ in
+            moves += 1
+            do { _ = try Self.simulatedAdministratorMove(app, source, home: home.path); return 0 }
+            catch { Issue.record(error); return -1 }
+        })
+        let model = home.model(recycle: Self.deniedRecycle, finderTrash: finder)
+        if case .failed = await model.uninstall(app, leftovers: []) {} else { Issue.record("Denied Automation must stop the uninstall") }
+        #expect(moves == 0 && model.appMoveNeedsAutomation == [app.path])
+        #expect(home.exists("Applications/Editor.app/Contents/Info.plist"))
+        #expect(home.exists("Library/Caches/com.vendor.Editor/c"))
+        permission.withLock { $0 = 0 }
+        #expect(await model.uninstall(app, leftovers: []) == .done)
+        #expect(moves == 1 && model.appMoveNeedsAutomation.isEmpty)
+    }
+
+    @Test(arguments: [FinderAppTrash.cancelled, FinderAppTrash.automationDenied, Int32(0)])
+    func aCancelledDeniedOrUnverifiableFinderReplyKeepsAllAppData(_ status: Int32) async throws {
+        let home = try Home()
+        let app = try #require(AppFinder.metadata(home.path + "/Applications/Editor.app"))
+        let finder = FinderAppTrash(authorize: { 0 }, move: { _ in status })
+        let model = home.model(recycle: Self.deniedRecycle, finderTrash: finder)
+        let leftovers = try #require(await model.leftovers(for: app)).filter(\.chosenByDefault)
+        if case .failed = await model.uninstall(app, leftovers: leftovers) {} else { Issue.record("A reply alone must never authorize data cleanup") }
+        #expect(home.exists("Applications/Editor.app/Contents/Info.plist"))
+        #expect(home.exists("Library/Caches/com.vendor.Editor/c"))
+        #expect(home.exists("Library/Preferences/com.vendor.Editor.plist"))
+        #expect(!model.canUndo && !model.uninstalling && model.authorizingApp == nil)
+    }
+
+    @Test(arguments: ["identity", "running", "stopped", "kept"])
+    func finderConsentNeverBypassesChangesWhileTheSystemQuestionIsOpen(_ change: String) async throws {
+        let home = try Home()
+        let app = try #require(AppFinder.metadata(home.path + "/Applications/Editor.app"))
+        var running = false, moves = 0
+        let jobs = TrashJobs()
+        let finder = FinderAppTrash(authorize: {
+            if change == "identity" {
+                let info: NSDictionary = ["CFBundleIdentifier": "com.vendor.Other", "CFBundleName": "Editor"]
+                do { try info.write(to: home.url.appending(path: "Applications/Editor.app/Contents/Info.plist")) }
+                catch { Issue.record(error) }
+            } else if change == "running" { running = true }
+            else if change == "kept" {
+                do { try CleanKeepList(paths: [app.path]).save(to: home.protections.keepList) }
+                catch { Issue.record(error) }
+            } else { jobs.stop() }
+            return 0
+        }, move: { _ in moves += 1; return 0 })
+        let model = home.model(recycle: Self.deniedRecycle, finderTrash: finder, runningCheck: { _ in running })
+        model.jobs = jobs
+        _ = await model.uninstall(app, leftovers: [])
+        #expect(moves == 0)
+        #expect(home.exists("Applications/Editor.app/Contents/Info.plist"))
+        #expect(home.exists("Library/Caches/com.vendor.Editor/c"))
+    }
+
+    @Test func anOrdinarySuccessfulMoveNeverAsksForFinderAutomation() async throws {
+        let home = try Home()
+        let app = try #require(AppFinder.metadata(home.path + "/Applications/Editor.app"))
+        var calls = 0
+        let finder = FinderAppTrash(authorize: { calls += 1; return 0 }, move: { _ in calls += 1; return 0 })
+        let model = home.model(finderTrash: finder)
+        #expect(await model.uninstall(app, leftovers: []) == .done)
+        #expect(calls == 0)
+    }
+
+    @Test func stoppingWhileFinderWaitsDoesNotReleaseTheRemovalQueueBeforeItsReply() async throws {
+        let home = try Home()
+        let app = try #require(AppFinder.metadata(home.path + "/Applications/Editor.app"))
+        var reply: CheckedContinuation<Int32, Never>?
+        defer { reply?.resume(returning: FinderAppTrash.cancelled) }
+        let finder = FinderAppTrash(authorize: { 0 }, move: { _ in
+            await withCheckedContinuation { reply = $0 }
+        })
+        let model = home.model(recycle: Self.deniedRecycle, finderTrash: finder)
+        let jobs = TrashJobs()
+        model.jobs = jobs
+        let pending = Task { await model.uninstall(app, leftovers: []) }
+        for _ in 0..<200 where reply == nil { try await Task.sleep(for: .milliseconds(5)) }
+        try #require(reply != nil)
+        jobs.stop()
+        #expect(model.uninstalling && jobs.isBusy)
+        reply?.resume(returning: FinderAppTrash.cancelled)
+        reply = nil
+        if case .failed = await pending.value {} else { Issue.record("The cancelled Finder move must report failure") }
+        #expect(!model.uninstalling && !jobs.isBusy)
+        #expect(home.exists("Applications/Editor.app/Contents/Info.plist"))
+        #expect(home.exists("Library/Caches/com.vendor.Editor/c"))
     }
 
     @Test func cancellingAdministratorApprovalLeavesTheAppDataAndSystemFilesUntouched() async throws {
@@ -395,59 +706,40 @@ import Testing
         #expect(model.apps.map(\.name) == ["Editor"])
     }
 
-    @Test func appGrantCarriesOriginalSelectedURLThroughTheMoveAndThenReleasesIt() async throws {
+    @Test func uninstallMovesOnlyTheAppConfirmedInTheReviewWithoutChoosingItAgain() async throws {
         let home = try Home()
+        try home.addViewer()
         let app = try #require(AppFinder.metadata(home.path + "/Applications/Editor.app"))
-        let selected = URL(fileURLWithPath: app.path, isDirectory: true)
-        var events: [String] = []
-        let access = AppBundleAccess(choose: { _ in events.append("choose"); return selected },
-                                     start: { _ in events.append("start"); return true },
-                                     stop: { _ in events.append("stop") })
+        var sources: [String] = []
         let bin = testBin(home.url)
         let model = home.model(recycleURL: { source in
-            #expect(source.absoluteString == selected.absoluteString)
-            #expect(access.url == selected)
-            events.append("move")
+            sources.append(source.path)
             return Trasher.moveToTrash([source.path], through: TrashGate(still: { _ in true }, protections: TrashGate.keepsNothing), backend: bin)
-        }, appAccess: access)
+        })
         #expect(await model.uninstall(app, leftovers: []) == .done)
-        #expect(events == ["choose", "start", "move", "stop"])
-        #expect(access.url == nil)
+        #expect(sources == [app.path])
+        #expect(!home.exists("Applications/Editor.app"))
+        #expect(home.exists("Applications/Viewer.app/Contents/Info.plist"))
         #expect(home.exists("Library/Caches/com.vendor.Editor/c"))
+        #expect(home.exists("Library/Caches/com.vendor.Viewer/c"))
     }
 
-    @Test func cancelledOrWrongAppGrantNeverMovesTheAppOrItsData() async throws {
+    @Test func appChangedWhileWaitingIsRefusedWithoutMovingItsData() async throws {
         let home = try Home()
         let app = try #require(AppFinder.metadata(home.path + "/Applications/Editor.app"))
-        var moves = 0, started = 0
-        for selection in [nil, URL(fileURLWithPath: home.path + "/Applications/Other.app")] {
-            let access = AppBundleAccess(choose: { _ in selection }, start: { _ in started += 1; return true }, stop: { _ in })
-            let model = home.model(recycleURL: { _ in moves += 1; return TrashOutcome(moved: [], failed: []) }, appAccess: access)
-            guard case .refused = await model.uninstall(app, leftovers: []) else { Issue.record("Missing exact-file access must stop the move"); continue }
-            #expect(!model.uninstalling && access.url == nil)
-        }
-        #expect(moves == 0 && started == 0)
-        #expect(home.exists("Applications/Editor.app/Contents/Info.plist"))
-        #expect(home.exists("Library/Caches/com.vendor.Editor/c"))
-    }
-
-    @Test func appChangedWhileWaitingAfterGrantIsRefusedAndScopeIsReleased() async throws {
-        let home = try Home()
-        let app = try #require(AppFinder.metadata(home.path + "/Applications/Editor.app"))
-        var granted = false, stops = 0, moves = 0
-        let access = AppBundleAccess(choose: { target in granted = true; return target }, start: { _ in true }, stop: { _ in stops += 1 })
-        let model = home.model(recycleURL: { _ in moves += 1; return TrashOutcome(moved: [], failed: []) }, appAccess: access)
+        var moves = 0
+        let model = home.model(recycleURL: { _ in moves += 1; return TrashOutcome(moved: [], failed: []) })
         let jobs = TrashJobs()
         model.jobs = jobs
         let blocker = await jobs.begin(.moveToTrash)
         let pending = Task { await model.uninstall(app, leftovers: []) }
-        for _ in 0..<200 where !granted { try await Task.sleep(for: .milliseconds(5)) }
-        #expect(granted)
+        for _ in 0..<200 where jobs.waiting == 0 { try await Task.sleep(for: .milliseconds(5)) }
+        #expect(jobs.waiting == 1)
         let info: NSDictionary = ["CFBundleIdentifier": "com.vendor.Other", "CFBundleName": "Editor"]
         try info.write(to: home.url.appending(path: "Applications/Editor.app/Contents/Info.plist"))
         jobs.end(blocker)
         guard case .refused = await pending.value else { Issue.record("The post-queue identity gate must still apply"); return }
-        #expect(moves == 0 && stops == 1 && access.url == nil)
+        #expect(moves == 0)
         #expect(home.exists("Library/Caches/com.vendor.Editor/c"))
     }
 

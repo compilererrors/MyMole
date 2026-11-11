@@ -225,7 +225,7 @@ struct ProjectsView: View {
             selection: $model.selection,
             onOpen: { ids in FileActions.reveal(ids) },
             menu: menu)
-        .overlay {
+        .dsEmptyOverlay(showing: shown.isEmpty) {
             if !model.footprints.isEmpty, shown.isEmpty {
                 ContentUnavailableView.search(text: query)
             } else if model.footprints.isEmpty {

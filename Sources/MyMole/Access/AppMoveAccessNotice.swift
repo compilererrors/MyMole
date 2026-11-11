@@ -16,7 +16,7 @@ struct AppMoveAccessNotice: View {
 
     private var message: String {
         if administratorMayBeNeeded, Edition.current.isSandboxed {
-            return String(localized: "macOS denied the move of a system-owned app. This edition cannot request administrator approval. Move it in Finder, then return here to review its leftovers.")
+            return String(localized: "macOS denied the move of a system-owned app. Finder may need administrator approval. Check App Management and Finder Automation, then try again.")
         }
         return paths.count == 1
             ? String(localized: "macOS denied the move. File access or permissions may still block it. You can move the app in Finder; its data stays in place.")
@@ -26,6 +26,9 @@ struct AppMoveAccessNotice: View {
     var body: some View {
         DSNotice(.warning, LocalizedStringResource(stringLiteral: message)) {
             AppManagementButton()
+            if Edition.current.isSandboxed {
+                Button("Automation…") { FinderAppTrash.openSettings() }
+            }
             Button("Show App in Finder") { FileActions.reveal(paths) }
             Menu("Details") {
                 if let code {
@@ -59,7 +62,7 @@ struct AppManagementGuide: View {
             Text("Allow this copy to uninstall apps. macOS keeps this permission separate from Full Disk Access.")
                 .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             if Edition.current.isSandboxed {
-                Text("The App Store edition also asks you to choose the app being removed in a file dialog. App Management and Full Disk Access don't replace that file access.")
+                Text("If an ordinary app move is denied, MyMole asks permission to control Finder. Finder can then ask for administrator approval for the app you already chose. You do not need to select the app again.")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             HStack(spacing: DS.Space.md) {

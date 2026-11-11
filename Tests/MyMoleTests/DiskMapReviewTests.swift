@@ -152,6 +152,78 @@ import Testing
         #expect(model.root?.fileCount == 3)
     }
 
+    @Test func emptyingAllContentsUpdatesTheWholePresentationBeforeTheRefreshCanRun() async throws {
+        let box = try Box()
+        let model = box.model()
+        model.scan(path: box.home)
+        await model.scanJob?.value
+        await model.chooseAllContents()
+        model.selection = Set(model.marked.keys)
+        model.hovered = model.root?.subfolders.first.map(Segment.folder)
+        let (stream, release) = AsyncStream<Void>.makeStream()
+        defer { release.yield(()); release.finish() }
+        let budget = model.scanBudget
+        let hold = Task.detached { await budget.run(background: false) { for await _ in stream { break } } }
+        try await wait { budget.running == 1 }
+        model.trashMarked()
+        await model.trashJob?.value
+        #expect(model.refreshing && model.scanning)
+        #expect(model.current?.path == box.home && model.currentIsEmpty)
+        #expect(model.root?.size == 0 && model.root?.fileCount == 0 && model.root?.smallFileCount == 0)
+        #expect(model.selection.isEmpty && model.hovered == nil && model.marked.isEmpty)
+        release.yield(()); release.finish()
+        await hold.value
+        await model.scanJob?.value
+        #expect(model.currentIsEmpty)
+        model.undoTrash()
+        try await wait { !model.trashing }
+        await model.scanJob?.value
+        #expect(!model.currentIsEmpty && model.root?.fileCount == 3)
+        #expect(box.exists("build/large.bin") && box.exists("small.txt") && box.exists(".hidden"))
+    }
+
+    @Test(arguments: [false, true]) func incompleteRemovalNeverClearsTheRemainingSmallFiles(kept: Bool) async throws {
+        let box = try Box()
+        let model = box.model()
+        model.scan(path: box.home)
+        await model.scanJob?.value
+        await model.chooseAllContents()
+        let remains = box.home + "/.hidden"
+        if kept { try CleanKeepList(paths: [remains]).save(to: model.protections.keepList) }
+        else { model.unmark([remains]) }
+        model.trashMarked()
+        await model.trashJob?.value
+        await model.scanJob?.value
+        #expect(!model.currentIsEmpty && model.current?.smallFileCount == 1)
+        #expect(box.exists(".hidden") && !box.exists("small.txt") && !box.exists("build"))
+    }
+
+    @Test func removingAnAncestorReturnsToTheNearestSurvivingFolderAndClearsStaleHighlights() async throws {
+        let box = try Box()
+        let file = box.root.appending(path: "home/build/nested/deep/file.bin")
+        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(repeating: 1, count: 2_000_000).write(to: file)
+        let model = box.model()
+        model.scan(path: box.home)
+        await model.scanJob?.value
+        let parent = try #require(model.root?.find(path: box.home + "/build"))
+        let nested = try #require(model.root?.find(path: parent.path + "/nested"))
+        let deep = try #require(model.root?.find(path: nested.path + "/deep"))
+        model.open(deep)
+        model.selection = [file.path, box.home + "/small.txt"]
+        model.treeExpanded = [parent.path, nested.path, deep.path]
+        model.hovered = .folder(deep)
+        model.mark([.init(path: nested.path, name: nested.name, size: nested.size, isFolder: true)])
+        model.trashMarked()
+        await model.trashJob?.value
+        #expect(model.current === parent && model.hovered == nil)
+        #expect(model.selection == [box.home + "/small.txt"] && model.treeExpanded == [parent.path])
+        #expect(model.root?.find(path: nested.path) == nil)
+        model.undoTrash()
+        try await wait { !model.trashing }
+        #expect(model.current === parent && model.root?.find(path: nested.path) != nil)
+    }
+
     @Test func aLateUnpublishedBranchCannotChangeTheMapAfterRemoval() async throws {
         let box = try Box()
         let model = box.model()

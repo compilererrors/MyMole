@@ -159,7 +159,7 @@ struct StartupView: View {
             },
             bulkChoicesEnabled: !model.trashing,
             menu: { ids in menu(ids.compactMap { byID[$0] }) })
-        .overlay {
+        .dsEmptyOverlay(showing: shown.isEmpty) {
             if !model.items.isEmpty, shown.isEmpty, !query.isEmpty {
                 ContentUnavailableView.search(text: query)
             } else if shown.isEmpty {

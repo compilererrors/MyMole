@@ -139,7 +139,7 @@ struct InstallersView: View {
     /// What the filter lets through; choices it hides stay chosen.
     /// The files matching the filter, worked out off the main thread.
     @State private var filtered = OffMain<[InstallerFile]>([])
-    private var shown: [InstallerFile] { filtered.value }
+    private var shown: [InstallerFile] { model.files.isEmpty ? [] : filtered.value }
 
     private struct FilterKey: Equatable {
         let files: [InstallerFile]
@@ -170,7 +170,7 @@ struct InstallersView: View {
                 search.isEmpty ? files : files.filter { search.matches($0.name, $0.path) }
             }
         }
-        .overlay {
+        .dsEmptyOverlay(showing: shown.isEmpty || model.files.isEmpty) {
             if !model.files.isEmpty, shown.isEmpty, !filtered.working {
                 ContentUnavailableView.search(text: query)
             } else if model.files.isEmpty {

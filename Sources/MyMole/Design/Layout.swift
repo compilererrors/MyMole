@@ -726,6 +726,23 @@ struct NumericTransition: ViewModifier {
 extension View {
     func dsNumericTransition() -> some View { modifier(NumericTransition()) }
 
+    /// The outgoing drawing stays in the same bounds while its prepared
+    /// replacement fades in. Callers change identity with the prepared data.
+    func dsCrossfade<ID: Hashable>(value: ID) -> some View {
+        ZStack { self.id(value).transition(.opacity) }
+    }
+
+    /// Keep the native table and its viewport in place while its empty state
+    /// fades in. Only the overlay animates, never the table's rows or sorting.
+    func dsEmptyOverlay<Empty: View>(showing: Bool, @ViewBuilder content: () -> Empty) -> some View {
+        overlay {
+            ZStack {
+                if showing { content().transition(.opacity) }
+            }
+            .animation(Motion.content, value: showing)
+        }
+    }
+
     /// The bottom of a working pane: the action bar while something is
     /// chosen, inset so it never covers the list, and the feedback toast
     /// floating a fixed gap above whatever is at the bottom, measured rather
@@ -733,9 +750,28 @@ extension View {
     func dsBottom<Bar: View, Toast: View>(
         showing bar: Bool, @ViewBuilder bar content: () -> Bar, @ViewBuilder toast: () -> Toast
     ) -> some View {
-        overlay(alignment: .bottom) { toast().padding(.bottom, DS.Space.lg) }
+        modifier(BottomFeedback(toast: toast()))
             .safeAreaInset(edge: .bottom, spacing: 0) {
-                if bar { content() }
+                if bar { content().transition(.move(edge: .bottom).combined(with: .opacity)) }
+            }
+            .animation(Motion.content, value: bar)
+    }
+}
+
+private struct BottomFeedback<Toast: View>: ViewModifier {
+    let toast: Toast
+    @State private var height: CGFloat = 0
+
+    func body(content: Content) -> some View {
+        content
+            .padding(.bottom, height > 0 ? height + DS.Space.lg * 2 : 0)
+            .overlay(alignment: .bottom) {
+                ZStack { toast }
+                    .padding(.horizontal, DS.Space.lg)
+                    .onGeometryChange(for: CGFloat.self) { ceil($0.size.height) } action: { next in
+                        withAnimation(Motion.content) { height = next }
+                    }
+                    .padding(.bottom, DS.Space.lg)
             }
     }
 }
