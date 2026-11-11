@@ -26,7 +26,8 @@ struct StatusView: View {
     static let interval: Duration = .seconds(2)
     private var layout: StatusLayout { StatusLayout.read(savedLayout) }
     private var layoutBinding: Binding<StatusLayout> {
-        Binding(get: { layout }, set: apply)
+        // Swift 6.3 can crash when converting the actor-isolated method reference.
+        Binding(get: { layout }, set: { value in apply(value) })
     }
 
     var body: some View {
