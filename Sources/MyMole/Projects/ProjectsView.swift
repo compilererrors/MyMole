@@ -26,11 +26,10 @@ struct ProjectsView: View {
                 .padding(.horizontal, DS.Space.page)
                 .padding(.bottom, DS.Space.md)
             }
-            HSplitView {
-                // The list takes what the detail leaves; the detail stays a
-                // readable column, as an inspector does.
-                list.frame(minWidth: 380, idealWidth: 560, maxWidth: .infinity)
-                detail.frame(minWidth: 340, idealWidth: 440, maxWidth: 520)
+            InspectorSplit {
+                list
+            } inspector: {
+                detail
             }
         }
         .dsBottom(showing: !model.chosen.isEmpty) {
