@@ -121,7 +121,7 @@ struct ChangesView: View {
     }
 
     private func scanPicker(_ title: String, selection: SnapshotRef?, set: @escaping @Sendable @MainActor (SnapshotRef?) -> Void) -> some View {
-        Picker(title, selection: Binding(get: { selection }, set: set)) {
+        Picker(title, selection: Binding(get: { selection }, set: { value in set(value) })) {
             ForEach(model.history) { ref in
                 Text(label(ref)).tag(SnapshotRef?.some(ref))
             }
