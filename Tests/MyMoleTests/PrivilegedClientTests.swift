@@ -66,8 +66,12 @@ import Testing
             state.withLock { $0.active -= 1 }
             return (0, PrivilegedTool.output(.removal(RemovalReport())))
         }, toolRunning: { false })
-        async let first = Result { try await client.removeSystem(["/Library/Caches/com.vendor.First"]) }
-        async let second = Result { try await client.removeSystem(["/Library/Caches/com.vendor.Second"]) }
+        func removalResult(_ path: String) async -> Result<RemovalReport, any Error> {
+            do { return .success(try await client.removeSystem([path])) }
+            catch { return .failure(error) }
+        }
+        async let first = removalResult("/Library/Caches/com.vendor.First")
+        async let second = removalResult("/Library/Caches/com.vendor.Second")
         let results = await [first, second]
         #expect(state.withLock { $0.peak } == 1 && state.withLock { $0.calls } == 1)
         #expect(results.filter { if case .failure(PrivilegedClient.Failure.busy) = $0 { true } else { false } }.count == 1)
