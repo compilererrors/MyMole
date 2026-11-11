@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// Filters sit next to their results. Opening this never starts a scan.
@@ -51,29 +52,69 @@ struct DSFilterButton<Content: View>: View {
     }
 }
 
-/// Propose a limit without stretching short forms to fill it. A flexible
-/// max-height frame around ViewThatFits would leave large empty spaces.
-struct DSFilterBody<Content: View>: View {
+/// A single hosted form, measured once instead of constructing both
+/// short and scrolling candidates when a long menu opens.
+struct DSFilterBody<Content: View>: NSViewRepresentable {
     @ViewBuilder var content: Content
 
-    var body: some View {
-        FilterBodyHeight {
-            ViewThatFits(in: .vertical) {
-                content.fixedSize(horizontal: false, vertical: true)
-                ScrollView { content.frame(maxWidth: .infinity, alignment: .leading) }
-                    .frame(height: 360)
-            }
-        }
+    func makeNSView(context: Context) -> FilterBodyScroll {
+        let scroll = FilterBodyScroll()
+        updateNSView(scroll, context: context)
+        return scroll
+    }
+
+    func updateNSView(_ scroll: FilterBodyScroll, context: Context) {
+        scroll.content = AnyView(content.environment(\.self, context.environment))
+        scroll.invalidateContent()
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: FilterBodyScroll, context: Context) -> CGSize? {
+        let width = proposal.width.flatMap { $0.isFinite ? max(0, $0) : nil } ?? 340
+        return CGSize(width: width, height: min(360, nsView.contentHeight(width: width)))
     }
 }
 
-private struct FilterBodyHeight: Layout {
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        subviews.first?.sizeThatFits(.init(width: proposal.width, height: 360)) ?? .zero
+final class FilterBodyScroll: NSScrollView {
+    var content = AnyView(EmptyView())
+    private let host = NSHostingView(rootView: AnyView(EmptyView()))
+    private var measuredWidth: CGFloat?
+    private var reportedHeight: CGFloat = -1
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        hasVerticalScroller = true
+        autohidesScrollers = true
+        drawsBackground = false
+        documentView = host
     }
 
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        subviews.first?.place(at: bounds.origin, proposal: .init(width: bounds.width, height: min(360, bounds.height)))
+    required init?(coder: NSCoder) { fatalError() }
+
+    func invalidateContent() {
+        measuredWidth = nil
+        needsLayout = true
+        invalidateIntrinsicContentSize()
+    }
+
+    func contentHeight(width: CGFloat) -> CGFloat {
+        if measuredWidth != width {
+            measuredWidth = width
+            host.rootView = AnyView(content.frame(width: width, alignment: .topLeading)
+                .fixedSize(horizontal: false, vertical: true)
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { [weak self] height in
+                    guard let self, abs(self.reportedHeight - height) > 0.5 else { return }
+                    self.reportedHeight = height
+                    self.needsLayout = true
+                    self.invalidateIntrinsicContentSize()
+                })
+        }
+        return host.fittingSize.height
+    }
+
+    override func layout() {
+        super.layout()
+        let width = contentView.bounds.width
+        host.setFrameSize(NSSize(width: width, height: contentHeight(width: width)))
     }
 }
 

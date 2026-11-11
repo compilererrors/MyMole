@@ -7,13 +7,48 @@ import Testing
 @MainActor @Suite struct TableSizingTests {
     private final class Rows: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         var made = 0
+        var rowViews: [LayoutRow] = []
         func numberOfRows(in tableView: NSTableView) -> Int { 50_000 }
+        func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
+            let view = LayoutRow()
+            rowViews.append(view)
+            return view
+        }
         func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
             made += 1
             let cell = FileNameCell(identifier: .init("name"))
             cell.configure(FileRow(id: "synthetic-\(row)", name: String(repeating: "Readable ", count: 12), size: 1024), marked: nil, onToggle: {})
             return cell
         }
+    }
+
+    private final class LayoutRow: NSTableRowView {
+        var layouts = 0
+        override func layout() {
+            layouts += 1
+            super.layout()
+        }
+    }
+
+    @Test func repeatedWidthUpdatesDeferCellLayoutUntilAppKitFlushes() throws {
+        let table = FileTableView()
+        table.addTableColumn(NSTableColumn(identifier: .init("name")))
+        table.configureRows(height: 40)
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 500, height: 200))
+        scroll.documentView = table
+        let rows = Rows()
+        table.dataSource = rows
+        table.delegate = rows
+        table.reloadData()
+        _ = try #require(table.rowView(atRow: 0, makeIfNecessary: true))
+        table.layoutSubtreeIfNeeded()
+        let layouts = rows.rowViews.map(\.layouts)
+        let made = rows.made
+        for _ in 0..<100 { table.updateScrollableWidth() }
+        #expect(rows.rowViews.map(\.layouts) == layouts)
+        #expect(rows.made == made)
+        table.layoutSubtreeIfNeeded()
+        #expect(rows.rowViews.map(\.layouts) != layouts)
     }
 
     @Test func fittingVisibleTextDoesNotCreateOffscreenRowsInALargeTable() throws {
