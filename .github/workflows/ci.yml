@@ -94,4 +94,4 @@ jobs:
       - name: Thread Sanitizer (sandboxed)
         run: >
           scripts/test-guarded.sh --sanitize=thread
-          --filter 'CleanStorageTests|PrivilegedSafetyTests|SamplerTests|PerMoveCheckTests|ModelSafetyTests|DeepCleanModelTests|PrivilegedClientTests|SystemCleanModelTests|ProjectRulesModelTests|ScanBudgetTests|SharedReadingTests|OffMainTests|FingerprintCacheTests|DuplicatesTests|SimilarImagesTests|AppsModelTests'
+          --filter 'CleanStorageTests|PrivilegedSafetyTests|SamplerTests|PerMoveCheckTests|ModelSafetyTests|DeepCleanModelTests|PrivilegedClientTests|SystemCleanModelTests|ProjectRulesModelTests|ScanBudgetTests|SharedReadingTests|OffMainTests|FingerprintCacheTests|DuplicateScanUpdatesTests|DuplicatesModelTests|SimilarModelTests|DuplicatesTests|SimilarImagesTests|AppsModelTests'

@@ -18,7 +18,7 @@ struct DuplicatesView: View {
             HStack(spacing: 0) {
                 VStack(spacing: 0) {
                     if !model.displayGroups.isEmpty {
-                        DSListHeading("Duplicate groups", detail: "Select a group to compare its copies.")
+                        DSListHeading("Duplicate groups", detail: "Names can differ; the full contents must match. Select a group to compare its copies.")
                     }
                     groups
                 }.frame(minWidth: 300, maxWidth: .infinity)

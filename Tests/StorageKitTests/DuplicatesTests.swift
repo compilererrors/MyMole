@@ -1,4 +1,5 @@
 import CryptoKit
+import Darwin
 import Foundation
 import Synchronization
 import Testing
@@ -83,6 +84,81 @@ import Testing
         #expect(listing.groups[0].length == 300_000 && listing.groups[0].spare == 2 * listing.groups[0].bytes)
         let compared = steps.withLock { $0.filter { $0.phase == .comparing } }
         #expect(compared.contains { $0.done == $0.total && $0.total > 0 })
+    }
+
+    @Test func differentNamesAndExtensionsOnlyMatchWhenAllTheirBytesMatch() throws {
+        let box = try Sandbox()
+        try box.file("Downloads/payload.dat", bytes: 300_000)
+        try copy(box, "Downloads/payload.dat", to: "Downloads/Setup.dmg")
+        var different = try Data(contentsOf: box.url.appending(path: "Downloads/payload.dat"))
+        different[150_000] ^= 1
+        try different.write(to: box.url.appending(path: "Downloads/Other installer.dmg"))
+        let groups = DuplicateFinder.find(in: [box.path], minimum: 1).groups
+        #expect(groups.count == 1)
+        #expect(Set(groups.first?.files.map(\.name) ?? []) == ["payload.dat", "Setup.dmg"])
+    }
+
+    @Test(arguments: [false, true])
+    func restoringTheModificationDateCannotHideChangedContents(keeperChanges: Bool) throws {
+        let box = try Sandbox()
+        try box.file("Documents/original.bin", bytes: 300_000)
+        try copy(box, "Documents/original.bin", to: "Downloads/copy.bin")
+        let group = try #require(DuplicateFinder.find(in: [box.path], minimum: 1).groups.first)
+        let going = box.path + "/Downloads/copy.bin"
+        let path = keeperChanges ? box.path + "/Documents/original.bin" : going
+        var before = stat()
+        try #require(lstat(path, &before) == 0)
+        let original = try Data(contentsOf: URL(fileURLWithPath: path))
+        let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: path))
+        try handle.seek(toOffset: 150_000)
+        try handle.write(contentsOf: Data([original[150_000] ^ 1]))
+        try handle.close()
+        var times = [before.st_atimespec, before.st_mtimespec]
+        try #require(utimensat(AT_FDCWD, path, &times, AT_SYMLINK_NOFOLLOW) == 0)
+        #expect(!DuplicateFinder.mayGo(going, of: group, going: [going], home: box.path))
+    }
+
+    @Test func anEqualDigestCannotAuthorizeDifferentBytes() throws {
+        let box = try Sandbox()
+        try box.file("Documents/original.dat", bytes: 300_000)
+        try copy(box, "Documents/original.dat", to: "Downloads/setup.dmg")
+        var group = try #require(DuplicateFinder.find(in: [box.path], minimum: 1).groups.first)
+        let path = box.path + "/Downloads/setup.dmg"
+        let original = try Data(contentsOf: URL(fileURLWithPath: path))
+        let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: path))
+        try handle.seek(toOffset: 150_000)
+        try handle.write(contentsOf: Data([original[150_000] ^ 1]))
+        try handle.close()
+        var st = stat()
+        try #require(lstat(path, &st) == 0)
+        // Model a stale or colliding hash group whose metadata looks current.
+        group.files = group.files.map { file in
+            file.path == path ? DuplicateFile(path: path, modified: DuplicateFinder.changed(st), inode: UInt64(st.st_ino),
+                                             device: st.st_dev, version: DuplicateVersion(st)) : file
+        }
+        #expect(!DuplicateFinder.mayGo(path, of: group, going: [path], home: box.path))
+    }
+
+    @Test func resourceForkContentsAreNeverIgnored() throws {
+        let box = try Sandbox()
+        try box.file("Documents/original.bin", bytes: 150_000)
+        try copy(box, "Documents/original.bin", to: "Downloads/copy.bin")
+        let group = try #require(DuplicateFinder.find(in: [box.path], minimum: 1).groups.first)
+        let path = box.path + "/Downloads/copy.bin"
+        let fork = Data("Synthetic additional contents".utf8)
+        try #require(fork.withUnsafeBytes { setxattr(path, "com.apple.ResourceFork", $0.baseAddress, $0.count, 0, 0) } == 0)
+        #expect(!DuplicateFinder.mayGo(path, of: group, going: [path], home: box.path))
+        let listing = DuplicateFinder.find(in: [box.path], minimum: 1)
+        #expect(listing.groups.isEmpty && listing.uncompared == 1)
+    }
+
+    @Test func aCancelledVerificationCannotAuthorizeAMove() throws {
+        let box = try Sandbox()
+        try box.file("Documents/a.bin", bytes: 150_000)
+        try copy(box, "Documents/a.bin", to: "Downloads/b.bin")
+        let group = try #require(DuplicateFinder.find(in: [box.path], minimum: 1).groups.first)
+        let path = box.path + "/Downloads/b.bin"
+        #expect(!DuplicateFinder.mayGo(path, of: group, going: [path], home: box.path, stop: { true }))
     }
 
     @Test func leavesOutWhatIsNotTheUsersToTidy() throws {

@@ -1852,6 +1852,7 @@
       }
     },
     "Names" : {},
+    "Names can differ; the full contents must match. Select a group to compare its copies." : {},
     "Narrow the leftovers listed below by category. This does not run another search or change your removal choices." : {},
     "Narrow the project list by recent activity. The project scans and your removal choices stay the same." : {},
     "Narrow the results below. The disk map and your removal choices stay the same." : {},
@@ -2377,7 +2378,6 @@
     "Select a file on the left to see its copies." : {},
     "Select a file to see its full path and why it matches." : {},
     "Select a group on the left to see its pictures." : {},
-    "Select a group to compare its copies." : {},
     "Select a group to compare its pictures." : {},
     "Select a project to see where its space goes and choose what to remove." : {},
     "Select by Date" : {},

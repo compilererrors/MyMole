@@ -21,9 +21,7 @@ struct TreemapChart: View {
             let bounds = CGRect(origin: .zero, size: geo.size)
             Canvas { ctx, _ in
                 for c in cells {
-                    let base = ChartColors.color(for: c.segment, branch: c.branch, depth: c.level, byKind: model.colorByKind)
-                    let hot = model.isHighlighted(c.segment)
-                    let fill = hot ? base.mix(with: .white, by: 0.3) : base
+                    let fill = fill(for: c)
                     let shape = Path(roundedRect: c.rect.insetBy(dx: 1, dy: 1), cornerRadius: c.level == 1 ? 6 : 3)
                     // A soft top-light gradient gives each block some depth
                     // without the noise of a full cushion render.
@@ -34,15 +32,30 @@ struct TreemapChart: View {
                             startPoint: c.rect.origin, endPoint: CGPoint(x: c.rect.maxX, y: c.rect.maxY)))
                     if c.level == 1 {
                         ctx.stroke(shape, with: .color(.black.opacity(0.25)), lineWidth: 1)
-                        if c.rect.height > 34 {
-                            // The block's label strip, above its second level.
-                            ChartLabel.draw(
-                                c.segment.name,
-                                detail: ByteCountFormatter.string(fromByteCount: c.segment.size, countStyle: .file),
-                                in: CGRect(x: c.rect.minX + 7, y: c.rect.minY + 4, width: c.rect.width - 14, height: 28),
-                                on: fill, ctx: ctx)
-                        }
                     }
+                }
+
+                // Labels follow the fills so a nested name stays inside its
+                // own block. Tiny blocks borrow their parent's label strip.
+                let hovered = cells.last { $0.level > 1 && $0.segment == model.hovered }
+                let labeled = hovered.map { c in
+                    ChartLabel.draw(
+                        name(of: c.segment),
+                        detail: ByteCountFormatter.string(fromByteCount: c.segment.size, countStyle: .file),
+                        in: c.rect.insetBy(dx: 7, dy: 4), on: fill(for: c), ctx: ctx)
+                } ?? false
+                for c in cells where c.level == 1 && c.rect.height > 34 {
+                    let rect = CGRect(x: c.rect.minX + 7, y: c.rect.minY + 4, width: c.rect.width - 14, height: 28)
+                    if !labeled, let hovered, hovered.branch == c.branch,
+                       ChartLabel.draw(name(of: hovered.segment),
+                                       detail: ByteCountFormatter.string(fromByteCount: hovered.segment.size, countStyle: .file),
+                                       in: rect, on: fill(for: c), ctx: ctx) {
+                        continue
+                    }
+                    ChartLabel.draw(
+                        name(of: c.segment),
+                        detail: ByteCountFormatter.string(fromByteCount: c.segment.size, countStyle: .file),
+                        in: rect, on: fill(for: c), ctx: ctx)
                 }
             }
             .dsCrossfade(value: drawing)
@@ -68,6 +81,18 @@ struct TreemapChart: View {
             }
         }
         .padding(16)
+    }
+
+    private func fill(for cell: Cell) -> Color {
+        let color = ChartColors.color(for: cell.segment, branch: cell.branch, depth: cell.level, byKind: model.colorByKind)
+        return model.isHighlighted(cell.segment) ? color.mix(with: .white, by: 0.3) : color
+    }
+
+    private func name(of segment: Segment) -> String {
+        if case .files(let folder) = segment, folder.smallFileCount == 0, folder.listedFiles.count == 1 {
+            return folder.listedFiles[0].name
+        }
+        return segment.name
     }
 
     private struct Key: Hashable {

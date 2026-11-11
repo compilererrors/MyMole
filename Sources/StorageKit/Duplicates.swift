@@ -3,6 +3,20 @@ import Darwin
 import Foundation
 import Synchronization
 
+struct DuplicateVersion: Sendable, Hashable {
+    let modifiedSeconds: Int
+    let modifiedNanoseconds: Int
+    let changedSeconds: Int
+    let changedNanoseconds: Int
+
+    init(_ st: stat) {
+        modifiedSeconds = st.st_mtimespec.tv_sec
+        modifiedNanoseconds = st.st_mtimespec.tv_nsec
+        changedSeconds = st.st_ctimespec.tv_sec
+        changedNanoseconds = st.st_ctimespec.tv_nsec
+    }
+}
+
 /// One copy of a file that has others.
 public struct DuplicateFile: Sendable, Hashable, Identifiable {
     public let path: String
@@ -14,6 +28,7 @@ public struct DuplicateFile: Sendable, Hashable, Identifiable {
     /// Its APFS clone family; nil where the volume can't say, which counts
     /// as a family of its own.
     public var cloneID: UInt64? = nil
+    var version: DuplicateVersion? = nil
 
     public var id: String { path }
     public var name: String { (path as NSString).lastPathComponent }
@@ -111,7 +126,7 @@ public struct DuplicateStep: Sendable, Equatable {
 ///
 /// A file can only equal another of the same length, so lengths are
 /// compared first, then the start and end of each file, and only what still
-/// matches is read whole and compared by SHA-256.
+/// matches is read whole, hashed by SHA-256 and verified byte for byte.
 ///
 /// Left out on purpose: links (never followed), hidden files and folders,
 /// packages such as apps and photo libraries, Git repositories and
@@ -146,6 +161,7 @@ public enum DuplicateFinder {
         let modified: Date
         let inode: UInt64
         var device: Int32 = 0
+        var version: DuplicateVersion? = nil
     }
 
     /// A file's last change with the nanoseconds the disk keeps, so a file
@@ -279,7 +295,7 @@ public enum DuplicateFinder {
                     else { continue }
                     found(Found(
                         path: dir + "/" + name, length: Int64(st.st_size), bytes: Int64(st.st_blocks) * 512,
-                        modified: changed(st), inode: UInt64(st.st_ino), device: st.st_dev))
+                        modified: changed(st), inode: UInt64(st.st_ino), device: st.st_dev, version: DuplicateVersion(st)))
                 default: continue
                 }
             }
@@ -289,7 +305,7 @@ public enum DuplicateFinder {
     /// The groups of identical files among files of one length. Files are
     /// first told apart by a 32-byte fingerprint of their two ends, so
     /// memory stays at that much a file however many share a length; the
-    /// full SHA-256 decides. `counted` is called once a file is settled:
+    /// full SHA-256 narrows the candidates for exact comparison. `counted` is called once a file is settled:
     /// unlike every other, or read whole.
     static func compare(
         _ files: [Found], progress: ScanProgress, missed: () -> Void = {}, onGroup: ((DuplicateGroup) -> Void)? = nil, counted: () -> Void
@@ -314,20 +330,32 @@ public enum DuplicateFinder {
             var byDigest: [String: [Found]] = [:]
             for f in candidates {
                 guard !progress.isCancelled else { return [] }
-                defer { counted() }
                 if contents.isEmpty { contents = readBuffer(for: f) }
                 guard let d = digest(f, progress: progress, buffer: &contents) else {
                     if !progress.isCancelled { missed() }
+                    counted()
                     continue
                 }
                 byDigest[d, default: []].append(f)
             }
+            for unique in byDigest.values where unique.count == 1 { counted() }
             for (d, same) in byDigest where same.count > 1 {
+                defer { for _ in same { counted() } }
                 let ordered = same.sorted { $0.modified != $1.modified ? $0.modified < $1.modified : $0.path < $1.path }
+                // A hash is a filter, never permission to discard a file.
+                // An unreadable, changing or unequal bucket is left unclaimed.
+                guard let first = ordered.first,
+                      ordered.dropFirst().allSatisfy({ identical(first, $0, digest: d, stop: { progress.isCancelled }) }),
+                      ordered.allSatisfy(isCurrent)
+                else {
+                    if !progress.isCancelled { for _ in ordered { missed() } }
+                    continue
+                }
                 let group = DuplicateGroup(
                     length: ordered[0].length, bytes: ordered.map(\.bytes).min() ?? 0, digest: d,
                     files: ordered.map {
-                        DuplicateFile(path: $0.path, modified: $0.modified, inode: $0.inode, device: $0.device, cloneID: FileSpace.cloneID($0.path))
+                        DuplicateFile(path: $0.path, modified: $0.modified, inode: $0.inode, device: $0.device,
+                                      cloneID: FileSpace.cloneID($0.path), version: $0.version)
                     })
                 out.append(group)
                 onGroup?(group)
@@ -341,10 +369,10 @@ public enum DuplicateFinder {
     /// and last change.
     private static func open(_ f: Found) -> Int32? {
         guard let parent = Trasher.openFolder((f.path as NSString).deletingLastPathComponent, creating: false) else { return nil }
-        let fd = openat(parent, (f.path as NSString).lastPathComponent, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        let fd = openat(parent, (f.path as NSString).lastPathComponent, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)
         close(parent)
         guard fd >= 0 else { return nil }
-        guard isListed(fd, f) else {
+        guard isListed(fd, f), hasNoResourceFork(fd) else {
             close(fd)
             return nil
         }
@@ -356,8 +384,67 @@ public enum DuplicateFinder {
     /// The open file is the one listed as `f`, as it was then.
     private static func isListed(_ fd: Int32, _ f: Found) -> Bool {
         var st = stat()
-        return fstat(fd, &st) == 0 && st.st_mode & S_IFMT == S_IFREG && Int64(st.st_size) == f.length
+        return fstat(fd, &st) == 0 && matches(st, f)
+    }
+
+    private static func matches(_ st: stat, _ f: Found) -> Bool {
+        st.st_mode & S_IFMT == S_IFREG && Int64(st.st_size) == f.length
             && UInt64(st.st_ino) == f.inode && st.st_dev == f.device && changed(st) == f.modified
+            && st.st_flags & UInt32(SF_DATALESS) == 0 && (f.version == nil || f.version == DuplicateVersion(st))
+    }
+
+    private static func isCurrent(_ f: Found) -> Bool {
+        var st = stat()
+        return lstat(f.path, &st) == 0 && matches(st, f)
+    }
+
+    /// The data fork alone cannot establish equality for a file carrying
+    /// additional resource-fork contents. Unknown attribute access also fails closed.
+    private static func hasNoResourceFork(_ fd: Int32) -> Bool {
+        let bytes = fgetxattr(fd, "com.apple.ResourceFork", nil, 0, 0, 0)
+        return bytes == 0 || (bytes < 0 && errno == ENOATTR)
+    }
+
+    /// Bounded reads from two checked descriptors. Both versions and paths
+    /// must still match afterwards; equal hashes alone never pass this check.
+    static func identical(_ a: Found, _ b: Found, digest expected: String, stop: () -> Bool = { false }) -> Bool {
+        guard !stop(), a.length == b.length, let left = open(a) else { return false }
+        defer { close(left) }
+        guard let right = open(b) else { return false }
+        defer { close(right) }
+        var leftBuffer = readBuffer(for: a)
+        var rightBuffer = readBuffer(for: b)
+        var hash = SHA256()
+        var offset: Int64 = 0
+        while offset < a.length {
+            let count = Int(min(Int64(leftBuffer.count), a.length - offset))
+            guard readExactly(left, into: &leftBuffer, count: count, offset: offset, stop: stop),
+                  readExactly(right, into: &rightBuffer, count: count, offset: offset, stop: stop)
+            else { return false }
+            let equal = leftBuffer.withUnsafeBytes { lhs in
+                rightBuffer.withUnsafeBytes { rhs in memcmp(lhs.baseAddress!, rhs.baseAddress!, count) == 0 }
+            }
+            guard equal else { return false }
+            leftBuffer.withUnsafeBytes { hash.update(bufferPointer: UnsafeRawBufferPointer(rebasing: $0[..<count])) }
+            offset += Int64(count)
+        }
+        return !stop() && hash.finalize().map { String(format: "%02x", $0) }.joined() == expected
+            && isListed(left, a) && isListed(right, b) && isCurrent(a) && isCurrent(b)
+            && hasNoResourceFork(left) && hasNoResourceFork(right)
+    }
+
+    private static func readExactly(_ fd: Int32, into buffer: inout [UInt8], count: Int, offset: Int64, stop: () -> Bool) -> Bool {
+        buffer.withUnsafeMutableBytes { bytes in
+            var done = 0
+            while done < count {
+                guard !stop() else { return false }
+                let n = pread(fd, bytes.baseAddress!.advanced(by: done), count - done, off_t(offset + Int64(done)))
+                if n < 0 && errno == EINTR { continue }
+                guard n > 0 else { return false }
+                done += n
+            }
+            return true
+        }
     }
 
     /// A fingerprint of the first and last `sample` bytes; nil when the
@@ -408,19 +495,30 @@ public enum DuplicateFinder {
         var st = stat()
         return lstat(file.path, &st) == 0 && st.st_mode & S_IFMT == S_IFREG && Int64(st.st_size) == length
             && UInt64(st.st_ino) == file.inode && (file.device == 0 || st.st_dev == file.device) && changed(st) == file.modified
+            && st.st_flags & UInt32(SF_DATALESS) == 0 && (file.version == nil || file.version == DuplicateVersion(st))
     }
 
     /// Checked again right before a copy goes to the Trash: it's unchanged,
     /// has no link on its way, and at least one copy that isn't going is
-    /// still there and unchanged. A group never loses its last copy.
-    public static func mayGo(_ path: String, of group: DuplicateGroup, going: Set<String>, home: String = Home.path) -> Bool {
-        guard Trasher.isPlainPath(path), !Trasher.isProtected(path, home: home), Trasher.noLinksBetween(home, and: path),
+    /// still there and unchanged. Their full contents are compared again,
+    /// including a check against the scanned digest. A group never loses its last copy.
+    public static func mayGo(_ path: String, of group: DuplicateGroup, going: Set<String>, home: String = Home.path,
+                             stop: () -> Bool = { false }) -> Bool {
+        guard !stop(), going.contains(path), Trasher.isPlainPath(path), !Trasher.isProtected(path, home: home), Trasher.noLinksBetween(home, and: path),
             let file = group.files.first(where: { $0.path == path }), isUnchanged(file, length: group.length)
         else { return false }
         // The copy that stays must be reached the same way: no link on its way either.
-        return group.files.contains {
-            !going.contains($0.path) && isUnchanged($0, length: group.length)
-                && (!$0.path.hasPrefix(home + "/") || Trasher.noLinksBetween(home, and: $0.path))
+        func found(_ file: DuplicateFile) -> Found {
+            Found(path: file.path, length: group.length, bytes: group.bytes, modified: file.modified,
+                  inode: file.inode, device: file.device, version: file.version)
+        }
+        return group.files.contains { keeper in
+            !going.contains(keeper.path) && (file.device != keeper.device || file.inode != keeper.inode)
+                && isUnchanged(keeper, length: group.length)
+                && (!keeper.path.hasPrefix(home + "/") || Trasher.noLinksBetween(home, and: keeper.path))
+                && identical(found(file), found(keeper), digest: group.digest, stop: stop)
+                && Trasher.noLinksBetween(home, and: path)
+                && (!keeper.path.hasPrefix(home + "/") || Trasher.noLinksBetween(home, and: keeper.path))
         }
     }
 }
