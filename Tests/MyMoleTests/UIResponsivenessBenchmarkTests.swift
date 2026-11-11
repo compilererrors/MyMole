@@ -151,12 +151,18 @@ struct UIResponsivenessBenchmarkTests {
         let itemsBefore = controller.children.map(ObjectIdentifier.init)
         let frames = FrameSamples()
         var widths: [CGFloat] = []
+        var workspaceWidths: [CGFloat] = []
         let link = controller.view.displayLink(target: frames, selector: #selector(FrameSamples.tick(_:)))
         link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 60, preferred: 60)
         frames.work = { step in
-            let inspectorWidth = CGFloat(340 + (step < 100 ? step : 200 - step) % 90 * 2)
-            controller.splitView.setPosition(controller.splitView.bounds.width - 1 - inspectorWidth, ofDividerAt: 0)
-            controller.splitView.adjustSubviews()
+            if step < 100 {
+                let inspectorWidth = CGFloat(340 + step % 90 * 2)
+                controller.splitView.setPosition(controller.splitView.bounds.width - 1 - inspectorWidth, ofDividerAt: 0)
+                controller.splitView.adjustSubviews()
+            } else {
+                window.setContentSize(NSSize(width: 1_000 + CGFloat(step - 100) * 6, height: 740))
+                workspaceWidths.append(controller.content.view.bounds.width)
+            }
             controller.view.layoutSubtreeIfNeeded()
             window.displayIfNeeded()
             widths.append(controller.inspector.view.frame.width)
@@ -170,7 +176,9 @@ struct UIResponsivenessBenchmarkTests {
         link.invalidate()
         try #require(frames.services.count == 200, "A visible display link must actually deliver the resize workload")
         try #require((widths.max() ?? 0) - (widths.min() ?? 0) > 150, "The inspector must actually resize during measurement")
-        report("projects.split.service", Array(frames.services.dropFirst(20)), budget: 16.7)
+        try #require((workspaceWidths.max() ?? 0) - (workspaceWidths.min() ?? 0) > 400, "The workspace must resize as its outer sidebar moves")
+        report("projects.split.service", Array(frames.services[20..<100]), budget: 16.7)
+        report("projects.workspace.resize", Array(frames.services[100..<200]), budget: 16.7)
         report("projects.split.frame-delivery", Array(frames.intervals.dropFirst(20)), budget: 25)
         #expect(tables.map(\.numberOfRows) == rowCounts)
         #expect(controller.children.map(ObjectIdentifier.init) == itemsBefore)
