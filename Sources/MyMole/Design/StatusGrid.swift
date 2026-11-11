@@ -179,7 +179,7 @@ struct StatusCard<Content: View, Actions: View>: View {
             }
         }
         .padding(DS.Space.md)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity, alignment: .topLeading)
         .dsCard()
         .overlay {
             if proposedSize != nil {
