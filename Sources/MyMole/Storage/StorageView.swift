@@ -96,8 +96,17 @@ struct StorageView: View {
                 Button(action: model.cancelScan) { Label("Stop Scan", systemImage: "stop.fill") }
                     .help("Stop scanning")
             } else {
-                Button(action: model.rescan) { Label("Rescan", systemImage: "arrow.clockwise") }
-                    .help("Scan again (⌘R)")
+                Menu {
+                    Button(model.refreshTitle, action: model.refreshCurrent)
+                        .disabled(model.opened != nil)
+                    Button("Rescan Entire Map", action: model.rescan)
+                } label: {
+                    Label(model.refreshTitle, systemImage: "arrow.clockwise")
+                } primaryAction: {
+                    model.refreshCurrent()
+                }
+                .disabled(model.trashing || model.opened != nil)
+                .help("Refresh the open folder (⌘R), or choose Rescan Entire Map")
             }
             PlacesMenu(model: model)
             Button(action: model.chooseFolder) { Label("Choose Folder", systemImage: "folder.badge.plus") }

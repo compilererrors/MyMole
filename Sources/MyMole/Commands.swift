@@ -109,11 +109,12 @@ extension AppModel {
         case .installer:
             return (String(localized: "Scan Again"), access ?? (installers.scanning ? busy : nil), { [self] in installers.scan() })
         case .projects:
-            return (String(localized: "Scan Again"), access ?? (projects.scanning ? busy : nil), { [self] in projects.scan() })
+            return (projects.refreshTitle, access ?? (projects.refreshing || projects.trashing ? busy : nil), { [self] in projects.refreshCurrent() })
         case .uninstall:
             return (String(localized: "Reload Apps"), access ?? (apps.loading ? busy : nil), { [self] in apps.load() })
         case .diskMap:
-            return (String(localized: "Scan Again"), access ?? (storage.scanning ? busy : nil), { [self] in storage.rescan() })
+            return (storage.refreshTitle, access ?? (storage.opened != nil ? String(localized: "Saved scans are read-only.") : nil)
+                    ?? (storage.scanning || storage.trashing ? busy : nil), { [self] in storage.refreshCurrent() })
         case .systemClean:
             return (String(localized: "Scan Again"), systemClean.scanning || systemClean.removing ? busy : nil, { [self] in systemClean.scan() })
         case .optimize:

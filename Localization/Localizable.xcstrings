@@ -1576,7 +1576,6 @@
     "Map another folder or disk (⌘O)" : {},
     "Map your home folder in Disk Map to choose from here." : {},
     "Matched by %@" : {},
-    "Measure every project again" : {},
     "Measuring %lld of %lld projects…" : {
       "localizations" : {
         "en" : {
@@ -2131,8 +2130,13 @@
     "Redo" : {},
     "Redraw visible rows" : {},
     "Refresh" : {},
+    "Refresh Current Folder" : {},
+    "Refresh Current Project" : {},
+    "Refresh This Folder" : {},
     "Refresh caches and databases macOS keeps" : {},
     "Refresh running status, app details and leftovers" : {},
+    "Refresh the current folder or project (⌘R), or choose Scan All Projects" : {},
+    "Refresh the open folder (⌘R), or choose Rescan Entire Map" : {},
     "Refreshing folder contents…" : {},
     "Refused by the rules." : {},
     "Reload" : {},
@@ -2166,6 +2170,7 @@
     "Repeated entries in Siri can have several causes. This view finds app bundles and their declared integrations; it doesn't edit Siri's app list. Manage extensions and Services in System Settings." : {},
     "Required" : {},
     "Rescan" : {},
+    "Rescan Entire Map" : {},
     "Reset" : {},
     "Reset %@: moved %lld item%@ (%@) to the Trash" : {
       "localizations" : {
@@ -2326,14 +2331,15 @@
         }
       }
     },
+    "Saved scans are read-only." : {},
     "Saved the scan to %@" : {},
     "Scan" : {},
     "Scan Again" : {},
     "Scan Again Now" : {},
     "Scan All" : {},
+    "Scan All Projects" : {},
     "Scan Still Running" : {},
     "Scan again" : {},
-    "Scan again (⌘R)" : {},
     "Scan in the background" : {},
     "Scan in the background Notify me when the disk is nearly full Notify me when a scan finds a lot to clean Notify me when an app in the Trash left things behind Notify me when an app keeps the processor busy notifications alerts schedule daily weekly" : {},
     "Scan speed" : {},
@@ -2629,6 +2635,7 @@
     "This copy is kept, so it stays." : {},
     "This copy of MyMole changed on disk. Open the installed app and try again." : {},
     "This copy of MyMole is kept. Remove it from your Keep list before uninstalling it." : {},
+    "This folder couldn't be fully read. Its previous scan stays." : {},
     "This folder has no files or folders in the current map." : {},
     "This folder has no mapped contents." : {},
     "This folder isn't on this Mac, or can't be read: a saved scan only knows how many small files it had." : {},

@@ -66,12 +66,12 @@ public final class Folder: Identifiable, @unchecked Sendable {
 
     public var id: ObjectIdentifier { ObjectIdentifier(self) }
 
-    init(name: String, parent: Folder?, rootPath: String? = nil, rebuildable: Rebuildable? = nil) {
+    init(name: String, parent: Folder?, rootPath: String? = nil, rebuildable: Rebuildable? = nil, inheritedKind: FileKind? = nil) {
         self.name = name
         self.parent = parent
         self.rootPath = rootPath
         self.rebuildable = rebuildable
-        inheritedKind = Classifier.kind(ofFolder: name) ?? parent?.inheritedKind
+        self.inheritedKind = Classifier.kind(ofFolder: name) ?? inheritedKind ?? parent?.inheritedKind
     }
 
     public var path: String {
@@ -160,6 +160,50 @@ public final class Folder: Identifiable, @unchecked Sendable {
         }
         copy.finish()
         return copy
+    }
+
+    /// Makes an independent map with one freshly measured branch. No node is
+    /// shared with either input, so later pruning cannot race a retired reader.
+    /// The caller must keep the inputs immutable until this returns.
+    public func replacingSubtree(at target: String, with replacement: Folder, stop: () -> Bool = { false }) -> Folder? {
+        guard replacement.path == target, find(path: target) != nil else { return nil }
+        var result: Folder?
+        var changed: Folder?
+        var pending: [(Folder, Folder?)] = [(self, nil)]
+        while let (original, parent) = pending.popLast() {
+            if stop() { return nil }
+            let source = original.path == target ? replacement : original
+            let copy = Folder(name: original.name, parent: parent, rootPath: parent == nil ? path : nil,
+                              rebuildable: original.rebuildable, inheritedKind: original.inheritedKind)
+            copy.unreadable = source.unreadable
+            copy.wasNotScanned = source.wasNotScanned
+            copy.listedFiles = source.listedFiles
+            copy.smallFileCount = source.smallFileCount
+            copy.smallFileBytes = source.smallFileBytes
+            copy.ownBytes = source.ownBytes
+            copy.ownLatestChange = source.ownLatestChange
+            copy.latestChange = source.latestChange
+            copy.ownRiskCode = source.ownRiskCode
+            copy.riskListed = source.riskListed
+            copy.totalBytes = source.totalBytes
+            copy.size = source.size
+            copy.fileCount = source.fileCount
+            copy.riskCode = source.riskCode
+            copy.riskComplete = source.riskComplete
+            copy.isFinished = source.isFinished
+            if original.path == target { changed = copy }
+            if let parent { parent.subfolders.append(copy) } else { result = copy }
+            pending.append(contentsOf: source.subfolders.map { ($0, copy) })
+        }
+        guard !stop() else { return nil }
+        var ancestor = changed?.parent
+        while let folder = ancestor {
+            folder.isFinished = false
+            folder.latestChange = folder.ownLatestChange
+            ancestor = folder.parent
+        }
+        result?.finish()
+        return result
     }
 
     // MARK: Pruning after items are moved to the Trash (main actor)

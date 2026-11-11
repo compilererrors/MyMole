@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="320" viewBox="0 0 1120 320" role="img" aria-labelledby="title description">
+  <title id="title">MyMole — storage tools for macOS</title>
+  <desc id="description">Map folders and find large files. Review caches, apps and duplicates. Monitor CPU, memory and disk activity. A stylized storage map illustrates the app.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#14272c"/>
+      <stop offset="1" stop-color="#102024"/>
+    </linearGradient>
+    <radialGradient id="glow">
+      <stop stop-color="#31b9bc" stop-opacity="0.16"/>
+      <stop offset="1" stop-color="#31b9bc" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="teal" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#70dfde"/>
+      <stop offset="1" stop-color="#36b5ba"/>
+    </linearGradient>
+    <clipPath id="card">
+      <rect x="1" y="1" width="1118" height="318" rx="24"/>
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#card)">
+    <rect width="1120" height="320" fill="url(#background)"/>
+    <ellipse cx="956" cy="138" rx="354" ry="286" fill="url(#glow)"/>
+  </g>
+  <rect x="1" y="1" width="1118" height="318" rx="24" fill="none" stroke="#2b444a"/>
+
+  <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+    <text x="42" y="47" fill="#79dcd6" font-size="14" font-weight="600" letter-spacing="2">MYMOLE · macOS 26+</text>
+    <text x="40" y="105" fill="#f1f8f8" font-size="42" font-weight="700" letter-spacing="-1">Storage tools for macOS.</text>
+    <text x="42" y="145" fill="#b2c8cd" font-size="20">Disk Map · Cleanup · Uninstall · Duplicates</text>
+
+    <g fill="none" stroke="#60d6d1" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="43" y="185" width="19" height="19" rx="3"/>
+      <path d="M54 185v19M43 195h11M54 192h8"/>
+      <path d="m43 233 5 5 13-14"/>
+      <path d="M43 271h4l3-8 5 17 3-9h5"/>
+    </g>
+    <g fill="#dcebec" font-size="19">
+      <text x="76" y="201">Map folders and find large files</text>
+      <text x="76" y="239">Review caches, apps and duplicates</text>
+      <text x="76" y="277">Monitor CPU, memory and disk activity</text>
+    </g>
+
+    <g transform="translate(812 38)">
+      <rect width="266" height="244" rx="16" fill="#172e34" stroke="#36545b"/>
+      <circle cx="19" cy="20" r="3" fill="#5bd0ca"/>
+      <text x="31" y="24" fill="#c2d9db" font-size="11" font-weight="600" letter-spacing="1.4">DISK MAP</text>
+      <path d="M14 37h238" stroke="#36545b"/>
+
+      <rect x="14" y="49" width="144" height="102" rx="7" fill="url(#teal)"/>
+      <text x="23" y="66" fill="#123d42" font-size="11" font-weight="700">Projects</text>
+      <rect x="20" y="75" width="74" height="70" rx="4" fill="#a0e8e3"/>
+      <rect x="98" y="75" width="54" height="42" rx="4" fill="#278d98" fill-opacity="0.4"/>
+      <rect x="98" y="121" width="54" height="24" rx="4" fill="#278d98" fill-opacity="0.24"/>
+      <text x="28" y="93" fill="#123d42" font-size="10" font-weight="600">Build</text>
+
+      <rect x="162" y="49" width="90" height="61" rx="7" fill="#d9bd68"/>
+      <text x="171" y="67" fill="#493d19" font-size="11" font-weight="600">Apps</text>
+      <rect x="162" y="114" width="42" height="37" rx="5" fill="#ce8c6c"/>
+      <rect x="208" y="114" width="44" height="37" rx="5" fill="#5b9cca"/>
+      <rect x="14" y="155" width="96" height="52" rx="7" fill="#825cba"/>
+      <text x="23" y="174" fill="#ffffff" font-size="11" font-weight="600">Media</text>
+      <rect x="114" y="155" width="138" height="52" rx="7" fill="#74cb9b"/>
+      <text x="123" y="174" fill="#1a4932" font-size="11" font-weight="600">Downloads</text>
+
+      <circle cx="18" cy="226" r="3" fill="#60d6d1"/>
+      <text x="29" y="230" fill="#a9c5ca" font-size="11">Folders · files · apps</text>
+    </g>
+  </g>
+</svg>

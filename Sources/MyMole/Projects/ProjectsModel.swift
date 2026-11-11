@@ -63,7 +63,34 @@ final class ProjectsModel {
         didSet { defaults.set(roots, forKey: "projects.roots") }
     }
     /// Projects selected in the list.
-    var selection = Set<String>()
+    var selection = Set<String>() {
+        didSet { if selection != oldValue { folderFocus = nil } }
+    }
+    struct FolderFocus: Equatable, Sendable {
+        let project: String
+        let entry: String
+        let path: String
+    }
+    var folderFocus: FolderFocus?
+    private(set) var refreshingContents: FolderFocus?
+    @ObservationIgnored private(set) var contentsRefreshJob: Task<Void, Never>?
+    @ObservationIgnored private var contentsRefreshProgress: ScanProgress?
+    @ObservationIgnored private var contentsRefreshOwner: UUID?
+    @ObservationIgnored var scanContentsForRefresh: @Sendable (String, ScanProgress, Int, FileKind?) -> ScanResult = {
+        StorageScanner.scan(path: $0, progress: $1, workers: $2, inheritedKind: $3)
+    }
+    var refreshing: Bool { scanning || !rescanning.isEmpty || refreshingContents != nil }
+    var refreshTitle: String {
+        if currentFolderFocus != nil { return String(localized: "Refresh Current Folder") }
+        if selection.count == 1, selection.first.flatMap(footprint) != nil { return String(localized: "Refresh Current Project") }
+        return String(localized: "Scan All Projects")
+    }
+    private var currentFolderFocus: FolderFocus? {
+        guard selection.count == 1, let focus = folderFocus, selection.contains(focus.project),
+              footprint(focus.project)?.items.contains(where: { $0.entries.contains(where: { $0.path == focus.entry }) }) == true,
+              focus.path == focus.entry || focus.path.hasPrefix(focus.entry + "/") else { return nil }
+        return focus
+    }
     var age: Age = .any {
         didSet { if age != oldValue { chosen = [] } }
     }
@@ -227,7 +254,7 @@ final class ProjectsModel {
             scanWhenRestored = background
             return
         }
-        guard !scannedThisLaunch, !scanning else { return }
+        guard !scannedThisLaunch, !refreshing else { return }
         if let at = scannedAt, Date().timeIntervalSince(at) < Self.freshFor { return }
         scan(background: background)
     }
@@ -239,6 +266,9 @@ final class ProjectsModel {
             scanAfterTrash = true
             return
         }
+        cancelContentsRefresh()
+        rescanTasks.values.forEach { $0.cancel() }
+        rescanTasks = [:]
         progress?.cancel()
         let p = ScanProgress()
         progress = p
@@ -277,7 +307,110 @@ final class ProjectsModel {
         ProjectScanner.list(roots: $0, rules: $1, progress: $2, workers: $3, onFound: $4, onProject: $5)
     }
 
-    func stop() { progress?.cancel() }
+    func stop() {
+        progress?.cancel()
+        cancelContentsRefresh()
+        rescanTasks.values.forEach { $0.cancel() }
+        rescanTasks = [:]
+        rescanJobs = [:]
+        rescanning = []
+    }
+
+    func refreshCurrent() {
+        guard !trashing, !refreshing else { return }
+        if let focus = currentFolderFocus { refreshFolder(focus) }
+        else if selection.count == 1, let id = selection.first, footprint(id) != nil { refreshProject(id) }
+        else { scan() }
+    }
+
+    func refreshProject(_ id: String) {
+        guard !trashing, !refreshing, footprint(id) != nil else { return }
+        clearChoice(in: [id])
+        rescan(id)
+    }
+
+    func refreshFolder(_ focus: FolderFocus) {
+        guard !trashing, !refreshing,
+              let footprint = footprint(focus.project),
+              let entry = footprint.items.flatMap(\.entries).first(where: { $0.path == focus.entry }),
+              focus.path == focus.entry || focus.path.hasPrefix(focus.entry + "/") else { return }
+        let previous = contents[focus.entry]
+        guard focus.path == focus.entry || previous?.find(path: focus.path) != nil else { return }
+        let run = UUID()
+        let p = ScanProgress()
+        loadingContents[focus.entry] = run
+        refreshingContents = focus
+        contentsRefreshProgress = p
+        contentsRefreshOwner = run
+        let read = scanContentsForRefresh
+        let level = PerformanceLevel.current()
+        let workers = level.workers(background: false)
+        let kind = previous?.find(path: focus.path)?.inheritedKind
+        contentsRefreshJob = Task { [weak self] in
+            let measured = await Task.detached(priority: level.priority(background: false)) {
+                await ScanBudget.shared.run(background: false, progress: p) {
+                    let result = read(focus.path, p, workers, kind)
+                    guard !p.isCancelled, !result.cancelled, !result.root.unreadable, result.deniedPaths.isEmpty else { return nil as Folder? }
+                    if focus.path == focus.entry { return result.root }
+                    return previous?.replacingSubtree(at: focus.path, with: result.root, stop: { p.isCancelled })
+                } ?? nil
+            }.value
+            guard let self, contentsRefreshOwner == run else {
+                if let measured { RetiredValue(measured).releaseLater() }
+                return
+            }
+            contentsRefreshOwner = nil
+            refreshingContents = nil
+            contentsRefreshProgress = nil
+            contentsRefreshJob = nil
+            guard loadingContents[focus.entry] == run else {
+                if let measured { RetiredValue(measured).releaseLater() }
+                return
+            }
+            loadingContents[focus.entry] = nil
+            guard !Task.isCancelled, !p.isCancelled else { return }
+            guard let measured else {
+                show(Notice(text: String(localized: "This folder couldn't be fully read. Its previous scan stays."), canUndo: false))
+                return
+            }
+            guard let position = footprints.firstIndex(where: { $0.id == focus.project }), footprints[position] == footprint else {
+                RetiredValue(measured).releaseLater()
+                return
+            }
+            let old = RetiredValue(contents[focus.entry])
+            contents[focus.entry] = measured
+            contentsVersions[focus.entry, default: 0] += 1
+            contentsOrder.removeAll { $0 == focus.entry }
+            contentsOrder.append(focus.entry)
+            while contentsOrder.count > Self.keptContents {
+                contents.removeValue(forKey: contentsOrder.removeFirst())
+            }
+            contentsRevision += 1
+            let replacement = FootprintEntry(path: entry.path, bytes: measured.size, modified: measured.latestChange, isDirectory: true)
+            let items = footprint.items.map { item in
+                FootprintItem(id: item.id, category: item.category, title: item.title, location: item.location,
+                              attribution: item.attribution, entries: item.entries.map { $0.path == entry.path ? replacement : $0 })
+            }
+            footprints[position] = ProjectFootprint(project: footprint.project, items: items,
+                                                     measured: footprint.measured, incomplete: footprint.incomplete)
+            let touching = { (path: String) in path == focus.path || path.hasPrefix(focus.path + "/") || focus.path.hasPrefix(path + "/") }
+            chosen = chosen.filter { !touching($0) }
+            partInfo = partInfo.filter { !touching($0.key) }
+            partSizes += 1
+            prune()
+            old.releaseLater()
+        }
+    }
+
+    private func cancelContentsRefresh() {
+        contentsRefreshProgress?.cancel()
+        contentsRefreshJob?.cancel()
+        if let focus = refreshingContents, loadingContents[focus.entry] == contentsRefreshOwner { loadingContents[focus.entry] = nil }
+        contentsRefreshOwner = nil
+        contentsRefreshProgress = nil
+        contentsRefreshJob = nil
+        refreshingContents = nil
+    }
 
     /// The projects are known: keep what the last scan measured inside each
     /// folder until it's measured again, with the outside data fresh.
@@ -294,6 +427,7 @@ final class ProjectsModel {
 
     private func measured(_ f: ProjectFootprint, run: ScanProgress) {
         guard run === progress, let i = footprints.firstIndex(where: { $0.id == f.id }) else { return }
+        dropContents(touching: footprints[i].items.flatMap(\.entries).map(\.path))
         footprints[i] = f
         measuredCount += 1
         prune()
@@ -480,7 +614,7 @@ final class ProjectsModel {
     /// list when it ends, so a move waits for it, as in the other panes.
     var trashBlocker: String? {
         if rulesError != nil { return String(localized: "Your project rules couldn't be read") }
-        if scanning { return String(localized: "Wait for the scan to finish.") }
+        if scanning || refreshingContents != nil { return String(localized: "Wait for the scan to finish.") }
         if trashing { return String(localized: "Moving to the Trash…") }
         return nil
     }
@@ -494,7 +628,7 @@ final class ProjectsModel {
         guard !picked.isEmpty, !trashing else { return }
         // A scan that started after the move was asked for would put back
         // in the list what the move takes out of it.
-        guard !scanning else {
+        guard !scanning, refreshingContents == nil else {
             show(Notice(text: String(localized: "Nothing was moved: a scan is running. Try again when it's done."), canUndo: false))
             return
         }
@@ -711,7 +845,8 @@ final class ProjectsModel {
             scanAfterTrash = true
             return
         }
-        guard !scanning, let f = footprint(project) else { return }
+        guard !scanning, !trashing, let f = footprint(project) else { return }
+        if refreshingContents?.project == project { cancelContentsRefresh() }
         rescanCount += 1
         let job = rescanCount
         rescanJobs[project] = job
@@ -719,8 +854,10 @@ final class ProjectsModel {
         let rules = rules
         let all = footprints.map(\.project)
         let measure = measureProject
-        Task.detached(priority: .userInitiated) { [weak self] in
-            let fresh = measure(f.project, all, rules)
+        rescanTasks[project]?.cancel()
+        rescanTasks[project] = Task.detached(priority: .userInitiated) { [weak self] in
+            let fresh = await ScanBudget.shared.run(background: false) { measure(f.project, all, rules) }
+            guard !Task.isCancelled, let fresh else { return }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     // Only the newest measure of the project lands, and only
@@ -728,8 +865,10 @@ final class ProjectsModel {
                     // owns every project.
                     guard let self, self.rescanJobs[project] == job else { return }
                     self.rescanJobs[project] = nil
+                    self.rescanTasks[project] = nil
                     self.rescanning.remove(project)
                     guard let i = self.footprints.firstIndex(where: { $0.id == project }) else { return }
+                    self.dropContents(touching: f.items.flatMap(\.entries).map(\.path))
                     self.footprints[i] = fresh
                     self.prune()
                 }
@@ -746,6 +885,7 @@ final class ProjectsModel {
     private var scanAfterTrash = false
     /// The rescan that owns each project being measured again.
     private var rescanJobs: [String: Int] = [:]
+    @ObservationIgnored private var rescanTasks: [String: Task<Void, Never>] = [:]
 
     /// Reads the saved rules again, at launch or after they failed to load.
     func reloadRules() {

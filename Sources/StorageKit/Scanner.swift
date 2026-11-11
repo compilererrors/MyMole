@@ -122,10 +122,11 @@ public enum StorageScanner {
         workers: Int = defaultWorkers,
         onRoot: (@Sendable (Folder) -> Void)? = nil,
         onSubtree: @Sendable (Folder) -> Void = { _ in },
-        skip: Set<String> = []
+        skip: Set<String> = [],
+        inheritedKind: FileKind? = nil
     ) -> ScanResult {
         let start = Date()
-        let root = Folder(name: (path as NSString).lastPathComponent, parent: nil, rootPath: path)
+        let root = Folder(name: (path as NSString).lastPathComponent, parent: nil, rootPath: path, inheritedKind: inheritedKind)
         let walk = Walk(rootDevice: DirectoryReader.device(of: path) ?? 0, progress: progress, skip: skip)
 
         // The root goes first, on this thread, so its top-level folders exist

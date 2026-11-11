@@ -71,6 +71,38 @@ import Testing
         }
     }
 
+    @Test func expandingAndSelectingFoldersScopesRefreshToTheirContents() throws {
+        let h = try Fixture()
+        h.start()
+        h.model.selection = [h.footprint.id]
+        let entry = try #require(h.outline.item(atRow: 1) as? FootprintOutline.Node)
+        h.outline.expandItem(entry)
+        #expect(h.model.folderFocus?.path == h.entry)
+        let folder = try #require(entry.children?.first)
+        h.outline.selectRowIndexes(IndexSet(integer: h.outline.row(forItem: folder)), byExtendingSelection: false)
+        #expect(h.model.folderFocus?.entry == h.entry)
+        #expect(h.model.folderFocus?.path == folder.path)
+        #expect(h.model.refreshTitle == "Refresh Current Folder")
+        h.model.selection = []
+        #expect(h.model.folderFocus == nil)
+        #expect(h.model.refreshTitle == "Scan All Projects")
+    }
+
+    @Test func aVisibleBranchCanStillBeRefreshedAfterItsCacheEntryWasEvicted() throws {
+        let h = try Fixture()
+        h.start()
+        h.model.selection = [h.footprint.id]
+        let entry = try #require(h.outline.item(atRow: 1) as? FootprintOutline.Node)
+        h.outline.expandItem(entry)
+        let folder = try #require(entry.children?.first)
+        let measured = try #require(h.model.contents[h.entry])
+        h.model.contents[h.entry] = nil
+        h.model.contentsOrder.removeAll { $0 == h.entry }
+        h.outline.selectRowIndexes(IndexSet(integer: h.outline.row(forItem: folder)), byExtendingSelection: false)
+        #expect(h.model.folderFocus?.path == folder.path)
+        #expect(h.model.contents[h.entry] === measured)
+    }
+
     @Test func deletingASiblingRetainsOpenNodesSelectedRowsAndScrollWithoutReplacingTheTable() throws {
         let h = try Fixture()
         h.start()
