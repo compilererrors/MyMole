@@ -73,9 +73,10 @@ struct UIResponsivenessBenchmarkTests {
             let start = UIWorkStamp()
             window.setContentSize(NSSize(width: 760 + CGFloat(step % 80) * 7, height: 640))
             table.columnViewport?.resized()
+            let input = start.sample()
             scroll.layoutSubtreeIfNeeded()
             scroll.displayIfNeeded()
-            if step >= 20 { resize.append(milliseconds(since: start)) }
+            if step >= 20 { resize.append(milliseconds(since: start, input: input)) }
         }
         report("table.resize.10000", resize, budget: 16.7)
         var scrolling: [UISample] = []
@@ -83,9 +84,10 @@ struct UIResponsivenessBenchmarkTests {
             let start = UIWorkStamp()
             scroll.contentView.scroll(to: NSPoint(x: 0, y: CGFloat((step * 17) % 9_900) * 40))
             scroll.reflectScrolledClipView(scroll.contentView)
+            let input = start.sample()
             scroll.layoutSubtreeIfNeeded()
             scroll.displayIfNeeded()
-            if step >= 20 { scrolling.append(milliseconds(since: start)) }
+            if step >= 20 { scrolling.append(milliseconds(since: start, input: input)) }
         }
         report("table.scroll.10000", scrolling, budget: 16.7)
         let menu = NSMenu()
@@ -163,9 +165,9 @@ struct UIResponsivenessBenchmarkTests {
                 window.setContentSize(NSSize(width: 1_000 + CGFloat(step - 100) * 6, height: 740))
                 workspaceWidths.append(controller.content.view.bounds.width)
             }
-            controller.view.layoutSubtreeIfNeeded()
             widths.append(controller.inspector.view.frame.width)
         }
+        frames.render = { controller.view.layoutSubtreeIfNeeded() }
         link.add(to: .main, forMode: .common)
         defer { link.invalidate() }
         let deadline = ContinuousClock.now + .seconds(15)
@@ -195,9 +197,10 @@ struct UIResponsivenessBenchmarkTests {
             let start = UIWorkStamp()
             scroll.contentView.scroll(to: NSPoint(x: 0, y: CGFloat(step * 3) * 40))
             scroll.reflectScrolledClipView(scroll.contentView)
+            let input = start.sample()
             controller.view.layoutSubtreeIfNeeded()
             window.displayIfNeeded()
-            if step >= 20 { scrolling.append(milliseconds(since: start)) }
+            if step >= 20 { scrolling.append(milliseconds(since: start, input: input)) }
         }
         report("projects.outline.scroll.500", scrolling, budget: 16.7)
     }
@@ -279,9 +282,10 @@ struct UIResponsivenessBenchmarkTests {
         for step in 0..<30 {
             let start = UIWorkStamp()
             host.rootView = BenchmarkStatusPanel(loading: step.isMultiple(of: 2), reading: step)
+            let input = start.sample()
             host.layoutSubtreeIfNeeded()
             window.displayIfNeeded()
-            if step >= 4 { loading.append(milliseconds(since: start)) }
+            if step >= 4 { loading.append(milliseconds(since: start, input: input)) }
         }
         report("status.loading-transition", loading, budget: 100)
         host.rootView = BenchmarkStatusPanel(loading: false, reading: 30)
@@ -293,15 +297,17 @@ struct UIResponsivenessBenchmarkTests {
         for step in 0..<120 {
             let start = UIWorkStamp()
             window.setContentSize(NSSize(width: 760 + CGFloat(step % 60) * 8, height: 640))
+            let resizeInput = start.sample()
             host.layoutSubtreeIfNeeded()
             window.displayIfNeeded()
-            if step >= 20 { resizing.append(milliseconds(since: start)) }
+            if step >= 20 { resizing.append(milliseconds(since: start, input: resizeInput)) }
             let scrollStart = UIWorkStamp()
             scroll.contentView.scroll(to: NSPoint(x: 0, y: CGFloat(step % 30) * 30))
             scroll.reflectScrolledClipView(scroll.contentView)
+            let scrollInput = scrollStart.sample()
             host.layoutSubtreeIfNeeded()
             window.displayIfNeeded()
-            if step >= 20 { scrolling.append(milliseconds(since: scrollStart)) }
+            if step >= 20 { scrolling.append(milliseconds(since: scrollStart, input: scrollInput)) }
         }
         report("status.resize", resizing, budget: 16.7)
         report("status.scroll", scrolling, budget: 16.7)
@@ -311,7 +317,10 @@ struct UIResponsivenessBenchmarkTests {
         (view as? T).map { [$0] } ?? view.subviews.flatMap { descendants(of: type, in: $0) }
     }
 
-    private func milliseconds(since start: UIWorkStamp) -> UISample { start.sample() }
+    private func milliseconds(since start: UIWorkStamp, input: UISample? = nil) -> UISample {
+        let complete = start.sample()
+        return UISample(wall: complete.wall, cpu: input?.cpu ?? complete.cpu)
+    }
 
     private func report(_ name: String, _ values: [Double], budget: Double) {
         report(name, values.map { UISample(wall: $0, cpu: nil) }, budget: budget)
@@ -378,6 +387,7 @@ private struct BenchmarkStatusPanel: View {
 
 @MainActor private final class FrameSamples: NSObject {
     var work: ((Int) -> Void)?
+    var render: (() -> Void)?
     var services: [UISample] = []
     var intervals: [Double] = []
     private var last: CFTimeInterval?
@@ -390,6 +400,7 @@ private struct BenchmarkStatusPanel: View {
         let timing = UIWorkStamp()
         work?(services.count)
         services.append(timing.sample())
+        render?()
         NSApp.updateWindows()
     }
 }
