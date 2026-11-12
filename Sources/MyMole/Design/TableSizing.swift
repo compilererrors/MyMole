@@ -51,16 +51,12 @@ extension NSTableView {
         if let headerView, abs(headerView.frame.width - width) > 0.5 {
             headerView.setFrameSize(NSSize(width: width, height: headerView.frame.height))
         }
-        // Native column tracking can precede layout by one event. Lay out
-        // existing cells now, without reloading data or making offscreen rows.
+        // AppKit coalesces layout and drawing at the end of the input turn.
+        // Forcing either here repeats text layout inside native divider tracking.
         needsLayout = true
         headerView?.needsLayout = true
-        layoutSubtreeIfNeeded()
-        headerView?.layoutSubtreeIfNeeded()
         enumerateAvailableRowViews { row, _ in
             row.needsLayout = true
-            row.layoutSubtreeIfNeeded()
-            row.needsDisplay = true
         }
         if let scroll = enclosingScrollView { scroll.reflectScrolledClipView(scroll.contentView) }
     }
@@ -172,8 +168,8 @@ extension NSTableView {
     }
 
     func columnResized() {
-        guard let table, let column = table.tableColumn(withIdentifier: .init(id)) else { return }
-        if !fitting, abs(column.width - expectedWidth) > 0.5 {
+        guard !fitting, let table, let column = table.tableColumn(withIdentifier: .init(id)) else { return }
+        if abs(column.width - expectedWidth) > 0.5 {
             rememberUserWidth()
         }
         table.updateScrollableWidth()

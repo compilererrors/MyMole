@@ -244,7 +244,7 @@ struct FileTable: NSViewRepresentable {
             let unchanged: Bool
             let choices: ListedChoices
         }
-        private var sortGeneration = 0
+        private(set) var sortGeneration = 0
         private var installedGeneration = -1
         private let sorter = OffMain<Prepared?>(nil)
         private(set) var sortJob: Task<Void, Never>?
@@ -742,6 +742,38 @@ extension FileTableView: @preconcurrency QLPreviewPanelDataSource {
 
 // MARK: - Cells (laid out by hand: cheap, and exact at a fixed row height)
 
+@MainActor private enum FileCellResources {
+    static let byteCount: ByteCountFormatter = {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        return formatter
+    }()
+    private static let widths: NSCache<NSString, NSNumber> = {
+        let cache = NSCache<NSString, NSNumber>()
+        cache.countLimit = 512
+        return cache
+    }()
+    private static let symbols: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        cache.countLimit = 64
+        return cache
+    }()
+
+    static func namePartWidth(_ text: String) -> CGFloat {
+        if let width = widths.object(forKey: text as NSString) { return CGFloat(width.doubleValue) }
+        let width = (text as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 13)]).width
+        widths.setObject(NSNumber(value: Double(width)), forKey: text as NSString)
+        return width
+    }
+
+    static func symbol(_ name: String) -> NSImage? {
+        if let image = symbols.object(forKey: name as NSString) { return image }
+        guard let image = NSImage(systemSymbolName: name, accessibilityDescription: nil) else { return nil }
+        symbols.setObject(image, forKey: name as NSString)
+        return image
+    }
+}
+
 final class FileNameCell: NSTableCellView, ColumnWidthProviding {
     private let check = NSButton(checkboxWithTitle: "", target: nil, action: nil)
     private let icon = NSImageView()
@@ -751,9 +783,18 @@ final class FileNameCell: NSTableCellView, ColumnWidthProviding {
     private let lock = NSImageView()
     private var showsCheck = false
     private var name = ""
+    private var wrappedName = ""
+    private var longestNamePart: CGFloat = 0
+    private var nameWidth: CGFloat = 0
+    private var subtitleWidth: CGFloat = 0
+    private var badgeWidth: CGFloat = 0
+    private var wrapsName: Bool?
+    private var measuredTextSize: NSSize?
+    private var measuredTextHeight: CGFloat = 0
     private var onToggle: () -> Void = {}
     private var normalBadgeTint = NSColor.systemGreen
     private var choiceIsEditable = true
+    private var choiceHelp: String?
     private var reviewBeforeChoosing = false
     private var markedState: NSControl.StateValue = .off
 
@@ -796,22 +837,38 @@ final class FileNameCell: NSTableCellView, ColumnWidthProviding {
         check.state = markedState
         reviewBeforeChoosing = r.reviewBeforeChoosing
         choiceIsEditable = r.size != nil && r.canChoose
+        choiceHelp = r.choiceHelp
         check.isEnabled = choiceIsEditable
-        check.setAccessibilityLabel(String(localized: "Choose \(r.name) for removal"))
-        check.toolTip = r.choiceHelp ?? String(localized: "Choose for removal. ⌫ chooses or unchooses the selected rows.")
+        if marked != nil {
+            check.setAccessibilityLabel(String(localized: "Choose \(r.name) for removal"))
+            check.toolTip = r.choiceHelp ?? String(localized: "Choose for removal. ⌫ chooses or unchooses the selected rows.")
+        } else {
+            check.toolTip = nil
+        }
         self.onToggle = onToggle
-        icon.image = NSImage(systemSymbolName: r.symbol, accessibilityDescription: nil)
+        icon.image = FileCellResources.symbol(r.symbol)
         icon.contentTintColor = r.tint ?? .secondaryLabelColor
-        name = r.name
+        if name != r.name {
+            name = r.name
+            wrappedName = Breakable.text(name)
+            let attributes: [NSAttributedString.Key: Any] = [.font: label.font as Any]
+            nameWidth = (name as NSString).size(withAttributes: attributes).width
+            longestNamePart = name.split(whereSeparator: { " /-_.".contains($0) })
+                .map { FileCellResources.namePartWidth(String($0)) }.max() ?? 0
+            wrapsName = nil
+        }
         sub.stringValue = r.subtitle ?? ""
+        subtitleWidth = (sub.stringValue as NSString).size(withAttributes: [.font: sub.font as Any]).width
         sub.toolTip = r.subtitle
         toolTip = [r.name, r.subtitle].compactMap { $0 }.joined(separator: "\n")
         sub.isHidden = r.subtitle == nil
-        label.stringValue = Breakable.text(r.name)
+        setNameWrapping(sub.isHidden && (wrapsName ?? true))
+        measuredTextSize = nil
         label.textColor = dimUnmeasured && r.size == nil ? .secondaryLabelColor : .labelColor
         label.toolTip = r.name
         badge.isHidden = r.badge == nil
         badge.stringValue = r.badge ?? ""
+        badgeWidth = badge.intrinsicContentSize.width
         normalBadgeTint = r.badgeTint ?? .systemGreen
         updateBadgeColors()
         badge.toolTip = r.badgeHelp ?? r.badge
@@ -821,9 +878,8 @@ final class FileNameCell: NSTableCellView, ColumnWidthProviding {
     }
 
     var preferredColumnWidth: CGFloat {
-        let text = max((name as NSString).size(withAttributes: [.font: label.font as Any]).width,
-                       (sub.stringValue as NSString).size(withAttributes: [.font: sub.font as Any]).width)
-        let trailing = (badge.isHidden ? 0 : badge.intrinsicContentSize.width + 16) + (lock.isHidden ? 0 : 18)
+        let text = max(nameWidth, subtitleWidth)
+        let trailing = (badge.isHidden ? 0 : badgeWidth + 16) + (lock.isHidden ? 0 : 18)
         return ceil(text + DS.Table.cellInset + DS.Table.iconStep + (showsCheck ? DS.Table.tickStep : 0) + trailing + 16)
     }
 
@@ -849,6 +905,10 @@ final class FileNameCell: NSTableCellView, ColumnWidthProviding {
             showsCheck = visible
             check.isHidden = !visible
             needsLayout = true
+        }
+        if visible {
+            check.setAccessibilityLabel(String(localized: "Choose \(name) for removal"))
+            check.toolTip = choiceHelp ?? String(localized: "Choose for removal. ⌫ chooses or unchooses the selected rows.")
         }
         let state: NSControl.StateValue = marked == true ? .on : .off
         markedState = state
@@ -876,9 +936,9 @@ final class FileNameCell: NSTableCellView, ColumnWidthProviding {
             right -= 18
         }
         if !badge.isHidden {
-            let w = badge.intrinsicContentSize.width + 10
+            let w = badgeWidth + 10
             // The name comes first: the badge only shows where both fit.
-            if right - w - 6 - x >= min(label.attributedStringValue.size().width, 120) {
+            if right - w - 6 - x >= min(nameWidth, 120) {
                 badge.frame = NSRect(x: right - w, y: (h - 16) / 2, width: w, height: 16)
                 right -= w + 6
             } else {
@@ -888,9 +948,7 @@ final class FileNameCell: NSTableCellView, ColumnWidthProviding {
         let width = max(10, right - x)
         if !sub.isHidden {
             // Name and second line, one line each.
-            label.maximumNumberOfLines = 1
-            label.lineBreakMode = .byTruncatingMiddle
-            label.stringValue = name
+            setNameWrapping(false)
             let gap: CGFloat = 1
             label.frame = NSRect(x: x, y: h / 2 + gap - 1, width: width, height: 17)
             sub.frame = NSRect(x: x, y: h / 2 - 14 - gap, width: width, height: 14)
@@ -898,26 +956,32 @@ final class FileNameCell: NSTableCellView, ColumnWidthProviding {
         }
         // Wraps between a name's parts; a part too long for the column is
         // shortened in the middle, as Finder does, rather than broken.
-        let longest = name.split(whereSeparator: { " /-_.".contains($0) })
-            .map { (String($0) as NSString).size(withAttributes: [.font: label.font as Any]).width }.max() ?? 0
         // A little room to spare: the field's own insets take some of it.
-        if longest > width - 6 {
-            label.maximumNumberOfLines = 1
-            label.lineBreakMode = .byTruncatingMiddle
-            label.stringValue = name
-        } else {
-            label.maximumNumberOfLines = 2
-            label.lineBreakMode = .byWordWrapping
-            label.stringValue = Breakable.text(name)
+        setNameWrapping(longestNamePart <= width - 6)
+        let textSize = NSSize(width: width, height: h)
+        if measuredTextSize != textSize {
+            let fit = label.cell?.cellSize(forBounds: NSRect(origin: .zero, size: textSize)) ?? .zero
+            measuredTextHeight = min(ceil(fit.height), h)
+            measuredTextSize = textSize
         }
-        let fit = label.cell?.cellSize(forBounds: NSRect(x: 0, y: 0, width: width, height: h)) ?? .zero
-        let lh = min(ceil(fit.height), h)
+        let lh = measuredTextHeight
         label.frame = NSRect(x: x, y: (h - lh) / 2, width: width, height: lh)
+    }
+
+    private func setNameWrapping(_ wraps: Bool) {
+        guard wrapsName != wraps else { return }
+        wrapsName = wraps
+        label.maximumNumberOfLines = wraps ? 2 : 1
+        label.lineBreakMode = wraps ? .byWordWrapping : .byTruncatingMiddle
+        label.stringValue = wraps ? wrappedName : name
+        measuredTextSize = nil
     }
 }
 
 final class FileTextCell: NSTableCellView, ColumnWidthProviding {
     private let label = NSTextField(wrappingLabelWithString: "")
+    private var measuredTextSize: NSSize?
+    private var measuredTextHeight: CGFloat = 0
 
     init(identifier: NSUserInterfaceItemIdentifier) {
         super.init(frame: .zero)
@@ -940,17 +1004,17 @@ final class FileTextCell: NSTableCellView, ColumnWidthProviding {
         label.toolTip = nil
         switch column {
         case .size:
-            label.stringValue = r.size.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? r.sizePlaceholder ?? String(localized: "Scanning…")
+            label.stringValue = r.size.map { FileCellResources.byteCount.string(fromByteCount: $0) } ?? r.sizePlaceholder ?? String(localized: "Scanning…")
             if r.size == nil { label.textColor = .tertiaryLabelColor }
         case .freeable:
-            label.stringValue = r.freeable.map { $0 > 0 ? ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) : "—" } ?? ""
+            label.stringValue = r.freeable.map { $0 > 0 ? FileCellResources.byteCount.string(fromByteCount: $0) : "—" } ?? ""
             label.textColor = (r.freeable ?? 0) > 0 ? .systemGreen : .tertiaryLabelColor
         case .modified:
             label.stringValue = r.modified?.listText ?? "—"
             label.toolTip = r.modified.map { $0.formatted(date: .complete, time: .shortened) }
         case .change:
             if let c = r.change, c != 0 {
-                label.stringValue = (c > 0 ? "+" : "−") + ByteCountFormatter.string(fromByteCount: abs(c), countStyle: .file)
+                label.stringValue = (c > 0 ? "+" : "−") + FileCellResources.byteCount.string(fromByteCount: abs(c))
                 label.textColor = c > 0 ? .systemOrange : .systemGreen
             } else {
                 label.stringValue = ""
@@ -965,6 +1029,7 @@ final class FileTextCell: NSTableCellView, ColumnWidthProviding {
         }
         if label.toolTip == nil, !label.stringValue.isEmpty { label.toolTip = label.stringValue }
         toolTip = label.toolTip
+        measuredTextSize = nil
         needsLayout = true
     }
 
@@ -975,8 +1040,12 @@ final class FileTextCell: NSTableCellView, ColumnWidthProviding {
     override func layout() {
         super.layout()
         let h = bounds.height
-        let fit = label.cell?.cellSize(forBounds: NSRect(x: 0, y: 0, width: bounds.width, height: h)) ?? .zero
-        let lh = min(ceil(fit.height), h)
+        if measuredTextSize != bounds.size {
+            let fit = label.cell?.cellSize(forBounds: NSRect(origin: .zero, size: bounds.size)) ?? .zero
+            measuredTextHeight = min(ceil(fit.height), h)
+            measuredTextSize = bounds.size
+        }
+        let lh = measuredTextHeight
         label.frame = NSRect(x: 0, y: (h - lh) / 2, width: bounds.width, height: lh)
     }
 }
