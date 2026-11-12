@@ -26,11 +26,10 @@ struct ProjectsView: View {
                 .padding(.horizontal, DS.Space.page)
                 .padding(.bottom, DS.Space.md)
             }
-            HSplitView {
-                // The list takes what the detail leaves; the detail stays a
-                // readable column, as an inspector does.
-                list.frame(minWidth: 380, idealWidth: 560, maxWidth: .infinity)
-                detail.frame(minWidth: 340, idealWidth: 440, maxWidth: 520)
+            InspectorSplit {
+                list
+            } inspector: {
+                detail
             }
         }
         .dsBottom(showing: !model.chosen.isEmpty) {
@@ -330,6 +329,34 @@ struct ProjectsView: View {
 
 private func fmt(_ b: Int64) -> String { ByteCountFormatter.string(fromByteCount: b, countStyle: .file) }
 
+struct ProjectControlsLayout: Layout {
+    let spacing: CGFloat
+
+    func makeCache(subviews: Subviews) -> [CGSize] { subviews.map { $0.sizeThatFits(.unspecified) } }
+    func updateCache(_ cache: inout [CGSize], subviews: Subviews) { cache = makeCache(subviews: subviews) }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout [CGSize]) -> CGSize {
+        guard cache.count == 4 else { return .zero }
+        let ideal = cache.reduce(0) { $0 + $1.width } + spacing * 3
+        let width = proposal.width.flatMap { $0.isFinite ? $0 : nil } ?? ideal
+        let first = max(cache[0].height, cache[2].height, cache[3].height)
+        return CGSize(width: width, height: ideal <= width ? max(first, cache[1].height) : first + spacing + cache[1].height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout [CGSize]) {
+        guard cache.count == 4 else { return }
+        let ideal = cache.reduce(0) { $0 + $1.width } + spacing * 3
+        let wide = ideal <= bounds.width
+        let first = max(cache[0].height, cache[2].height, cache[3].height, wide ? cache[1].height : 0)
+        let x = [bounds.minX, wide ? bounds.minX + cache[0].width + spacing : bounds.minX,
+                 bounds.maxX - cache[3].width - spacing - cache[2].width, bounds.maxX - cache[3].width]
+        for index in 0..<4 {
+            let y = index == 1 && !wide ? bounds.minY + first + spacing : bounds.minY + (first - cache[index].height) / 2
+            subviews[index].place(at: CGPoint(x: x[index], y: y), proposal: ProposedViewSize(cache[index]))
+        }
+    }
+}
+
 // MARK: - Overview
 
 /// With no single project selected: where developer data goes across every
@@ -452,12 +479,9 @@ struct ProjectDetail: View {
                 }
                 DSPath(footprint.id)
                 // One line where they fit; the growth goes on a line of its own where not.
-                ViewThatFits(in: .horizontal) {
-                    HStack(spacing: DS.Space.xs) { heatBadges(heat); growthBadge }
-                    VStack(alignment: .leading, spacing: DS.Space.xs) {
-                        HStack(spacing: DS.Space.xs) { heatBadges(heat) }
-                        growthBadge
-                    }
+                DSFlow(spacing: DS.Space.xs) {
+                    heatBadges(heat)
+                    growthBadge
                 }
             }
 
@@ -471,23 +495,11 @@ struct ProjectDetail: View {
                         : String(localized: "The project folder hasn't been measured yet. Rescan to see what's inside it."))
             }
 
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: DS.Space.sm) {
-                    agePicker
-                    chooseRebuildable
-                    Spacer(minLength: DS.Space.sm)
-                    measuringIndicator
-                    more
-                }
-                VStack(alignment: .leading, spacing: DS.Space.sm) {
-                    HStack(spacing: DS.Space.sm) {
-                        agePicker
-                        Spacer(minLength: DS.Space.sm)
-                        measuringIndicator
-                        more
-                    }
-                    chooseRebuildable
-                }
+            ProjectControlsLayout(spacing: DS.Space.sm) {
+                agePicker
+                chooseRebuildable
+                measuringIndicator
+                more
             }
         }
     }
