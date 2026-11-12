@@ -237,7 +237,6 @@ struct UIResponsivenessBenchmarkTests {
             let position = step < 100 ? step : 199 - step
             scroll.contentView.scroll(to: NSPoint(x: 0, y: CGFloat(position) / 99 * bottom))
             scroll.reflectScrolledClipView(scroll.contentView)
-            host.layoutSubtreeIfNeeded()
         }
         if count > 12 {
             let frames = FrameSamples()
