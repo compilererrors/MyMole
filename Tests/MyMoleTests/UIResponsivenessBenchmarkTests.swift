@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import Darwin
 import QuartzCore
 import StorageKit
 import SwiftUI
@@ -58,7 +59,7 @@ struct UIResponsivenessBenchmarkTests {
         window.orderBack(nil)
         coordinator.bindWindow(nil)
         coordinator.setPresentationActive(true)
-        let start = ContinuousClock.now
+        let start = UIWorkStamp()
         coordinator.load(source, marks: nil, selection: [])
         await coordinator.sortJob?.value
         coordinator.fitting = table.keepFitting("name", defaults: defaults)
@@ -67,9 +68,9 @@ struct UIResponsivenessBenchmarkTests {
         report("table.load.10000", [milliseconds(since: start)], budget: 1_000)
         try #require(table.numberOfRows == source.count)
         try #require(table.view(atColumn: 0, row: 0, makeIfNecessary: false) != nil)
-        var resize: [Double] = []
+        var resize: [UISample] = []
         for step in 0..<220 {
-            let start = ContinuousClock.now
+            let start = UIWorkStamp()
             window.setContentSize(NSSize(width: 760 + CGFloat(step % 80) * 7, height: 640))
             table.columnViewport?.resized()
             scroll.layoutSubtreeIfNeeded()
@@ -77,9 +78,9 @@ struct UIResponsivenessBenchmarkTests {
             if step >= 20 { resize.append(milliseconds(since: start)) }
         }
         report("table.resize.10000", resize, budget: 16.7)
-        var scrolling: [Double] = []
+        var scrolling: [UISample] = []
         for step in 0..<220 {
-            let start = ContinuousClock.now
+            let start = UIWorkStamp()
             scroll.contentView.scroll(to: NSPoint(x: 0, y: CGFloat((step * 17) % 9_900) * 40))
             scroll.reflectScrolledClipView(scroll.contentView)
             scroll.layoutSubtreeIfNeeded()
@@ -89,9 +90,9 @@ struct UIResponsivenessBenchmarkTests {
         report("table.scroll.10000", scrolling, budget: 16.7)
         let menu = NSMenu()
         coordinator.headerMenu = menu
-        var menus: [Double] = []
+        var menus: [UISample] = []
         for step in 0..<120 {
-            let start = ContinuousClock.now
+            let start = UIWorkStamp()
             coordinator.menuNeedsUpdate(menu)
             if step >= 20 { menus.append(milliseconds(since: start)) }
         }
@@ -189,9 +190,9 @@ struct UIResponsivenessBenchmarkTests {
         outline.expandItem(group)
         try #require(outline.numberOfRows >= 500)
         let scroll = try #require(outline.enclosingScrollView)
-        var scrolling: [Double] = []
+        var scrolling: [UISample] = []
         for step in 0..<120 {
-            let start = ContinuousClock.now
+            let start = UIWorkStamp()
             scroll.contentView.scroll(to: NSPoint(x: 0, y: CGFloat(step * 3) * 40))
             scroll.reflectScrolledClipView(scroll.contentView)
             controller.view.layoutSubtreeIfNeeded()
@@ -215,11 +216,11 @@ struct UIResponsivenessBenchmarkTests {
         window.isReleasedWhenClosed = false
         window.ignoresMouseEvents = true
         defer { window.close() }
-        let presentation = ContinuousClock.now
+        let presentation = UIWorkStamp()
         window.orderFront(nil)
         window.displayIfNeeded()
         report("filters.window.present.\(count)", [milliseconds(since: presentation)], budget: 500)
-        let start = ContinuousClock.now
+        let start = UIWorkStamp()
         window.contentView = host
         host.layoutSubtreeIfNeeded()
         window.displayIfNeeded()
@@ -230,7 +231,7 @@ struct UIResponsivenessBenchmarkTests {
             try #require((scroll.documentView?.bounds.height ?? 0) > scroll.contentView.bounds.height)
             try #require(materialized.rows.count > 0 && materialized.rows.count < count / 2, "Offscreen filter controls must remain lazy")
         }
-        var samples: [Double] = []
+        var samples: [UISample] = []
         let scrollStep: (Int) -> Void = { step in
             let bottom = max(0, (scroll.documentView?.bounds.height ?? 0) - scroll.contentView.bounds.height)
             let position = step < 100 ? step : 199 - step
@@ -255,7 +256,7 @@ struct UIResponsivenessBenchmarkTests {
             report("filters.scroll.\(count).frame-delivery", Array(frames.intervals.dropFirst(20)), budget: 25)
         } else {
             for step in 0..<120 {
-                let start = ContinuousClock.now
+                let start = UIWorkStamp()
                 scrollStep(step)
                 window.displayIfNeeded()
                 if step >= 20 { samples.append(milliseconds(since: start)) }
@@ -275,9 +276,9 @@ struct UIResponsivenessBenchmarkTests {
         defer { window.close() }
         window.orderFront(nil)
         host.layoutSubtreeIfNeeded()
-        var loading: [Double] = []
+        var loading: [UISample] = []
         for step in 0..<30 {
-            let start = ContinuousClock.now
+            let start = UIWorkStamp()
             host.rootView = BenchmarkStatusPanel(loading: step.isMultiple(of: 2), reading: step)
             host.layoutSubtreeIfNeeded()
             window.displayIfNeeded()
@@ -288,15 +289,15 @@ struct UIResponsivenessBenchmarkTests {
         host.layoutSubtreeIfNeeded()
         let scroll = try #require(descendants(of: NSScrollView.self, in: host).first)
         try #require((scroll.documentView?.bounds.height ?? 0) > 640)
-        var resizing: [Double] = []
-        var scrolling: [Double] = []
+        var resizing: [UISample] = []
+        var scrolling: [UISample] = []
         for step in 0..<120 {
-            let start = ContinuousClock.now
+            let start = UIWorkStamp()
             window.setContentSize(NSSize(width: 760 + CGFloat(step % 60) * 8, height: 640))
             host.layoutSubtreeIfNeeded()
             window.displayIfNeeded()
             if step >= 20 { resizing.append(milliseconds(since: start)) }
-            let scrollStart = ContinuousClock.now
+            let scrollStart = UIWorkStamp()
             scroll.contentView.scroll(to: NSPoint(x: 0, y: CGFloat(step % 30) * 30))
             scroll.reflectScrolledClipView(scroll.contentView)
             host.layoutSubtreeIfNeeded()
@@ -311,26 +312,40 @@ struct UIResponsivenessBenchmarkTests {
         (view as? T).map { [$0] } ?? view.subviews.flatMap { descendants(of: type, in: $0) }
     }
 
-    private func milliseconds(since start: ContinuousClock.Instant) -> Double {
-        Double((ContinuousClock.now - start) / .microseconds(1)) / 1_000
-    }
+    private func milliseconds(since start: UIWorkStamp) -> UISample { start.sample() }
 
     private func report(_ name: String, _ values: [Double], budget: Double) {
-        let sorted = values.sorted()
-        func percentile(_ fraction: Double) -> Double {
+        report(name, values.map { UISample(wall: $0, cpu: nil) }, budget: budget)
+    }
+
+    private func report(_ name: String, _ values: [UISample], budget: Double) {
+        let wall = values.map(\.wall).sorted()
+        let cpu = values.compactMap(\.cpu).sorted()
+        func percentile(_ sorted: [Double], _ fraction: Double) -> Double {
             sorted[min(sorted.count - 1, max(0, Int(ceil(Double(sorted.count) * fraction)) - 1))]
         }
-        let p95 = percentile(0.95)
-        let hitches = values.filter { $0 > 33.3 }.count
-        print(String(format: "ui-bench %@ n=%d p50=%.3fms p95=%.3fms p99=%.3fms max=%.3fms over33ms=%d budget=%.3fms",
-                     name, sorted.count, percentile(0.5), p95, percentile(0.99), sorted.last ?? 0, hitches, budget))
-        if ProcessInfo.processInfo.environment["MYMOLE_STRICT_UI_BENCHMARKS"] == "1" {
-            #expect(p95 <= budget, "UI service budget exceeded")
-            let p99Budget = name.hasSuffix("frame-delivery") ? 33.3 : max(budget * 2, 33.3)
-            #expect(percentile(0.99) <= p99Budget, "UI p99 budget exceeded")
-            if budget < 100 {
-                #expect((sorted.last ?? 0) < 100, "An interactive update blocked for 100 ms")
-            }
+        let interactionScope = ProcessInfo.processInfo.environment["MYMOLE_UI_BENCHMARK_SCOPE"] == "interaction"
+        let hardware = values.count == 1 || name.hasSuffix("frame-delivery")
+        let gate = interactionScope ? (hardware ? "wall-liveness" : "thread-cpu") : "wall"
+        let cpuP95 = cpu.isEmpty ? "n/a" : String(format: "%.3fms", percentile(cpu, 0.95))
+        print(String(format: "ui-bench %@ n=%d p50=%.3fms p95=%.3fms p99=%.3fms max=%.3fms over33ms=%d budget=%.3fms cpu_p95=%@ gate=%@",
+                     name, wall.count, percentile(wall, 0.5), percentile(wall, 0.95), percentile(wall, 0.99),
+                     wall.last ?? 0, wall.filter { $0 > 33.3 }.count, budget, cpuP95, gate))
+        guard ProcessInfo.processInfo.environment["MYMOLE_STRICT_UI_BENCHMARKS"] == "1" else { return }
+        if interactionScope && hardware {
+            #expect((wall.last ?? 0) < (name.hasSuffix("frame-delivery") ? 100 : 1_000), "UI presentation stopped making progress")
+            return
+        }
+        if interactionScope {
+            #expect(cpu.count == values.count && cpu.contains { $0 > 0 }, "Thread CPU measurements must actually exist")
+            guard cpu.count == values.count else { return }
+        }
+        let checked = interactionScope ? cpu : wall
+        #expect(percentile(checked, 0.95) <= budget, "UI service budget exceeded")
+        let p99Budget = name.hasSuffix("frame-delivery") ? 33.3 : max(budget * 2, 33.3)
+        #expect(percentile(checked, 0.99) <= p99Budget, "UI p99 budget exceeded")
+        if budget < 100 {
+            #expect((wall.last ?? 0) < 100, "An interactive update blocked for 100 ms")
         }
     }
 }
@@ -364,7 +379,7 @@ private struct BenchmarkStatusPanel: View {
 
 @MainActor private final class FrameSamples: NSObject {
     var work: ((Int) -> Void)?
-    var services: [Double] = []
+    var services: [UISample] = []
     var intervals: [Double] = []
     private var last: CFTimeInterval?
 
@@ -373,8 +388,30 @@ private struct BenchmarkStatusPanel: View {
         let start = CACurrentMediaTime()
         if let last { intervals.append((start - last) * 1_000) }
         last = start
+        let timing = UIWorkStamp()
         work?(services.count)
-        services.append((CACurrentMediaTime() - start) * 1_000)
+        services.append(timing.sample())
         NSApp.updateWindows()
+    }
+}
+
+private struct UISample {
+    let wall: Double
+    let cpu: Double?
+}
+
+private struct UIWorkStamp {
+    private let wall = ContinuousClock.now
+    private let cpu = Self.threadCPU()
+
+    func sample() -> UISample {
+        UISample(wall: Double((ContinuousClock.now - wall) / .microseconds(1)) / 1_000,
+                 cpu: Double(Self.threadCPU() - cpu) / 1_000_000)
+    }
+
+    private static func threadCPU() -> UInt64 {
+        var time = timespec()
+        precondition(clock_gettime(CLOCK_THREAD_CPUTIME_ID, &time) == 0, "Thread CPU clock is required")
+        return UInt64(time.tv_sec) * 1_000_000_000 + UInt64(time.tv_nsec)
     }
 }
