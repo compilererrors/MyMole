@@ -85,10 +85,13 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      - name: Optimized UI latency and frame delivery (synthetic data only)
+      # VM checks bound CPU work and wall-clock stalls. Physical display
+      # and cold-render targets are enforced by the local release gate.
+      - name: Optimized UI interaction budgets (synthetic data only)
         env:
           MYMOLE_UI_BENCHMARK: '1'
           MYMOLE_STRICT_UI_BENCHMARKS: '1'
+          MYMOLE_UI_BENCHMARK_SCOPE: interaction
         run: scripts/test-guarded.sh --release --filter UIResponsivenessBenchmarkTests
 
   thread-sanitizer:
