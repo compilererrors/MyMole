@@ -742,6 +742,38 @@ extension FileTableView: @preconcurrency QLPreviewPanelDataSource {
 
 // MARK: - Cells (laid out by hand: cheap, and exact at a fixed row height)
 
+@MainActor private enum FileCellResources {
+    static let byteCount: ByteCountFormatter = {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        return formatter
+    }()
+    private static let widths: NSCache<NSString, NSNumber> = {
+        let cache = NSCache<NSString, NSNumber>()
+        cache.countLimit = 512
+        return cache
+    }()
+    private static let symbols: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        cache.countLimit = 64
+        return cache
+    }()
+
+    static func namePartWidth(_ text: String) -> CGFloat {
+        if let width = widths.object(forKey: text as NSString) { return CGFloat(width.doubleValue) }
+        let width = (text as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 13)]).width
+        widths.setObject(NSNumber(value: Double(width)), forKey: text as NSString)
+        return width
+    }
+
+    static func symbol(_ name: String) -> NSImage? {
+        if let image = symbols.object(forKey: name as NSString) { return image }
+        guard let image = NSImage(systemSymbolName: name, accessibilityDescription: nil) else { return nil }
+        symbols.setObject(image, forKey: name as NSString)
+        return image
+    }
+}
+
 final class FileNameCell: NSTableCellView, ColumnWidthProviding {
     private let check = NSButton(checkboxWithTitle: "", target: nil, action: nil)
     private let icon = NSImageView()
@@ -762,6 +794,7 @@ final class FileNameCell: NSTableCellView, ColumnWidthProviding {
     private var onToggle: () -> Void = {}
     private var normalBadgeTint = NSColor.systemGreen
     private var choiceIsEditable = true
+    private var choiceHelp: String?
     private var reviewBeforeChoosing = false
     private var markedState: NSControl.StateValue = .off
 
@@ -804,11 +837,16 @@ final class FileNameCell: NSTableCellView, ColumnWidthProviding {
         check.state = markedState
         reviewBeforeChoosing = r.reviewBeforeChoosing
         choiceIsEditable = r.size != nil && r.canChoose
+        choiceHelp = r.choiceHelp
         check.isEnabled = choiceIsEditable
-        check.setAccessibilityLabel(String(localized: "Choose \(r.name) for removal"))
-        check.toolTip = r.choiceHelp ?? String(localized: "Choose for removal. ⌫ chooses or unchooses the selected rows.")
+        if marked != nil {
+            check.setAccessibilityLabel(String(localized: "Choose \(r.name) for removal"))
+            check.toolTip = r.choiceHelp ?? String(localized: "Choose for removal. ⌫ chooses or unchooses the selected rows.")
+        } else {
+            check.toolTip = nil
+        }
         self.onToggle = onToggle
-        icon.image = NSImage(systemSymbolName: r.symbol, accessibilityDescription: nil)
+        icon.image = FileCellResources.symbol(r.symbol)
         icon.contentTintColor = r.tint ?? .secondaryLabelColor
         if name != r.name {
             name = r.name
@@ -816,7 +854,7 @@ final class FileNameCell: NSTableCellView, ColumnWidthProviding {
             let attributes: [NSAttributedString.Key: Any] = [.font: label.font as Any]
             nameWidth = (name as NSString).size(withAttributes: attributes).width
             longestNamePart = name.split(whereSeparator: { " /-_.".contains($0) })
-                .map { (String($0) as NSString).size(withAttributes: attributes).width }.max() ?? 0
+                .map { FileCellResources.namePartWidth(String($0)) }.max() ?? 0
             wrapsName = nil
         }
         sub.stringValue = r.subtitle ?? ""
@@ -867,6 +905,10 @@ final class FileNameCell: NSTableCellView, ColumnWidthProviding {
             showsCheck = visible
             check.isHidden = !visible
             needsLayout = true
+        }
+        if visible {
+            check.setAccessibilityLabel(String(localized: "Choose \(name) for removal"))
+            check.toolTip = choiceHelp ?? String(localized: "Choose for removal. ⌫ chooses or unchooses the selected rows.")
         }
         let state: NSControl.StateValue = marked == true ? .on : .off
         markedState = state
@@ -962,17 +1004,17 @@ final class FileTextCell: NSTableCellView, ColumnWidthProviding {
         label.toolTip = nil
         switch column {
         case .size:
-            label.stringValue = r.size.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? r.sizePlaceholder ?? String(localized: "Scanning…")
+            label.stringValue = r.size.map { FileCellResources.byteCount.string(fromByteCount: $0) } ?? r.sizePlaceholder ?? String(localized: "Scanning…")
             if r.size == nil { label.textColor = .tertiaryLabelColor }
         case .freeable:
-            label.stringValue = r.freeable.map { $0 > 0 ? ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) : "—" } ?? ""
+            label.stringValue = r.freeable.map { $0 > 0 ? FileCellResources.byteCount.string(fromByteCount: $0) : "—" } ?? ""
             label.textColor = (r.freeable ?? 0) > 0 ? .systemGreen : .tertiaryLabelColor
         case .modified:
             label.stringValue = r.modified?.listText ?? "—"
             label.toolTip = r.modified.map { $0.formatted(date: .complete, time: .shortened) }
         case .change:
             if let c = r.change, c != 0 {
-                label.stringValue = (c > 0 ? "+" : "−") + ByteCountFormatter.string(fromByteCount: abs(c), countStyle: .file)
+                label.stringValue = (c > 0 ? "+" : "−") + FileCellResources.byteCount.string(fromByteCount: abs(c))
                 label.textColor = c > 0 ? .systemOrange : .systemGreen
             } else {
                 label.stringValue = ""

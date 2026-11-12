@@ -204,11 +204,11 @@ struct UIResponsivenessBenchmarkTests {
     }
 
     @Test(arguments: [12, 100]) func filterMenuScrollingAndComponentLoading(count: Int) async throws {
+        let materialized = FilterMaterialization()
         let body = DSFilterBody {
-            VStack(alignment: .leading, spacing: 8) {
-                ForEach(0..<count, id: \.self) { index in
-                    Toggle("Synthetic filter \(index)", isOn: .constant(index.isMultiple(of: 3)))
-                }
+            ForEach(0..<count, id: \.self) { index in
+                Toggle("Synthetic filter \(index)", isOn: .constant(index.isMultiple(of: 3)))
+                    .onAppear { materialized.rows.insert(index) }
             }
         }
         let host = NSHostingView(rootView: body)
@@ -223,18 +223,45 @@ struct UIResponsivenessBenchmarkTests {
         host.layoutSubtreeIfNeeded()
         window.displayIfNeeded()
         report("filters.first-render.\(count)", [milliseconds(since: start)], budget: count > 12 ? 500 : 100)
+        await Task.yield()
         let scroll = try #require(descendants(of: NSScrollView.self, in: host).first)
-        if count > 12 { try #require((scroll.documentView?.bounds.height ?? 0) > scroll.contentView.bounds.height) }
+        if count > 12 {
+            try #require((scroll.documentView?.bounds.height ?? 0) > scroll.contentView.bounds.height)
+            try #require(materialized.rows.count > 0 && materialized.rows.count < count / 2, "Offscreen filter controls must remain lazy")
+        }
         var samples: [Double] = []
-        for step in 0..<120 {
-            let start = ContinuousClock.now
-            scroll.contentView.scroll(to: NSPoint(x: 0, y: CGFloat(step % 80) * 25))
+        let scrollStep: (Int) -> Void = { step in
+            let bottom = max(0, (scroll.documentView?.bounds.height ?? 0) - scroll.contentView.bounds.height)
+            let position = step < 100 ? step : 199 - step
+            scroll.contentView.scroll(to: NSPoint(x: 0, y: CGFloat(position) / 99 * bottom))
             scroll.reflectScrolledClipView(scroll.contentView)
             host.layoutSubtreeIfNeeded()
             window.displayIfNeeded()
-            if step >= 20 { samples.append(milliseconds(since: start)) }
+        }
+        if count > 12 {
+            let frames = FrameSamples()
+            frames.work = scrollStep
+            let link = host.displayLink(target: frames, selector: #selector(FrameSamples.tick(_:)))
+            link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 60, preferred: 60)
+            link.add(to: .main, forMode: .common)
+            defer { link.invalidate() }
+            let deadline = ContinuousClock.now + .seconds(15)
+            while frames.services.count < 200, ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            link.invalidate()
+            try #require(frames.services.count == 200)
+            samples = Array(frames.services.dropFirst(20))
+            report("filters.scroll.\(count).frame-delivery", Array(frames.intervals.dropFirst(20)), budget: 25)
+        } else {
+            for step in 0..<120 {
+                let start = ContinuousClock.now
+                scrollStep(step)
+                if step >= 20 { samples.append(milliseconds(since: start)) }
+            }
         }
         report("filters.scroll.\(count)", samples, budget: 16.7)
+        if count > 12 { #expect(materialized.rows.contains(count - 1), "The last filter must become reachable by scrolling") }
     }
 
     @Test func statusCardsResizeScrollAndLoadingTransitions() throws {
@@ -305,6 +332,10 @@ struct UIResponsivenessBenchmarkTests {
             }
         }
     }
+}
+
+@MainActor private final class FilterMaterialization {
+    var rows = Set<Int>()
 }
 
 private struct BenchmarkStatusPanel: View {
