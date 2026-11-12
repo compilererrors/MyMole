@@ -52,9 +52,35 @@ struct DSFilterButton<Content: View>: View {
     }
 }
 
-/// A single hosted form, measured once instead of constructing both
-/// short and scrolling candidates when a long menu opens.
-struct DSFilterBody<Content: View>: NSViewRepresentable {
+/// Short forms keep their natural height; large collections only create
+/// controls as they enter the viewport.
+struct DSFilterBody<Content: View>: View {
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        Group(subviews: content) { fields in
+            if fields.count > 12 {
+                List {
+                    ForEach(fields) { field in
+                        field
+                            .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
+                            .listRowSeparator(.hidden)
+                    }
+                }
+                .listStyle(.plain)
+                .scrollContentBackground(.hidden)
+                .contentMargins(.horizontal, 0, for: .scrollContent)
+                .frame(height: 360)
+            } else {
+                MeasuredFilterBody {
+                    VStack(alignment: .leading, spacing: 8) { content }
+                }
+            }
+        }
+    }
+}
+
+private struct MeasuredFilterBody<Content: View>: NSViewRepresentable {
     @ViewBuilder var content: Content
 
     func makeNSView(context: Context) -> FilterBodyScroll {
@@ -70,14 +96,14 @@ struct DSFilterBody<Content: View>: NSViewRepresentable {
 
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: FilterBodyScroll, context: Context) -> CGSize? {
         let width = proposal.width.flatMap { $0.isFinite ? max(0, $0) : nil } ?? 340
+        guard width > 0 else { return .zero }
         return CGSize(width: width, height: min(360, nsView.contentHeight(width: width)))
     }
 }
 
 final class FilterBodyScroll: NSScrollView {
     var content = AnyView(EmptyView())
-    private let host = NSHostingView(rootView: AnyView(EmptyView()))
-    private var measuredWidth: CGFloat?
+    private let host = NSHostingController(rootView: AnyView(EmptyView()))
     private var reportedHeight: CGFloat = -1
 
     override init(frame frameRect: NSRect) {
@@ -85,36 +111,34 @@ final class FilterBodyScroll: NSScrollView {
         hasVerticalScroller = true
         autohidesScrollers = true
         drawsBackground = false
-        documentView = host
+        host.sizingOptions = []
+        documentView = host.view
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
     func invalidateContent() {
-        measuredWidth = nil
+        host.rootView = AnyView(content.frame(maxWidth: .infinity, alignment: .topLeading)
+            .fixedSize(horizontal: false, vertical: true)
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { [weak self] height in
+                guard let self, abs(self.reportedHeight - height) > 0.5 else { return }
+                self.reportedHeight = height
+                self.needsLayout = true
+                self.invalidateIntrinsicContentSize()
+            })
         needsLayout = true
         invalidateIntrinsicContentSize()
     }
 
     func contentHeight(width: CGFloat) -> CGFloat {
-        if measuredWidth != width {
-            measuredWidth = width
-            host.rootView = AnyView(content.frame(width: width, alignment: .topLeading)
-                .fixedSize(horizontal: false, vertical: true)
-                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { [weak self] height in
-                    guard let self, abs(self.reportedHeight - height) > 0.5 else { return }
-                    self.reportedHeight = height
-                    self.needsLayout = true
-                    self.invalidateIntrinsicContentSize()
-                })
-        }
-        return host.fittingSize.height
+        host.sizeThatFits(in: CGSize(width: width, height: .greatestFiniteMagnitude)).height
     }
 
     override func layout() {
         super.layout()
         let width = contentView.bounds.width
-        host.setFrameSize(NSSize(width: width, height: contentHeight(width: width)))
+        guard width > 0 else { return }
+        host.view.setFrameSize(NSSize(width: width, height: contentHeight(width: width)))
     }
 }
 
