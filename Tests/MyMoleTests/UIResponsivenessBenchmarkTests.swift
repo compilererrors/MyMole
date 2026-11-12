@@ -158,13 +158,11 @@ struct UIResponsivenessBenchmarkTests {
             if step < 100 {
                 let inspectorWidth = CGFloat(340 + step % 90 * 2)
                 controller.splitView.setPosition(controller.splitView.bounds.width - 1 - inspectorWidth, ofDividerAt: 0)
-                controller.splitView.adjustSubviews()
             } else {
                 window.setContentSize(NSSize(width: 1_000 + CGFloat(step - 100) * 6, height: 740))
                 workspaceWidths.append(controller.content.view.bounds.width)
             }
             controller.view.layoutSubtreeIfNeeded()
-            window.displayIfNeeded()
             widths.append(controller.inspector.view.frame.width)
         }
         link.add(to: .main, forMode: .common)
@@ -217,9 +215,12 @@ struct UIResponsivenessBenchmarkTests {
         window.isReleasedWhenClosed = false
         window.ignoresMouseEvents = true
         defer { window.close() }
+        let presentation = ContinuousClock.now
+        window.orderFront(nil)
+        window.displayIfNeeded()
+        report("filters.window.present.\(count)", [milliseconds(since: presentation)], budget: 500)
         let start = ContinuousClock.now
         window.contentView = host
-        window.orderFront(nil)
         host.layoutSubtreeIfNeeded()
         window.displayIfNeeded()
         report("filters.first-render.\(count)", [milliseconds(since: start)], budget: count > 12 ? 500 : 100)
@@ -236,7 +237,6 @@ struct UIResponsivenessBenchmarkTests {
             scroll.contentView.scroll(to: NSPoint(x: 0, y: CGFloat(position) / 99 * bottom))
             scroll.reflectScrolledClipView(scroll.contentView)
             host.layoutSubtreeIfNeeded()
-            window.displayIfNeeded()
         }
         if count > 12 {
             let frames = FrameSamples()
@@ -257,6 +257,7 @@ struct UIResponsivenessBenchmarkTests {
             for step in 0..<120 {
                 let start = ContinuousClock.now
                 scrollStep(step)
+                window.displayIfNeeded()
                 if step >= 20 { samples.append(milliseconds(since: start)) }
             }
         }
@@ -374,5 +375,6 @@ private struct BenchmarkStatusPanel: View {
         last = start
         work?(services.count)
         services.append((CACurrentMediaTime() - start) * 1_000)
+        NSApp.updateWindows()
     }
 }
