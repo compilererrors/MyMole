@@ -340,6 +340,7 @@ final class MainToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         let current = toolbar.items.map(\.itemIdentifier).filter { $0.rawValue.hasPrefix("tool.") }
         if current != wanted {
             for index in toolbar.items.indices.reversed() where toolbar.items[index].itemIdentifier.rawValue.hasPrefix("tool.") {
+                shown[toolbar.items[index].itemIdentifier] = nil
                 toolbar.removeItem(at: index)
             }
             for id in items.keys where id.rawValue.hasPrefix("tool.") && !wanted.contains(id) {
@@ -477,6 +478,9 @@ final class MainToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
             guard let tool = tools[id] else { return nil }
             item = makeItem(id, for: tool)
             items[id] = item
+            // What was shown belongs to the item it was shown on; a new
+            // item starts blank and must be configured in full.
+            shown[id] = nil
             update(id, with: tool)
             return item
         }

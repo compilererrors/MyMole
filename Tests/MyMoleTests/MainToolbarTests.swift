@@ -100,6 +100,28 @@ struct MainToolbarTests {
         #expect(toggled == 1)
     }
 
+    /// Another set of tools rebuilds the items; every rebuilt item shows its
+    /// symbol and label at once, not only after it was used.
+    @Test func rebuiltItemsShowTheirSymbolsAndLabels() throws {
+        let toolbar = MainToolbar()
+        let window = window()
+        defer { window.close() }
+        let box = Box()
+        toolbar.attach(to: window)
+        toolbar.show(chrome(box), environment: EnvironmentValues())
+        var tools = chrome(box).tools
+        tools.insert(.button("test.extra", "Extra", symbol: "plus", help: "Extra") {}, at: 1)
+        toolbar.show(PaneChrome(title: "Pane", subtitle: "Synthetic", tools: tools), environment: EnvironmentValues())
+        toolbar.show(chrome(box), environment: EnvironmentValues())
+        for tool in chrome(box).tools where !tool.symbol.isEmpty {
+            let item = try #require(toolbar.toolbar.items.first { $0.itemIdentifier.rawValue == "tool.\(tool.id)" })
+            let image = (item as? NSToolbarItemGroup)?.subitems.first?.image ?? item.image
+            #expect(image != nil, "\(tool.id) has no symbol")
+            #expect(item.label == tool.title, "\(tool.id) has no label")
+            #expect(item.toolTip == tool.help, "\(tool.id) has no help")
+        }
+    }
+
     @Test func theSameChromeAgainChangesNoItem() throws {
         let toolbar = MainToolbar()
         let window = window()
