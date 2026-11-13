@@ -103,7 +103,10 @@ struct UIDiskRenderingView: View {
         try FileManager.default.createDirectory(at: warmUp, withIntermediateDirectories: true)
         let model = try await syntheticDiskRenderingModel(in: warmUp)
         let ui = UIInteractionWindow(UIDiskRenderingView(preferences: UISplitPreferences(), model: model, chart: .bars), width: 1_400)
-        defer { ui.close() }
         try await ui.settle()
+        ui.close()
+        // The closed window's teardown and the window server's work for it
+        // finish here, not inside the first measured render.
+        try await Task.sleep(for: .milliseconds(400))
     }
 }
