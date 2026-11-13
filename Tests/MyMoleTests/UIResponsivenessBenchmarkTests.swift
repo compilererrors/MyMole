@@ -133,6 +133,7 @@ struct UIResponsivenessBenchmarkTests {
         let model = try await syntheticDiskRenderingModel(in: root)
         try #require(model.opened != nil && !model.canTrash)
         let preferences = UISplitPreferences()
+        try await DiskRenderingWarmUp.once(in: root)
         let start = UIWorkStamp()
         let ui = UIInteractionWindow(UIDiskRenderingView(preferences: preferences, model: model, chart: chart), width: 1_400)
         defer { ui.close() }

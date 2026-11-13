@@ -87,3 +87,23 @@ struct UIDiskRenderingView: View {
         }
     }
 }
+
+/// The test process's first window pays once for AppKit, SwiftUI, the window
+/// server connection, fonts, symbols and the charts' shared drawing path. A
+/// running app has paid that at launch, before anyone switches charts, so
+/// it's paid here first, with a chart on its own map: the measured cases'
+/// maps and their layout caches stay cold.
+@MainActor enum DiskRenderingWarmUp {
+    private static var done = false
+
+    static func once(in directory: URL) async throws {
+        guard !done else { return }
+        done = true
+        let warmUp = directory.appending(path: "warm-up")
+        try FileManager.default.createDirectory(at: warmUp, withIntermediateDirectories: true)
+        let model = try await syntheticDiskRenderingModel(in: warmUp)
+        let ui = UIInteractionWindow(UIDiskRenderingView(preferences: UISplitPreferences(), model: model, chart: .bars), width: 1_400)
+        defer { ui.close() }
+        try await ui.settle()
+    }
+}
