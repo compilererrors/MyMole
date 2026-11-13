@@ -19,7 +19,9 @@ struct StatusView: View {
     @State private var dragSession = UUID()
     @State private var dropTarget: StatusCardID?
     @State private var endTargeted = false
-    @State private var gridWidth: CGFloat = 900
+    /// Columns the grid has room for, not its width: a width kept here
+    /// changed on every frame of a resize and evaluated the pane again.
+    @State private var gridColumns = 2
     @State private var lastHidden: StatusCardID?
     let app: AppModel
 
@@ -58,7 +60,7 @@ struct StatusView: View {
                     } else if let snapshot = app.status {
                         StatusGridView(cards: layout.visible, compactDensity: Density.current == .compact, editing: editingLayout, spacing: DS.Space.md) { card in
                                 StatusCard(card: card.id, editing: editingLayout, size: card.size,
-                                           canResize: StatusGrid.columnCount(width: gridWidth, spacing: DS.Space.md) > 1,
+                                           canResize: gridColumns > 1,
                                            drag: StatusCardDrag(card: card.id, session: dragSession),
                                            onResize: { size in change { $0.setSize(size, for: card.id) } },
                                            onMove: { offset in change { $0.move(card.id, by: offset, visibleOnly: true) } }) {
@@ -95,7 +97,7 @@ struct StatusView: View {
                                     else if dropTarget == card.id { dropTarget = nil }
                                 }))
                         }
-                        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { gridWidth = $0 }
+                        .onGeometryChange(for: Int.self) { StatusGrid.columnCount(width: $0.size.width, spacing: DS.Space.md) } action: { gridColumns = $0 }
                         if editingLayout { endDropTarget }
                     } else {
                         DSLoading("Reading your Mac's status…").padding(DS.Space.xl * 2)

@@ -260,16 +260,16 @@ struct RootView: View {
     @AppStorage(MenuBarSettings.showKey) private var showMenuBar = MenuBarSettings.showStandard
     /// Read once per window: the first start asks about the menu bar item.
     @State private var askMenuBar = MenuBarSettings.shouldAsk()
-    @State private var columns = NavigationSplitViewVisibility.all
+    @State private var sidebarShown = true
 
     private func toggleSidebar() {
-        withAnimation(Motion.snappy) { columns = columns == .detailOnly ? .all : .detailOnly }
+        withAnimation(Motion.snappy) { sidebarShown.toggle() }
     }
 
     private var palette: Palette { (ThemeFamily(rawValue: theme) ?? .standard).palette }
 
     var body: some View {
-        NavigationSplitView(columnVisibility: $columns) {
+        MainSplit(sidebarShown: $sidebarShown) {
             List(selection: $app.pane) {
                 ForEach(Pane.groups, id: \.0) { group, panes in
                     Section(group) {
@@ -288,7 +288,7 @@ struct RootView: View {
                     }
                 }
             }
-            .navigationSplitViewColumnWidth(min: 210, ideal: 230, max: 320)
+            .listStyle(.sidebar)
             .focusSection()
             .safeAreaInset(edge: .top) { brandHeader }
             .safeAreaInset(edge: .bottom) { editionBadge }

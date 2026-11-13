@@ -453,6 +453,68 @@ struct UIResponsivenessBenchmarkTests {
         #expect(coordinator.sortJob == nil)
     }
 
+    /// The main window's sidebar divider dragged over a heavy pane. Each
+    /// step includes the layout it causes, as a frame of a real drag would.
+    @Test func mainSidebarDividerDrag() async throws {
+        let root = try uiFixtureDirectory()
+        try await DiskRenderingWarmUp.once(in: root)
+        let model = try await syntheticDiskRenderingModel(in: root)
+        let preferences = UISplitPreferences()
+        let pane = Binding<String?>.constant("Disk Map")
+        let view = MainSplit(sidebarShown: .constant(true)) {
+            List(selection: pane) {
+                ForEach(["Cleanup", "Insight", "More"], id: \.self) { group in
+                    Section(group) {
+                        ForEach(0..<5) { i in
+                            Label {
+                                HStack {
+                                    Text(verbatim: "\(group) pane \(i)")
+                                    Spacer(minLength: 4)
+                                    Text(verbatim: "\(i + 1),2 GB").font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+                                }
+                            } icon: {
+                                Image(systemName: "folder")
+                            }
+                            .tag(Optional("\(group) pane \(i)"))
+                        }
+                    }
+                }
+            }
+            .listStyle(.sidebar)
+        } detail: {
+            PaneFrame(minWidth: 760, minHeight: 560) {
+                UIDiskRenderingView(preferences: preferences, model: model, chart: .rings)
+            }
+        }
+        let ui = UIInteractionWindow(view, width: 1_400, height: 820)
+        defer { ui.close() }
+        try await ui.settle()
+        let splits = descendants(of: NSSplitView.self, in: ui.host)
+        let split = try #require(splits.first { $0.isVertical && $0.arrangedSubviews.count >= 2 })
+        let windowFrame = ui.window.frame
+        var widths: [CGFloat] = []
+        let frames = FrameSamples(limit: 200)
+        frames.work = { step in
+            let position = MainSplitMetrics.sidebarMin + CGFloat(step % 50) * 2
+            split.setPosition(position, ofDividerAt: 0)
+            ui.host.layoutSubtreeIfNeeded()
+            widths.append(split.arrangedSubviews[0].frame.width)
+        }
+        frames.render = { ui.window.displayIfNeeded() }
+        let link = ui.host.displayLink(target: frames, selector: #selector(FrameSamples.tick(_:)))
+        link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 60, preferred: 60)
+        link.add(to: .main, forMode: .common)
+        defer { link.invalidate() }
+        let deadline = ContinuousClock.now + .seconds(20)
+        while frames.services.count < 200, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+        link.invalidate()
+        try #require(frames.services.count == 200)
+        try #require((widths.max() ?? 0) - (widths.min() ?? 0) > 60, "The sidebar must actually resize during measurement")
+        #expect(ui.window.frame == windowFrame, "Dragging the sidebar must not resize the window")
+        report("main.sidebar.drag", Array(frames.services.dropFirst(20)), budget: 16.7)
+        report("main.sidebar.frame-delivery", Array(frames.intervals.dropFirst(20)), budget: 25)
+    }
+
     @Test func projectInspectorResize() async throws {
         let root = try uiFixtureDirectory()
         let items = (0..<4).map { group in

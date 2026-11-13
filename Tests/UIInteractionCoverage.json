@@ -13,7 +13,8 @@
     "filterMenuScrollingAndComponentLoading",
     "statusCardsResizeScrollAndLoadingTransitions",
     "diskResizeWhileScansRunInTheBackground",
-    "largeDiskMapResizeSteps"
+    "largeDiskMapResizeSteps",
+    "mainSidebarDividerDrag"
   ],
   "benchmarks": {
     "table.load.10000": {
@@ -30,6 +31,14 @@
     },
     "table.menu": {
       "budgetMilliseconds": 16.7,
+      "minimumSamples": 60
+    },
+    "main.sidebar.drag": {
+      "budgetMilliseconds": 16.7,
+      "minimumSamples": 60
+    },
+    "main.sidebar.frame-delivery": {
+      "budgetMilliseconds": 25,
       "minimumSamples": 60
     },
     "projects.split.service": {

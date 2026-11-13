@@ -41,7 +41,9 @@ enum AppIcons {
 /// macOS's own apps, shown when asked for, can only be reset.
 struct UninstallView: View {
     @FocusState private var focusedApp: String?
-    @State private var gridWidth: CGFloat = 800
+    /// Tiles per row, not the grid's width: a width kept here changed on
+    /// every frame of a resize and evaluated the pane again.
+    @State private var gridColumns = 5
     @Environment(\.palette) private var palette
     @Bindable var model: AppsModel
     let orphans: OrphansModel
@@ -400,10 +402,10 @@ struct UninstallView: View {
                     }
                 }
                 .frame(maxWidth: .infinity)
-                .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { gridWidth = $0 }
+                .onGeometryChange(for: Int.self) { max(1, Int(($0.size.width + Theme.gap) / (DS.Size.appTileMinimum + Theme.gap))) } action: { gridColumns = $0 }
                 .onKeyPress(keys: [.leftArrow, .rightArrow, .upArrow, .downArrow]) { key in
                     guard key.modifiers.isEmpty, let current = filtered.firstIndex(where: { $0.path == focusedApp }) else { return .ignored }
-                    let columns = max(1, Int((gridWidth + Theme.gap) / (DS.Size.appTileMinimum + Theme.gap)))
+                    let columns = gridColumns
                     let direction: GridKeyboard.Direction = key.key == .leftArrow ? .left : key.key == .rightArrow ? .right : key.key == .upArrow ? .up : .down
                     let next = GridKeyboard.next(from: current, count: filtered.count, columns: columns, direction: direction)
                     guard !filtered[next].sizePending else { return .handled }
