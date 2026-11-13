@@ -72,6 +72,7 @@
       }
     },
     "%@ (latest)" : {},
+    "%@ (no limits)" : {},
     "%@ Error code %@." : {
       "localizations" : {
         "en" : {
@@ -83,6 +84,16 @@
       }
     },
     "%@ Folder" : {},
+    "%@ Now: %@." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$@ Now: %2$@."
+          }
+        }
+      }
+    },
     "%@ Try again once it's done, or untick the system-wide leftovers." : {},
     "%@ and %@" : {
       "localizations" : {
@@ -181,6 +192,7 @@
         }
       }
     },
+    "%@ files · kept on disk, past the memory set in Large results" : {},
     "%@ found in the whole scan" : {},
     "%@ free" : {},
     "%@ from %lld project(s):\n%@\n\nAnything holding a Git repository, key files, files Git tracks or uncommitted work stays. You can undo right after, or put things back from the Trash later." : {
@@ -196,6 +208,16 @@
     "%@ has kept the processor busy" : {},
     "%@ has no search." : {},
     "%@ hidden" : {},
+    "%@ icons · %@ charts · repaints every %lld ms · a disk map under %lld min old is reused at launch" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$@ icons · %2$@ charts · repaints every %3$lld ms · a disk map under %4$lld min old is reused at launch"
+          }
+        }
+      }
+    },
     "%@ in %@ files" : {
       "localizations" : {
         "en" : {
@@ -486,6 +508,16 @@
           "stringUnit" : {
             "state" : "new",
             "value" : "%1$@, %2$lld %% of %3$@"
+          }
+        }
+      }
+    },
+    "%@, frees about %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$@, frees about %2$@"
           }
         }
       }
@@ -912,6 +944,7 @@
     "A folder's kind is the type using most of its space." : {},
     "A whole core for %lld minutes, at most once a day for each app." : {},
     "About" : {},
+    "About %@" : {},
     "Access couldn't be saved: %@" : {},
     "Access to the chosen folder couldn't be kept. Choose it again." : {},
     "Actions and layout for %@" : {},
@@ -928,8 +961,8 @@
     "Add Folder…" : {},
     "Adjust or clear the filters above to see more files and folders." : {},
     "Administrator" : {},
+    "Administrator access" : {},
     "Administrator access was cancelled, so nothing was changed." : {},
-    "Administrator tasks ask for a password" : {},
     "All" : {},
     "All Categories" : {},
     "All Kinds" : {},
@@ -940,7 +973,6 @@
     "All projects" : {},
     "All types" : {},
     "Allow App Removal" : {},
-    "Allow Cleaning Again" : {},
     "Allow Full Disk Access" : {},
     "Allow MyMole to control Finder in System Settings → Privacy & Security → Automation, then try Undo again." : {},
     "Allow MyMole to control Finder in System Settings → Privacy & Security → Automation, then try again. No app data was moved." : {},
@@ -967,6 +999,7 @@
     "Another uninstall is running." : {},
     "Any Age" : {},
     "Any Time" : {},
+    "Any number of scans at once · %lld threads for a scan you wait on" : {},
     "Anywhere" : {},
     "App" : {},
     "App Copies & Integrations" : {},
@@ -991,18 +1024,21 @@
     "Application" : {},
     "Applications" : {},
     "Applications folders" : {},
+    "Approve MyMole's helper in System Settings → General → Login Items & Extensions, then try the action again." : {},
     "Apps" : {},
     "Apps and their leftovers go to the Trash" : {},
     "Apps in %@ aren't listed." : {},
     "Apps' own login items are in System Settings" : {},
     "Ask before making this change" : {},
     "At least %@ in one pane, at most once a week." : {},
+    "Automatic" : {},
     "Automation Settings…" : {},
     "Automation…" : {},
     "Available" : {},
     "Back" : {},
     "Back to %@" : {},
     "Back to %@ (⌘↑)" : {},
+    "Balanced" : {},
     "Bars" : {},
     "Battery" : {},
     "Before %@" : {},
@@ -1010,6 +1046,13 @@
     "Best" : {},
     "Between Dates…" : {},
     "Biggest finds" : {},
+    "Blacklist Folders Named “%@” in Every Project" : {},
+    "Blacklist These %lld Folders" : {},
+    "Blacklist every folder named “%@”" : {},
+    "Blacklist project folders" : {},
+    "Blacklist — Suggest for Cleanup" : {},
+    "Blacklist — suggest for cleanup" : {},
+    "Blacklist: %@" : {},
     "Boxes" : {},
     "Browse" : {},
     "Bundle ID" : {},
@@ -1027,6 +1070,7 @@
     "Category" : {},
     "Category: %@" : {},
     "Change" : {},
+    "Change reminders in Settings → Confirmations." : {},
     "Change type" : {},
     "Changed On or After %@" : {},
     "Changed On or Before %@" : {},
@@ -1139,11 +1183,6 @@
     "Chrome profile folders can contain bookmarks, history and extensions. Custom profile locations outside the searched folders aren't discovered automatically." : {},
     "Classic pie with labels" : {},
     "Clean" : {},
-    "Clean %@" : {},
-    "Clean Folders Named “%@” in Every Project" : {},
-    "Clean These %lld Folders" : {},
-    "Clean This Folder" : {},
-    "Clean every folder named “%@”" : {},
     "Cleanup" : {},
     "Cleanups you run show up here." : {},
     "Clear" : {},
@@ -1251,12 +1290,13 @@
     "Desktop" : {},
     "Details" : {},
     "Details for %@" : {},
+    "Disable Helper" : {},
     "Discard Change" : {},
     "Discovery is still running. This early result cannot be chosen." : {},
     "Disk" : {},
     "Disk I/O" : {},
     "Disk Map" : {},
-    "Disk Map's saved scans take %@ at most together; the oldest go first, and the newest of each folder always stays." : {},
+    "Disk Map's saved scans stay within what Large results allows, %@; the oldest go first, and the newest of each folder always stays." : {},
     "Disk health (SMART)" : {},
     "Disk images and packages left after installing" : {},
     "Disk map history: %lld scans per folder" : {},
@@ -1284,6 +1324,7 @@
     "Duplicates" : {},
     "Each" : {},
     "Each app goes to the Trash with the leftovers you choose. Only caches and logs tied by identity start chosen; settings, website data, scripts, launch configuration and name matches stay unless you choose them." : {},
+    "Each control has six steps, from Gentle to Hyperspeed, and starts at Maximum: well past the limits MyMole had before, which are now Balanced, step 3. Hyperspeed removes every limit and can use a lot of memory and disk. Results are always complete: every large file, match, process and item is listed at every step. If MyMole feels slow or makes this Mac sluggish, lower a control: a lower speed uses fewer threads at a lower priority, a smaller Large results step moves big lists to disk sooner and keeps fewer saved scans, and a lower responsiveness holds less in memory. Scans can always be stopped. A change applies from the next scan." : {},
     "Each folder row includes its contents. Your data stays unless you choose it." : {},
     "Each leftover shows how it's tied to the app. Only caches and logs tied by identity start chosen. Settings, website data, saved state, scripts, launch configuration and name matches stay unless you choose them." : {},
     "Each pane's last scan and the disk map's history, shown at once after a launch: %@." : {},
@@ -1317,23 +1358,28 @@
     "Empty Trash…" : {},
     "Empty the Trash, after a confirmation" : {},
     "Empty the Trash?" : {},
+    "Enable Helper" : {},
+    "Enable MyMole's helper?" : {},
     "Enclosing Folder" : {},
     "Entire Scan" : {},
     "Entire Scan becomes available when scanning finishes." : {},
     "Entire Scan includes folders and individual files of 1 MB or more. Smaller files are counted inside folders." : {},
     "Every Download" : {},
     "Every cleanup run on this Mac" : {},
+    "Every file of 1 MB or more from the current scan" : {},
     "Every folder is scanned. To leave one out, choose Don't Scan This Folder from its menu in Browse." : {},
+    "Every folder named “%@” in your projects" : {},
+    "Every icon and chart kept · repaints every %lld ms · every pane prepared afresh at launch" : {},
+    "Every list in memory · every saved scan · a history point for every scan" : {},
     "Every project and what it leaves on disk" : {},
     "Everything in Downloads, oldest first. An old file isn't junk for being old: look at it first. Nothing is chosen for you." : {},
     "Failed" : {},
+    "Fast" : {},
     "File URL" : {},
     "File kind" : {},
     "Files" : {},
     "Files directly in the project folder" : {},
-    "Files of 1 MB or more from the current scan" : {},
     "Files under 1 MB are counted per folder, not searched." : {},
-    "Files under 1 MB are counted per folder, not searched; this scan is so big that only its %@ biggest folders and files are searched." : {},
     "Files under 1 MB, counted together; they go with their folder." : {},
     "Files with the same content in your own folders" : {},
     "Filter a list" : {},
@@ -1393,10 +1439,10 @@
     "Forward" : {},
     "Found %@" : {},
     "Found by: %@" : {},
+    "Free memory when macOS runs low" : {},
     "From" : {},
     "From an earlier listing" : {},
     "From an earlier scan%@" : {},
-    "Full" : {},
     "Full Disk Access" : {},
     "Gentle" : {},
     "Get Help" : {},
@@ -1427,20 +1473,26 @@
     "Has its own uninstaller" : {},
     "Health" : {},
     "Health %@" : {},
+    "Helper disabled — macOS asks for administrator approval per task." : {},
+    "Helper enabled for administrator tasks" : {},
+    "Helper enabled — approved tasks don't need a password each time." : {},
     "Here's how your Mac is doing" : {},
     "Hidden settings and deeper name matches are searched automatically. The direct edition also checks exact app IDs in per-user temporary/cache folders. These results start unchosen; temporary data may contain unsaved work." : {},
     "Hide Card" : {},
     "Hide Chart" : {},
+    "Hide or show the sidebar (⌃⌘S)" : {},
     "Hide the chart and give the list the whole pane" : {},
     "High pressure" : {},
     "History" : {},
+    "Holds the least. The disk map is let go a while after you leave it and isn't prepared at launch; running scans repaint less often." : {},
     "Home" : {},
     "Homebrew formulae and casks, and packages installers put on the Mac, read from where they're kept. Nothing is run and nothing is removed here: a package goes with its own tool, so its records stay right." : {},
     "Homebrew isn't installed in /opt/homebrew or /usr/local." : {},
     "Homebrew wasn't found, or this edition may not look where it installs: the App Sandbox keeps App Store apps out of /opt/homebrew and /usr/local." : {},
-    "How hard scans may work. Lower levels use fewer threads at a lower priority, so the Mac stays quiet while scans take longer. A change applies from the next scan." : {},
     "How long lists, table menus, app listings and Disk Map scans take, including the first content. Kept in memory until you quit; no file names or paths." : {},
     "How to draw the disk map" : {},
+    "Hyperspeed" : {},
+    "Hyperspeed: no limits" : {},
     "Icicle, levels left to right" : {},
     "Icons" : {},
     "Identical Files" : {},
@@ -1498,12 +1550,14 @@
     "Its window opens at login. With the menu bar item on, it starts there instead." : {},
     "Jobs an app registers from inside itself aren't files, so they aren't listed here. Turn those off in System Settings → General → Login Items & Extensions." : {},
     "Keep" : {},
-    "Keep %@" : {},
     "Keep %@ and move only the chosen leftovers to the Trash, so it starts over as on its first launch" : {},
     "Keep MyMole in the menu bar? The disk, memory and what the scans found at a glance. You can change this in Settings." : {},
-    "Keep everything named “%@”" : {},
     "Keep timings of the interface" : {},
     "Keep timings of the interface Copy Timings Clear benchmark slow speed median p95 filter sort redraw menus first content" : {},
+    "Keeps a few charts and icons ready, and repaints running scans about three times a second." : {},
+    "Keeps more charts, icons and text measurements ready, and repaints running scans more often." : {},
+    "Keeps the disk map and recent charts ready, and repaints running scans five times a second." : {},
+    "Keeps the most within limits ready, repaints running scans most often, and reuses a result only minutes old at launch." : {},
     "Kept" : {},
     "Kept as the best: the most pixels, then the biggest file, then the newest" : {},
     "Kept in Projects or on your keep list, or holds something that is; never moved from here" : {},
@@ -1514,6 +1568,7 @@
     "Kind: %@" : {},
     "Known to macOS" : {},
     "Large Files" : {},
+    "Large results" : {},
     "Largest First" : {},
     "Last 12 Months" : {},
     "Last 30 Days" : {},
@@ -1576,6 +1631,7 @@
     "Map another folder or disk (⌘O)" : {},
     "Map your home folder in Disk Map to choose from here." : {},
     "Matched by %@" : {},
+    "Maximum" : {},
     "Measuring %lld of %lld projects…" : {
       "localizations" : {
         "en" : {
@@ -1797,6 +1853,7 @@
     "MyMole Support" : {},
     "MyMole Website" : {},
     "MyMole can uninstall itself, including the data you choose." : {},
+    "MyMole couldn't change the helper registration. Keep the signed app in Applications and try again in Settings → System Tasks." : {},
     "MyMole couldn't keep access to that folder." : {},
     "MyMole couldn't read %@%@, so this may not be everything. " : {
       "localizations" : {
@@ -1814,7 +1871,7 @@
     "MyMole doesn't have Full Disk Access, so the folders macOS protects stay closed to it." : {},
     "MyMole found things to clean" : {},
     "MyMole has Full Disk Access." : {},
-    "MyMole is a native Mac cleaner. Everything it removes is chosen by you; your own files go to the Trash, with Undo. In the direct edition, system caches are deleted after macOS asks for an administrator's password." : {},
+    "MyMole is a native Mac cleaner. Everything it removes is chosen by you; your own files go to the Trash, with Undo. In the direct edition, system tasks use administrator approval or the optional approved helper." : {},
     "MyMole is closing." : {},
     "MyMole is in the Trash. Some chosen data couldn't be moved and stays where it is. Quit when you're ready." : {},
     "MyMole is preparing to uninstall and quit." : {},
@@ -1834,8 +1891,8 @@
     "MyMole needs administrator rights to delete system caches and logs." : {},
     "MyMole needs administrator rights to delete what the app left outside your Library." : {},
     "MyMole needs administrator rights to run system maintenance." : {},
-    "MyMole stopped waiting for the privileged tool, which may still be running. What it changed isn't known yet, so no other system task runs until it has ended." : {},
-    "MyMole stops its scans, turns off Open at Login and moves this copy to the Trash, then quits. Settings and saved results stay unless you choose them. Data another installed copy uses stays. Use Put Back in Finder's Trash to restore anything moved." : {},
+    "MyMole stopped waiting for the administrator task, which may still be running. What it changed isn't known yet, so no other system task runs until its completion can be verified." : {},
+    "MyMole stops its scans, turns off Open at Login, disables its optional helper and moves this copy to the Trash, then quits. Settings and saved results stay unless you choose them. Data another installed copy uses stays. Use Put Back in Finder's Trash to restore anything moved." : {},
     "MyMole, %@ free" : {},
     "Name" : {},
     "Name, A to Z" : {},
@@ -1865,9 +1922,6 @@
     "Needs folder access" : {},
     "Network" : {},
     "Never" : {},
-    "Never Clean These %lld" : {},
-    "Never Clean This" : {},
-    "Never Clean “%@” in Any Project" : {},
     "Never removed from here" : {},
     "New" : {},
     "Newest First" : {},
@@ -1893,12 +1947,14 @@
     "No Quick Look, Spotlight, audio or other plug-ins are in your Library or the one for every user." : {},
     "No Saved Filters" : {},
     "No Startup Items" : {},
+    "No Thanks" : {},
     "No Unclaimed Leftovers Found" : {},
     "No Unreadable Folders" : {},
     "No apps were chosen." : {},
     "No battery reading" : {},
     "No disk images or installer packages in the searched folders." : {},
     "No integrations declared in the inspected bundle locations." : {},
+    "No limits: keeps everything ready and prepares every pane afresh at each launch. Can use a lot of memory." : {},
     "No pane to go back to." : {},
     "No pane to go forward to." : {},
     "No reading available right now." : {},
@@ -1978,6 +2034,7 @@
     "Notify me when the disk is nearly full" : {},
     "Now" : {},
     "OK" : {},
+    "OK, Don't Remind Me" : {},
     "Off" : {},
     "Older than 1 Month" : {},
     "Older than 1 Week" : {},
@@ -2003,7 +2060,6 @@
     "One ring, total in the middle" : {},
     "Only data last changed before this is chosen" : {},
     "Only in the Disk Map." : {},
-    "Only the %@ largest files are listed. Browse individual folders to see the rest." : {},
     "Only the MyMole app can open at login." : {},
     "Only the first %@ pictures were looked at" : {},
     "Only the name matches, so it may be another project's or app's of the same name. Never chosen for you." : {},
@@ -2017,6 +2073,7 @@
     "Open Disk Map" : {},
     "Open Full Disk Access Settings" : {},
     "Open Login Items" : {},
+    "Open Login Items & Extensions" : {},
     "Open MyMole" : {},
     "Open MyMole at login" : {},
     "Open MyMole to see what could go." : {},
@@ -2065,11 +2122,20 @@
     "Performance cores" : {},
     "Permanently delete %@?" : {},
     "Photo groups" : {},
+    "Picks a level from this Mac's memory, and goes gentle in Low Power Mode." : {},
     "Pictures" : {},
     "Pictures in Pictures, Desktop, Documents and Downloads" : {},
     "Pictures in selected groups" : {},
     "Pictures that look alike in your own folders" : {},
     "Pie" : {},
+    "Pin" : {},
+    "Pin Folder…" : {},
+    "Pin folders for quick access. Pinning doesn't change what can be cleaned." : {},
+    "Pinned" : {},
+    "Pinned for quick access. Pinning doesn't protect files or choose them for cleanup." : {},
+    "Pinned items" : {},
+    "Pinned — quick access only" : {},
+    "Pinning keeps this app at the top. It doesn't protect the app from uninstalling." : {},
     "Pixels" : {},
     "Place before %@" : {},
     "Places" : {},
@@ -2144,11 +2210,14 @@
     "Reload a table" : {},
     "Reload history" : {},
     "Reload the app list" : {},
+    "Remind Me Later" : {},
     "Removable" : {},
     "Remove" : {},
     "Remove Saved Filter" : {},
     "Remove filter: %@" : {},
+    "Remove from Blacklist" : {},
     "Remove from Search" : {},
+    "Remove from Whitelist" : {},
     "Remove from the list" : {},
     "Remove this copy whenever you want. Review its caches and settings, turn off Open at Login and move the app to the Trash. Nothing is deleted permanently." : {},
     "Remove this protection. No files are moved." : {},
@@ -2187,6 +2256,7 @@
     "Reset app data to the Trash" : {},
     "Reset…" : {},
     "Resize %@" : {},
+    "Responsiveness" : {},
     "Restore All Confirmations" : {},
     "Restore Default Columns" : {},
     "Restore Default Layout" : {},
@@ -2297,7 +2367,6 @@
     "Review startup components" : {},
     "Review system cleanup" : {},
     "Review this copy and its data before it goes to the Trash." : {},
-    "Right-click anything in a project to add a rule. Rules apply on every scan." : {},
     "Rings" : {},
     "Rows" : {},
     "Run %lld maintenance task%@?" : {
@@ -2318,6 +2387,16 @@
     "Save Scan…" : {},
     "Save this scan to look at later, on this Mac or another" : {},
     "Saved Filters" : {},
+    "Saved disk map scans take %@ on disk; large lists kept on disk now take %@." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Saved disk map scans take %1$@ on disk; large lists kept on disk now take %2$@."
+          }
+        }
+      }
+    },
     "Saved filters remember these criteria and the name filter for reuse. They don't save, move or delete files." : {},
     "Saved results" : {},
     "Saved results by feature" : {},
@@ -2343,7 +2422,7 @@
     "Scan in the background" : {},
     "Scan in the background Notify me when the disk is nearly full Notify me when a scan finds a lot to clean Notify me when an app in the Trash left things behind Notify me when an app keeps the processor busy notifications alerts schedule daily weekly" : {},
     "Scan speed" : {},
-    "Scan speed Gentle Light Balanced Full Default Reset threads processor power" : {},
+    "Scan speed Gentle Light Balanced Full Default Reset threads processor power Large results memory disk spill saved scans history points Responsiveness Automatic Gentle Light Fast Maximum Hyperspeed no limits interface cache charts icons repaint Low Power Free memory when macOS runs low pressure release" : {},
     "Scanned %@" : {},
     "Scanned 2 minutes ago" : {},
     "Scanning" : {},
@@ -2402,6 +2481,7 @@
     "Settings are chosen. A reinstall would start from defaults." : {},
     "Settings files and window states go to the Trash; the rest refreshes in place." : {},
     "Settings…" : {},
+    "Shared" : {},
     "Shared data is chosen. The developer's other apps may use it too." : {},
     "Shared updater components (%lld)" : {},
     "Shared · system Library" : {},
@@ -2416,6 +2496,7 @@
         }
       }
     },
+    "Shares its space with a file outside this list: moving it frees about %@." : {},
     "Shell-Quoted Path" : {},
     "Show" : {},
     "Show %@" : {},
@@ -2444,6 +2525,7 @@
     "Show one hidden card or bring them all back" : {},
     "Show only items by the date they last changed" : {},
     "Show or Hide Columns" : {},
+    "Show or Hide Sidebar" : {},
     "Show or hide columns. You can also right-click a column heading." : {},
     "Show the chart beside the list" : {},
     "Show, hide, resize and reorder cards" : {},
@@ -2451,6 +2533,7 @@
     "Shown in overview" : {},
     "Shrank" : {},
     "Shrank since %@" : {},
+    "Sidebar" : {},
     "Similar Photos" : {},
     "Similar photos" : {},
     "Since the previous reading" : {},
@@ -2484,8 +2567,6 @@
     "Startup Items" : {},
     "Startup items" : {},
     "Stop" : {},
-    "Stop Cleaning These" : {},
-    "Stop Cleaning This" : {},
     "Stop Keeping" : {},
     "Stop Looking Here" : {},
     "Stop Looking In" : {},
@@ -2515,7 +2596,7 @@
     "System Clean" : {},
     "System Clean Keep List" : {},
     "System Clean's keep list couldn't be read, so nothing system-wide was removed." : {},
-    "System Clean, Optimize's administrator tasks and system-wide app leftovers run as root. macOS asks for an administrator's password each time one runs; nothing is installed and nothing keeps running." : {},
+    "System Clean, Optimize's administrator tasks and protected app moves need administrator rights. The optional helper lets macOS approve this once. Without it, macOS asks when each task runs." : {},
     "System Items" : {},
     "System Tasks" : {},
     "System caches and logs are already tidy." : {},
@@ -2544,7 +2625,6 @@
         }
       }
     },
-    "The %@ largest matches in the whole scan" : {},
     "The %lld chosen leftover%@ (%@) go to the Trash. The app already there stays untouched. Ownership and keep rules are checked again. You can undo right after." : {
       "localizations" : {
         "en" : {
@@ -2570,6 +2650,7 @@
         }
       }
     },
+    "The app changed after the review. Nothing was moved." : {},
     "The app changed before Finder could move it. Refresh the review. No app data was moved." : {},
     "The app changed before it could be unlocked. Refresh the review." : {},
     "The app changed, already quit, or couldn't accept the request. No other process was asked to quit." : {},
@@ -2590,6 +2671,8 @@
     "The folder couldn't be read." : {},
     "The folders searched for duplicates" : {},
     "The folders searched for installers" : {},
+    "The helper handles approved app moves and system tasks without asking for an administrator password for every action. macOS asks you to approve it once. You still choose and confirm what MyMole removes. You can disable it in Settings → System Tasks.\n\nWithout the helper, this action continues with macOS's administrator prompt." : {},
+    "The helper isn't available in this copy of MyMole." : {},
     "The installed apps couldn't be read, so no leftovers were offered. Reload Apps and try again." : {},
     "The installed apps couldn't be read, so nothing was moved." : {},
     "The keep list couldn't be read" : {},
@@ -2599,6 +2682,7 @@
     "The last few minutes" : {},
     "The last scans found: %@." : {},
     "The move was stopped or the app started. Nothing was moved." : {},
+    "The optional helper handles administrator tasks after macOS approval. You still review and confirm removals. App Management and Full Disk Access are separate macOS permissions; enabling the helper doesn't grant them." : {},
     "The privileged tool didn't finish (code %d)." : {},
     "The privileged tool gave an unexpected answer." : {},
     "The program it starts isn't there any more." : {},
@@ -2614,9 +2698,12 @@
     "Theme" : {},
     "Themes change the surfaces and the accent; text and warning colours stay the system's. Spacious gives margins, rows and the gaps between columns more room. Compact fits the most on screen. Table lines separate the rows of every list, or its rows and columns; without them, file lists are striped." : {},
     "These components may serve other Google products or installations. They aren't attributed exclusively to this app and aren't separate removal choices here." : {},
+    "These items and everything inside them stay, even when a parent is chosen for cleanup. Path rules also protect moves to the Trash in other views." : {},
+    "These names are excluded inside Projects, including their contents. To protect a folder from Trash moves in other views too, whitelist its specific path." : {},
     "They appear here as the scan finds them." : {},
     "They couldn't be read through, or changed while they were read, so whether they have copies isn't known. Search again to try them." : {},
     "This Folder" : {},
+    "This adds a cleanup suggestion on future scans. Nothing is removed now. Source control, protected locations and whitelist rules still take priority." : {},
     "This app" : {},
     "This app and the %lld chosen data item%@ go to the Trash. Open at Login is turned off. MyMole then quits. You can restore them with Put Back in Finder's Trash; in-app Undo isn't available after quitting." : {
       "localizations" : {
@@ -2633,7 +2720,9 @@
     "This copy is included when you uninstall MyMole." : {},
     "This copy is kept and cannot be uninstalled." : {},
     "This copy is kept, so it stays." : {},
+    "This copy of MyMole changed after the review. Nothing was moved. Open the review again." : {},
     "This copy of MyMole changed on disk. Open the installed app and try again." : {},
+    "This copy of MyMole couldn't be verified. Nothing was moved. Open the installed app and try again." : {},
     "This copy of MyMole is kept. Remove it from your Keep list before uninstalling it." : {},
     "This folder couldn't be fully read. Its previous scan stays." : {},
     "This folder has no files or folders in the current map." : {},
@@ -2710,6 +2799,7 @@
     "Uninstall this copy of MyMole?" : {},
     "Uninstalling…" : {},
     "Uninstall…" : {},
+    "Unpin" : {},
     "Unreadable" : {},
     "Untick" : {},
     "Untick %lld Selected" : {},
@@ -2726,6 +2816,26 @@
           "stringUnit" : {
             "state" : "new",
             "value" : "Unverified — use with caution. You chose %1$lld unverified match%2$@. Ownership couldn't be confirmed; other apps may use this data. Continue only if you reviewed the selected paths. They go to the Trash, where you can restore them."
+          }
+        }
+      }
+    },
+    "Up to %@ in memory, then disk · %@ of saved scans · a history point at most every %lld h" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Up to %1$@ in memory, then disk · %2$@ of saved scans · a history point at most every %3$lld h"
+          }
+        }
+      }
+    },
+    "Up to %lld scans at once · %lld threads for a scan you wait on" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Up to %1$lld scans at once · %2$lld threads for a scan you wait on"
           }
         }
       }
@@ -2758,6 +2868,7 @@
     "Wait for the search to finish." : {},
     "Waiting for a scan slot" : {},
     "Waiting for another operation…" : {},
+    "Waiting for approval in Login Items & Extensions." : {},
     "Waiting for macOS approval…" : {},
     "Weekly" : {},
     "What" : {},
@@ -2770,8 +2881,20 @@
     "What's on screen stays until you quit. After the next launch each pane scans afresh. Keep lists, project rules and History aren't touched." : {},
     "What's on the disk but isn't in this map" : {},
     "Wheel" : {},
+    "When macOS warns that memory is short, scans started ahead of time stop and icon and chart caches empty; when it's critical, a disk map that isn't on screen goes too and maps again when you open it. Nothing you're looking at, have chosen or can undo is touched. Worth turning on, at any step, if this Mac gets sluggish." : {},
     "Where your space went" : {},
     "While MyMole runs, also in the menu bar, when the Mac has time to spare. Scans only read; nothing is removed until you choose it." : {},
+    "Whitelist These %lld Items" : {},
+    "Whitelist everything named “%@”" : {},
+    "Whitelist excludes a folder and its contents, including when a parent is cleaned. Blacklist adds a cleanup suggestion; it doesn't delete or select anything. Pins keep apps and folders easy to reach and don't change protection. Right-click a folder to change these choices." : {},
+    "Whitelist excludes items and their contents from cleanup. Blacklist adds cleanup suggestions. Pinning is quick access only. Right-click a folder to change its rule; saved rules apply on every scan." : {},
+    "Whitelist project folders" : {},
+    "Whitelist — Never Clean This" : {},
+    "Whitelist — exclude from cleanup" : {},
+    "Whitelist “%@” in Every Project" : {},
+    "Whitelist, blacklist and pins" : {},
+    "Whitelist: %@" : {},
+    "Whitelisted — this folder and its contents stay during cleanup." : {},
     "Why This Was Found…" : {},
     "Wide" : {},
     "Widen the window to change card width." : {},
@@ -2800,7 +2923,7 @@
     "Your project rules couldn't be read" : {},
     "Your project rules couldn't be read (%@). Nothing is moved until they can be." : {},
     "Your rules" : {},
-    "administrator password root helper privileged" : {},
+    "administrator password root helper privileged enable disable approval Login Items Extensions" : {},
     "alike another picture here, not the best itself" : {},
     "apps · %@ on disk" : {},
     "apps · finding the first results…" : {},
@@ -2810,6 +2933,7 @@
     "could go" : {},
     "could go · %@ outside project folders" : {},
     "disk used" : {},
+    "every one at Hyperspeed" : {},
     "excluded skipped folders scan again browse" : {},
     "failed" : {},
     "found in %@ items" : {},
@@ -2860,6 +2984,7 @@
     "leftover%@: the program is gone" : {},
     "loaded now, not running" : {},
     "looks the same as the best" : {},
+    "macOS approval when administrator access is needed" : {},
     "macOS apps stay installed; only resetting their caches and settings is offered." : {},
     "macOS can require App Management permission to remove other apps. Full Disk Access is a separate permission. Allow the copy of MyMole you're using in Privacy & Security → App Management; file permissions or administrator approval can also affect a move." : {},
     "macOS denied the move of a system-owned app. Finder may need administrator approval. Check App Management and Finder Automation, then try again." : {},

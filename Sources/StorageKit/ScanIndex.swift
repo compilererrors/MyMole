@@ -20,10 +20,13 @@ public struct ScanIndex: Sendable {
     public let rootPath: String
     /// More was in the scan than the index holds.
     public private(set) var truncated = false
+    /// The most entries this index could hold.
+    public let limit: Int
     public static let standardLimit = 400_000
 
     public init(_ root: Folder, limit: Int = standardLimit, stop: () -> Bool = { false }) {
         rootPath = root.path
+        self.limit = limit
         // Breadth first, so a cut drops the deepest, not a whole branch.
         var queue: [(Folder, Int32)] = [(root, -1)]
         var head = 0

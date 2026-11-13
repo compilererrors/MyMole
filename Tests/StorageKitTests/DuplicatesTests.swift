@@ -54,6 +54,82 @@ import Testing
         #expect(group.freed(going: [a.path, sibling.path]).values.reduce(0, +) == 1_024)
     }
 
+    @Test func theVolumeTellsAClonesFamilyFromAnIndependentCopy() throws {
+        let box = try Sandbox()
+        try box.file("a.bin", bytes: 300_000)
+        try clone(box, "a.bin", to: "a clone.bin")
+        try copy(box, "a.bin", to: "a copy.bin")
+        let original = try #require(FileSpace.sharing(box.path + "/a.bin"))
+        let cloned = try #require(FileSpace.sharing(box.path + "/a clone.bin"))
+        let copied = try #require(FileSpace.sharing(box.path + "/a copy.bin"))
+        #expect(original.cloneID != nil && cloned.cloneID == original.cloneID && copied.cloneID != original.cloneID)
+        #expect(original.cloneCount == 2 && cloned.cloneCount == 2 && copied.cloneCount == 1)
+        // Clones hold nothing of their own; the copy says it shares nothing.
+        #expect(original.privateBytes == 0 && cloned.privateBytes == 0 && copied.privateBytes == nil)
+    }
+
+    @Test func clonesOfAFileOutsideTheSearchFreeNothing() throws {
+        let box = try Sandbox()
+        // The original lies outside the searched folders, as a simulator
+        // runtime or a cache would; its clones and one copy are searched.
+        try box.file("Library/model.bin", bytes: 300_000)
+        try clone(box, "Library/model.bin", to: "Documents/model.bin")
+        try clone(box, "Library/model.bin", to: "Downloads/model.bin")
+        try copy(box, "Library/model.bin", to: "Desktop/model.bin")
+        let roots = ["Documents", "Downloads", "Desktop"].map { box.path + "/" + $0 }
+        let g = try #require(DuplicateFinder.find(in: roots, minimum: 100_000, workers: 1).groups.first)
+        let documents = box.path + "/Documents/model.bin", downloads = box.path + "/Downloads/model.bin"
+        let desktop = box.path + "/Desktop/model.bin"
+        #expect(g.files.count == 3)
+        #expect(g.clones(of: documents) == 1)
+        // Both clones going leave the original's blocks where they are.
+        #expect(g.freed(going: [documents, downloads]).values.reduce(0, +) == 0)
+        #expect(g.sharedOutside(documents) == 0 && g.sharedOutside(downloads) == 0 && g.sharedOutside(desktop) == nil)
+        // Only the independent copy is spare: a clone staying costs nothing.
+        #expect(g.freed(going: [desktop]) == [desktop: g.bytes])
+        #expect(g.spare == g.bytes)
+    }
+
+    @Test func aCopyThatSharesPartOfItsBlocksFreesOnlyItsOwn() throws {
+        let box = try Sandbox()
+        try box.file("Documents/a.bin", bytes: 1_048_576)
+        try clone(box, "Documents/a.bin", to: "Downloads/a.bin")
+        // The same bytes written over part of the clone: still identical,
+        // but those blocks are now its own while the rest stay shared.
+        let path = box.path + "/Downloads/a.bin"
+        let region = try Data(contentsOf: box.url.appending(path: "Documents/a.bin"))[0..<131_072]
+        let fd = open(path, O_WRONLY)
+        #expect(fd >= 0)
+        let written = region.withUnsafeBytes { pwrite(fd, $0.baseAddress, region.count, 0) }
+        #expect(fsync(fd) == 0 && close(fd) == 0 && written == region.count)
+        let g = try #require(DuplicateFinder.find(in: [box.path], minimum: 100_000, workers: 1).groups.first)
+        let own = try #require(g.files.first { $0.path == path }?.privateBytes)
+        #expect(own >= 131_072 && own < g.bytes / 2)
+        #expect(g.clones(of: path) == 0)
+        #expect(g.freed(going: [path]) == [path: own])
+        #expect(g.sharedOutside(path) == own)
+        #expect(g.spare < g.bytes / 2)
+    }
+
+    @Test func aFamilyCountedWholeFreesOneCopyOnceAllOfItGoes() {
+        func file(_ name: String, clone: UInt64, count: UInt32?, own: Int64?) -> DuplicateFile {
+            DuplicateFile(path: "/synthetic/\(name)", modified: .distantPast, inode: UInt64(name.hashValue.magnitude), device: 1,
+                          cloneID: clone, cloneCount: count, privateBytes: own)
+        }
+        let a = file("a", clone: 7, count: 2, own: 0), b = file("b", clone: 7, count: 2, own: 0)
+        let elsewhere = file("c", clone: 9, count: 3, own: 0), d = file("d", clone: 9, count: 3, own: 0)
+        let copy = file("e", clone: 11, count: 1, own: nil)
+        let group = DuplicateGroup(length: 4_096, bytes: 4_096, digest: "synthetic", files: [a, b, elsewhere, d, copy])
+        #expect(group.freed(going: [a.path, b.path]).values.reduce(0, +) == 4_096)
+        #expect(group.sharedOutside(a.path) == nil)
+        // A third file of family 9 isn't here, so c and d moving frees nothing.
+        #expect(group.freed(going: [elsewhere.path, d.path]) == [elsewhere.path: 0, d.path: 0])
+        #expect(group.sharedOutside(d.path) == 0)
+        #expect(group.freed(going: [copy.path]) == [copy.path: 4_096])
+        // Family 9 stays, family 7 and the copy go.
+        #expect(group.spare == 8_192)
+    }
+
     private func rel(_ box: Sandbox, _ group: DuplicateGroup) -> [String] {
         group.files.map { String($0.path.dropFirst(box.path.count + 1)) }.sorted()
     }

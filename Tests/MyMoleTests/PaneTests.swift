@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import Testing
 
@@ -45,5 +46,27 @@ import Testing
         #expect(StorageView.listWidth(saved: 500, total: 1200) == 500)
         #expect(StorageView.listWidth(saved: 100, total: 1200) == DS.Size.inspectorWidth)
         #expect(StorageView.listWidth(saved: 2000, total: 1200) == 1200 - DS.Size.chartMinWidth - DS.Size.splitHandle)
+    }
+
+    /// Dragging the divider moves both panes on every pointer event but
+    /// saves the width once, when the drag ends; a cancelled drag saves
+    /// nothing. A save on every event drew the whole pane anew each frame.
+    @MainActor @Test func draggingTheDividerSavesTheWidthOnlyWhenTheDragEnds() throws {
+        var saved: [Double] = []
+        let controller = ListSplitController(chart: AnyView(Color.clear), list: AnyView(Color.clear))
+        controller.commit = { saved.append($0) }
+        controller.view.frame = NSRect(x: 0, y: 0, width: 1_200, height: 600)
+        controller.view.layoutSubtreeIfNeeded()
+        let list = controller.list.view
+        let start = list.frame.width
+        for step in 1...30 { controller.handle.onChange(CGSize(width: -Double(step) * 2, height: 0)) }
+        #expect(saved.isEmpty)
+        #expect(abs(list.frame.width - (start + 60)) < 0.5)
+        #expect(abs(controller.chart.view.frame.width + DS.Size.splitHandle + list.frame.width - 1_200) < 0.5)
+        controller.handle.onEnd(.zero)
+        #expect(saved == [Double(start + 60)])
+        controller.handle.onChange(CGSize(width: -100, height: 0))
+        controller.handle.onCancel()
+        #expect(saved.count == 1 && abs(list.frame.width - (start + 60)) < 0.5)
     }
 }

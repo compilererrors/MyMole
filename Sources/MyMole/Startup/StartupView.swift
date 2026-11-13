@@ -40,20 +40,8 @@ struct StartupView: View {
             }
         }
         .paneToolbar("Startup Items", subtitle: "What starts by itself, and the plug-ins apps added") {
-            ToolbarItem(placement: .principal) {
-                Picker("Show", selection: $show) {
-                    ForEach(Show.allCases) { Text($0.title).tag($0) }
-                }
-                .pickerStyle(.segmented)
-            }
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    model.load()
-                } label: {
-                    Label("Reload", systemImage: "arrow.clockwise")
-                }
-                .help("Read the launch folders again")
-            }
+            PaneTool.choice("startup.show", "Show", selection: $show, options: Show.allCases.map { ($0, $0.title) })
+            PaneTool.button("startup.reload", "Reload", symbol: "arrow.clockwise", help: "Read the launch folders again") { model.load() }
         }
         .actionConfirmation(
             String(localized: "Move \(model.chosen.count.formatted()) startup item\(model.chosen.count == 1 ? "" : "s") to the Trash?"),

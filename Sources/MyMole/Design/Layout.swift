@@ -11,12 +11,10 @@ import SwiftUI
 // DSNotice is for things that need attention (errors, a tip with an
 // action); progress and freshness live in the status strip instead.
 
-/// A scrolling page with the app's margins, its content centred at
-/// `DS.Size.pageMaxWidth`.
+/// A scrolling workspace, with an explicit readable width for prose.
 struct DSPage<Content: View>: View {
     enum Width { case readable, full }
 
-    /// Not read: every page has the same width.
     var width: Width = .full
     @ViewBuilder var content: Content
 
@@ -25,7 +23,7 @@ struct DSPage<Content: View>: View {
             VStack(alignment: .leading, spacing: DS.Space.section) {
                 content
             }
-            .frame(maxWidth: DS.Size.pageMaxWidth, alignment: .leading)
+            .frame(maxWidth: width == .readable ? DS.Size.pageMaxWidth : .infinity, alignment: .leading)
             .padding(.horizontal, DS.Space.page)
             .padding(.vertical, DS.Space.lg)
             .frame(maxWidth: .infinity)
@@ -244,6 +242,7 @@ struct DSActionGroup<Leading: View, Trailing: View>: View {
                     .frame(maxWidth: .infinity, alignment: .trailing)
             }
         }
+        .withoutAlignmentGuides()
     }
 }
 
@@ -354,6 +353,7 @@ struct DSPaneHeader<Summary: View, Actions: View, Strip: View, Detail: View>: Vi
                         actions
                     }
                 }
+                .withoutAlignmentGuides()
             }
             // One line as long as the facts fit; a narrow window wraps them
             // instead of cutting any off.
@@ -364,7 +364,7 @@ struct DSPaneHeader<Summary: View, Actions: View, Strip: View, Detail: View>: Vi
             }
             detail
         }
-        .frame(maxWidth: controlsTitle == nil ? DS.Size.pageMaxWidth : .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, DS.Space.page)
         .padding(.top, DS.Space.lg + 2)
         .padding(.bottom, DS.Space.md + 2)

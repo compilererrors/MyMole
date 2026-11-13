@@ -17,20 +17,24 @@ struct ColumnsChart: View {
             let colWidth = geo.size.width / CGFloat(Self.levels)
             let h = geo.size.height
             Canvas { ctx, _ in
+                var batch = ShapeBatch()
+                var labels: [(Arc, CGRect, Color)] = []
                 for arc in arcs {
                     let r = rect(arc, colWidth: colWidth, height: h)
                     guard r.height >= 1 else { continue }
                     let color = ChartColors.color(for: arc.segment, branch: arc.branch, depth: arc.depth, byKind: model.colorByKind)
                     let hot = model.isHighlighted(arc.segment)
-                    let shape = Path(roundedRect: r.insetBy(dx: 1, dy: 0.5), cornerRadius: min(4, r.height / 3))
                     let fill = hot ? color.mix(with: .white, by: 0.3) : color
-                    ctx.fill(shape, with: .color(fill))
-                    if r.height >= 20 {
-                        ChartLabel.draw(
-                            arc.segment.name,
-                            detail: ByteCountFormatter.string(fromByteCount: arc.segment.size, countStyle: .file),
-                            in: r.insetBy(dx: 6, dy: 3), on: fill, emphasis: arc.depth == 1, ctx: ctx)
-                    }
+                    batch.add(Path(roundedRect: r.insetBy(dx: 1, dy: 0.5), cornerRadius: min(4, r.height / 3)), color: fill, edged: false)
+                    if r.height >= 20 { labels.append((arc, r, fill)) }
+                }
+                // Blocks never overlap, so their labels can follow all fills.
+                batch.draw(in: ctx, edge: nil)
+                for (arc, r, fill) in labels {
+                    ChartLabel.draw(
+                        arc.segment.name,
+                        detail: ByteCountFormatter.string(fromByteCount: arc.segment.size, countStyle: .file),
+                        in: r.insetBy(dx: 6, dy: 3), on: fill, emphasis: arc.depth == 1, ctx: ctx)
                 }
             }
             .dsCrossfade(value: drawing)

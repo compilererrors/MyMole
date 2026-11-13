@@ -179,7 +179,7 @@ public enum ProjectArtifacts {
                     default: sub.name
                     }
                 groups[key, default: (c, [])].1.append(
-                    FootprintEntry(path: sub.path, bytes: sub.size, modified: sub.latestChange, isDirectory: true))
+                    FootprintEntry(path: sub.path, bytes: sub.size, modified: sub.latestChange, isDirectory: true, reclaim: sub.reclaim))
                 claimed[top, default: 0] += sub.size
             }
         }

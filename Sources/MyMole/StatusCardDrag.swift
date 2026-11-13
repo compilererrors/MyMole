@@ -15,6 +15,13 @@ struct StatusCardDrag: Codable, Transferable, Sendable {
             && (target == nil || layout.visible.contains { $0.id == target })
     }
 
+    static func applying(_ items: [Self], to layout: StatusLayout, session: UUID, before target: StatusCardID?) -> StatusLayout? {
+        guard items.count == 1, let item = items.first, item.canMove(in: layout, session: session, before: target) else { return nil }
+        var changed = layout
+        changed.move(item.card, before: target)
+        return changed
+    }
+
     static var transferRepresentation: some TransferRepresentation {
         CodableRepresentation(contentType: contentType)
     }

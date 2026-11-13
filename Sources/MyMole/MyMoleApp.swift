@@ -9,8 +9,6 @@ struct MyMoleApp: App {
     @State private var app: AppModel
     @AppStorage(MenuBarSettings.showKey) private var showMenuBar = MenuBarSettings.showStandard
 
-    static let mainWindow = "main"
-
     init() {
         let model = AppModel()
         AppModel.live = model
@@ -18,16 +16,24 @@ struct MyMoleApp: App {
     }
 
     var body: some Scene {
-        // One main window: the app's scans, choices and Undo are shared
-        // state, so a second window would only show the same pane twice and
-        // leave commands without a clear target. New Window is left out below.
-        Window("MyMole", id: Self.mainWindow) {
-            RootView(app: app)
-                .task { app.prefetchScans() }
+        // The one main window is `MainWindow`, made by AppKit: the app's
+        // scans, choices and Undo are shared state, so a second window would
+        // only show the same pane twice and leave commands without a clear
+        // target. New Window is left out below. The menu bar item's scene
+        // carries the app's commands.
+        MenuBarExtra(isInserted: menuBarInserted) {
+            MenuBarPanel(app: app).disabled(app.leaving)
+        } label: {
+            MenuBarLabel(app: app)
         }
-        .defaultSize(width: 1240, height: 800)
+        .menuBarExtraStyle(.window)
         .commands {
             CommandGroup(replacing: .newItem) {}
+            // The window is AppKit's, so the sidebar command is the app's own.
+            CommandGroup(replacing: .sidebar) {
+                Button("Show or Hide Sidebar") { app.toggleSidebar?() }
+                    .keyboardShortcut("s", modifiers: [.command, .control])
+            }
             CommandGroup(replacing: .appSettings) { commandButton(.settings) }
             CommandGroup(replacing: .undoRedo) {
                 // Text fields keep their own Undo and Redo; elsewhere Undo
@@ -93,13 +99,6 @@ struct MyMoleApp: App {
                 }
             }
         }
-
-        MenuBarExtra(isInserted: menuBarInserted) {
-            MenuBarPanel(app: app).disabled(app.leaving)
-        } label: {
-            MenuBarLabel(app: app)
-        }
-        .menuBarExtraStyle(.window)
     }
 }
 
@@ -138,12 +137,21 @@ extension MyMoleApp {
 /// until its window is opened again or it's quit.
 final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
+        #if SMOKE
+        HitchLog.start()
+        #endif
         DialogKeyboardRegistry.shared.start()
         NSApp.servicesProvider = self
+        if let app = AppModel.live {
+            let window = MainWindow(app: app)
+            MainWindow.shared = window
+            app.openWindow = { window.show() }
+        }
         if LoginItem.startsInMenuBar(openedAtLogin: LoginItem.wasOpenedAtLogin(), menuBar: MenuBarSettings.show()) {
             startInMenuBar()
         } else {
             NSApp.setActivationPolicy(.regular)
+            MainWindow.shared?.show()
             NSApp.activate(ignoringOtherApps: true)
         }
         if Notifier.isAvailable { UNUserNotificationCenter.current().delegate = self }
@@ -168,19 +176,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         app.apps.open(urls)
     }
 
-    /// Opened by macOS at login: straight to the menu bar. The scene shows
-    /// its window as the launch ends, so it's closed now and again shortly
-    /// after, unless the user has asked for it meanwhile.
+    /// Opened by macOS at login: straight to the menu bar, with the window
+    /// left closed until the user asks for it.
     @MainActor private func startInMenuBar() {
         AppModel.live?.waitsInMenuBar = true
         NSApp.setActivationPolicy(.accessory)
-        Task { @MainActor in
-            for wait in [0, 50, 250, 700] {
-                try? await Task.sleep(for: .milliseconds(wait))
-                guard AppModel.live?.waitsInMenuBar == true else { return }
-                for window in NSApp.windows where Self.isDocument(window) && window.isVisible { window.close() }
-            }
-        }
     }
 
     /// The last window of the app's own closing while the menu bar item is
@@ -224,6 +224,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         return true
     }
 
+    /// Large results kept on disk belong to this run only.
+    func applicationWillTerminate(_ notification: Notification) { SpillTable.removeAll() }
+
     /// A quit during a move or removal stops it before its next item and
     /// waits for the job to end, so its history record is written. A job
     /// that doesn't end within the time limit, such as one waiting for an
@@ -257,12 +260,16 @@ struct RootView: View {
     @AppStorage(MenuBarSettings.showKey) private var showMenuBar = MenuBarSettings.showStandard
     /// Read once per window: the first start asks about the menu bar item.
     @State private var askMenuBar = MenuBarSettings.shouldAsk()
+    @State private var columns = NavigationSplitViewVisibility.all
+
+    private func toggleSidebar() {
+        withAnimation(Motion.snappy) { columns = columns == .detailOnly ? .all : .detailOnly }
+    }
 
     private var palette: Palette { (ThemeFamily(rawValue: theme) ?? .standard).palette }
-    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        NavigationSplitView {
+        NavigationSplitView(columnVisibility: $columns) {
             List(selection: $app.pane) {
                 ForEach(Pane.groups, id: \.0) { group, panes in
                     Section(group) {
@@ -287,13 +294,14 @@ struct RootView: View {
             .safeAreaInset(edge: .bottom) { editionBadge }
             .frame(minWidth: 210)
         } detail: {
-            detail
-                .focusSection()
-                .background(palette.workspace.color)
-                .safeAreaInset(edge: .top, spacing: 0) {
-                    if askMenuBar { MenuBarQuestion(asking: $askMenuBar) }
-                }
-                .frame(minWidth: 760, minHeight: 560)
+            PaneFrame(minWidth: 760, minHeight: 560) {
+                detail
+                    .focusSection()
+                    .background(palette.workspace.color)
+                    .safeAreaInset(edge: .top, spacing: 0) {
+                        if askMenuBar { MenuBarQuestion(asking: $askMenuBar) }
+                    }
+            }
         }
         .tint(palette.accent.color)
         // A theme reaches every view through the environment: they redraw,
@@ -301,6 +309,7 @@ struct RootView: View {
         .environment(\.palette, palette)
         .environment(\.tableLines, TableLines(rawValue: lines) ?? .standard)
         .environment(\.layoutDensity, Density(rawValue: density) ?? .standard)
+        .controlSize((Density(rawValue: density) ?? .standard) == .compact ? .small : .regular)
         .onChange(of: density) { _, value in Density.current = Density(rawValue: value) ?? .standard }
         .environment(\.findRequest, app.findRequest)
         // For Back and Forward in every pane's toolbar (`paneToolbar`).
@@ -318,16 +327,20 @@ struct RootView: View {
         }
         // The window's appearance, which its AppKit tables follow too.
         .preferredColorScheme((AppearanceMode(rawValue: mode) ?? .system).colorScheme)
-        // Each pane draws its own title in the toolbar (see `paneToolbar`).
-        .toolbar(removing: .title)
+        // The window's toolbar is AppKit's own (`MainToolbar`); each pane
+        // hands it its title and tools (see `paneToolbar`).
+        .background(MainToolbarHost(app: app, back: app.command(.back), forward: app.command(.forward), toggleSidebar: toggleSidebar))
         // Re-probe whenever the app comes forward — the user is most likely
         // returning from System Settings after granting access.
         .liveRefresh(every: .seconds(2), events: []) {
             app.recheckDiskAccess()
+            #if !APPSTORE
+            app.privileged.helper?.refresh()
+            #endif
             await app.diskAccess.job?.value
         }
         .task {
-            app.openWindow = { openWindow(id: MyMoleApp.mainWindow) }
+            app.toggleSidebar = { toggleSidebar() }
             app.startMonitoring()
             if askMenuBar { MenuBarSettings.markAsked() }
         }

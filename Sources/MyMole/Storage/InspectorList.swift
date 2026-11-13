@@ -146,17 +146,10 @@ struct InspectorList: View {
                     browseCriteria
                 }
             }
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: DS.Space.sm) {
-                    folderViewControl
-                    Spacer(minLength: 0)
-                    sortControl
-                    TableColumnsButton(scope: columnScope).fixedSize()
-                }
-                VStack(alignment: .leading, spacing: DS.Space.sm) {
-                    folderViewControl
-                    HStack(spacing: DS.Space.sm) { sortControl; TableColumnsButton(scope: columnScope).fixedSize() }
-                }
+            DSFlow(spacing: DS.Space.sm) {
+                folderViewControl
+                sortControl
+                TableColumnsButton(scope: columnScope).fixedSize()
             }
             DSFlow(spacing: DS.Space.xs) {
                 if let kind = model.browseFilter.kind {
@@ -484,7 +477,8 @@ struct ScanHit: Sendable, Identifiable {
 private struct WholeScanSearch: View {
     @Bindable var model: StorageModel
     let index: ScanIndex
-    @State private var result = OffMain<(hits: [ScanHit], more: Bool)>(([], false))
+    /// The matches in memory, or on disk once they're past the memory set in Large results.
+    @State private var result = OffMain<(hits: [ScanHit], more: Bool, spill: SpillTable?)>(([], false, nil))
 
     private struct Key: Equatable {
         let filter: BrowseFilter
@@ -493,78 +487,130 @@ private struct WholeScanSearch: View {
 
     var body: some View {
         // What a move since took out of the map isn't offered.
-        let hits = result.value.hits.filter { h in model.root.map { StorageModel.holds($0, h.path) } ?? false }
+        let hits = result.value.hits
         let byID = Dictionary(hits.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         VStack(spacing: 0) {
-            FileTable(
-                rows: hits.map(row),
-                columns: [.name, .size, .modified, .kind, .location],
-                hiddenByDefault: [.modified, .kind],
-                autosave: "diskMap.search",
-                sortRequest: model.browseSort,
-                selection: $model.selection,
-                marks: model.opened == nil ? Set(model.marked.keys) : nil,
-                onToggleMark: { id in byID[id].map { model.toggle($0.marked) } },
-                onOpen: { ids in
-                    let chosen = ids.compactMap { byID[$0] }
-                    if chosen.count == 1, chosen[0].isFolder {
-                        model.browseFilter = BrowseFilter()
-                        model.show(folder: chosen[0].path)
-                    } else if !chosen.isEmpty {
-                        FileActions.reveal(chosen.map(\.path))
-                    }
-                },
-                onMark: { ids in model.mark(ids.compactMap { byID[$0] }.map(\.marked)) },
-                onSetMarks: { ids, checked in
-                    if checked { model.mark(ids.compactMap { byID[$0] }.map(\.marked)) }
-                    else { model.setListedMarks(ids.compactMap { byID[$0]?.marked }, checked: false) }
-                },
-                menu: { ids in
-                    let chosen = ids.compactMap { byID[$0] }
-                    guard !chosen.isEmpty else { return [] }
-                    return [
-                        .quickLook,
-                        .action(String(localized: "Show in Map")) {
-                            let target = chosen[0]
+            if let spill = result.value.spill {
+                spilledMatches(spill)
+            } else {
+                FileTable(
+                    rows: hits.map(row),
+                    columns: [.name, .size, .modified, .kind, .location],
+                    hiddenByDefault: [.modified, .kind],
+                    autosave: "diskMap.search",
+                    sortRequest: model.browseSort,
+                    selection: $model.selection,
+                    marks: model.opened == nil ? Set(model.marked.keys) : nil,
+                    onToggleMark: { id in byID[id].map { model.toggle($0.marked) } },
+                    onOpen: { ids in
+                        let chosen = ids.compactMap { byID[$0] }
+                        if chosen.count == 1, chosen[0].isFolder {
                             model.browseFilter = BrowseFilter()
-                            model.show(folder: target.isFolder ? target.path : (target.path as NSString).deletingLastPathComponent, select: target.isFolder ? nil : target.path)
-                        },
-                        .divider,
-                        .action(String(localized: "Choose for Removal")) { model.mark(chosen.map(\.marked)) },
-                        .divider,
-                    ] + FileActions.menu(chosen.map(\.path))
-                })
-            .overlay {
-                if hits.isEmpty, !result.working {
-                    ContentUnavailableView("No Matching Items", systemImage: "line.3.horizontal.decrease",
-                        description: Text("Adjust or clear the filters above to see more files and folders."))
-                        .allowsHitTesting(false)
+                            model.show(folder: chosen[0].path)
+                        } else if !chosen.isEmpty {
+                            FileActions.reveal(chosen.map(\.path))
+                        }
+                    },
+                    onMark: { ids in model.mark(ids.compactMap { byID[$0] }.map(\.marked)) },
+                    onSetMarks: { ids, checked in
+                        if checked { model.mark(ids.compactMap { byID[$0] }.map(\.marked)) }
+                        else { model.setListedMarks(ids.compactMap { byID[$0]?.marked }, checked: false) }
+                    },
+                    menu: { ids in
+                        let chosen = ids.compactMap { byID[$0] }
+                        guard !chosen.isEmpty else { return [] }
+                        return [
+                            .quickLook,
+                            .action(String(localized: "Show in Map")) {
+                                let target = chosen[0]
+                                model.browseFilter = BrowseFilter()
+                                model.show(folder: target.isFolder ? target.path : (target.path as NSString).deletingLastPathComponent, select: target.isFolder ? nil : target.path)
+                            },
+                            .divider,
+                            .action(String(localized: "Choose for Removal")) { model.mark(chosen.map(\.marked)) },
+                            .divider,
+                        ] + FileActions.menu(chosen.map(\.path))
+                    })
+                .overlay {
+                    if hits.isEmpty, result.value.spill == nil, !result.working {
+                        ContentUnavailableView("No Matching Items", systemImage: "line.3.horizontal.decrease",
+                            description: Text("Adjust or clear the filters above to see more files and folders."))
+                            .allowsHitTesting(false)
+                    }
                 }
             }
             Divider()
             VStack(alignment: .leading, spacing: 1) {
-                DSText(result.value.more
-                    ? String(localized: "The \(hits.count.formatted()) largest matches in the whole scan")
-                    : String(localized: "\(hits.count.formatted()) found in the whole scan"), .metadata)
-                DSText(index.truncated
-                    ? String(localized: "Files under 1 MB are counted per folder, not searched; this scan is so big that only its \(ScanIndex.standardLimit.formatted()) biggest folders and files are searched.")
-                    : String(localized: "Files under 1 MB are counted per folder, not searched."), .metadata)
+                DSText(String(localized: "\((result.value.spill?.count ?? hits.count).formatted()) found in the whole scan"), .metadata)
+                DSText(String(localized: "Files under 1 MB are counted per folder, not searched."), .metadata)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, DS.Space.md)
             .padding(.vertical, DS.Space.sm)
         }
         .task(id: Key(filter: model.browseFilter, revision: model.revision)) {
-            let (index, filter) = (index, model.browseFilter)
+            let (index, filter, root) = (index, model.browseFilter, model.root)
+            let (budget, base) = (model.largeResultBudget(), model.spillBase)
             await result.update(count: index.entries.count) {
-                let r = index.search(filter.query) { e in
+                // Every match, however many; only what's still in the map
+                // after a move, checked here rather than on every redraw.
+                let r = index.search(filter.query, limit: .max) { e in
                     (filter.kind == nil || e.kind == filter.kind) && filter.date.matches(e.modified)
                 }
-                return (r.found.map { i in
+                let hits = r.found.compactMap { i -> ScanHit? in
                     let e = index.entries[i]
-                    return ScanHit(path: index.path(i), name: e.name, size: e.size, modified: e.modified, kind: e.kind, isFolder: e.isFolder)
-                }, r.more)
+                    let path = index.path(i)
+                    guard let root, StorageModel.holds(root, path) else { return nil }
+                    return ScanHit(path: path, name: e.name, size: e.size, modified: e.modified, kind: e.kind, isFolder: e.isFolder)
+                }
+                // Past the budget the matches go to disk; a failed write keeps them in memory.
+                if let budget, ResultSize.memoryCost(pathBytes: hits.reduce(0) { $0 + $1.path.utf8.count }, rows: hits.count) > budget,
+                   let spill = try? SpillTable(writing: hits.lazy.map {
+                       SpillTable.Row(path: $0.path, size: $0.size, modified: $0.modified, kind: $0.kind, isFolder: $0.isFolder)
+                   }, in: base) {
+                    return ([], r.more, spill)
+                }
+                return (hits, r.more, nil)
             }
+        }
+    }
+
+    /// The matches kept on disk: the same choices, read a page at a time.
+    @ViewBuilder private func spilledMatches(_ spill: SpillTable) -> some View {
+        PagedFileTable(
+            table: spill, columns: [.name, .size, .modified, .kind, .location], hiddenByDefault: [.modified, .kind],
+            autosave: "diskMap.search", filterKey: AnyHashable(ObjectIdentifier(spill)), keep: { _ in true },
+            selection: $model.selection,
+            marks: model.opened == nil ? Set(model.marked.keys) : nil,
+            onToggleMark: { r in model.toggle(Marked(path: r.path, name: r.name, size: r.size, isFolder: r.isFolder)) },
+            onOpen: { paths in
+                if paths.count == 1, let path = paths.first, model.root?.find(path: path) != nil {
+                    model.browseFilter = BrowseFilter()
+                    model.show(folder: path)
+                } else {
+                    FileActions.reveal(paths)
+                }
+            },
+            menu: { ids in
+                guard !ids.isEmpty else { return [] }
+                return [
+                    .action(String(localized: "Choose for Removal")) { chooseSpilled(Set(ids), from: spill) },
+                    .divider,
+                ] + FileActions.menu(ids)
+            })
+    }
+
+    /// Chooses the matches whose paths are in `paths`, read from the table off the main thread.
+    private func chooseSpilled(_ paths: Set<String>, from spill: SpillTable) {
+        Task {
+            let chosen = await Task.detached(priority: .userInitiated) { () -> [Marked] in
+                (0..<spill.count).compactMap { i in
+                    guard let r = spill.row(at: i), paths.contains(r.path) else { return nil }
+                    return Marked(path: r.path, name: r.name, size: r.size, isFolder: r.isFolder)
+                }
+            }.value
+            guard result.value.spill === spill else { return }
+            model.mark(chosen)
         }
     }
 

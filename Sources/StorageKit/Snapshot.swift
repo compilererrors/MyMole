@@ -225,14 +225,15 @@ public enum SnapshotStore {
         .map(\.1)
     }
 
-    /// How often a scan nobody asked for may add to the history.
+    /// How often a scan nobody asked for may add to the history, below Hyperspeed.
     public static let unattendedInterval: TimeInterval = 6 * 3_600
 
     /// Whether the newest saved scan of `rootPath` is old enough for an
-    /// unattended scan to be saved too.
-    public static func isDue(for rootPath: String, now: Date = Date(), base: URL = defaultBase) -> Bool {
-        guard let newest = history(for: rootPath, base: base).first else { return true }
-        return now.timeIntervalSince(newest.date) >= unattendedInterval
+    /// unattended scan to be saved too; at Hyperspeed every scan is.
+    public static func isDue(for rootPath: String, now: Date = Date(), base: URL = defaultBase,
+                             interval: TimeInterval = ResultSize.current().historyInterval) -> Bool {
+        guard interval > 0, let newest = history(for: rootPath, base: base).first else { return true }
+        return now.timeIntervalSince(newest.date) >= interval
     }
 
     public static func load(_ ref: SnapshotRef) -> Snapshot? {
@@ -257,12 +258,12 @@ public enum SnapshotStore {
         for old in history(for: key, base: base).dropFirst(keep) {
             try? FileManager.default.removeItem(at: old.url)
         }
-        keepWithin(totalLimit, base: base)
+        if let limit = ResultSize.current().savedScanLimit { keepWithin(limit, base: base) }
         return SnapshotRef(date: date(fromName: name) ?? s.date, url: url)
     }
 
     /// All saved scans together take at most this much, whatever the number
-    /// of folders mapped.
+    /// of folders mapped, at every result size below Hyperspeed.
     public static let totalLimit: Int64 = 200 * 1_048_576
 
     /// Removes the oldest saved scans, of any folder, until all of them fit

@@ -28,6 +28,10 @@ struct FootprintOutline: NSViewRepresentable {
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSScrollView, context: Context) -> CGSize? {
+        NativeListViewport.size(proposal)
+    }
+
     func makeNSView(context: Context) -> NSScrollView {
         let outline = FootprintOutlineView()
         outline.coordinator = context.coordinator
@@ -55,8 +59,7 @@ struct FootprintOutline: NSViewRepresentable {
             if c == .name { outline.outlineTableColumn = col }
         }
         outline.sortDescriptors = [NSSortDescriptor(key: FileColumn.size.rawValue, ascending: false)]
-        outline.autosaveName = "projects.detail"
-        outline.autosaveTableColumns = true
+        outline.persistColumns(as: "projects.detail")
         outline.dataSource = context.coordinator
         outline.delegate = context.coordinator
         outline.target = context.coordinator
@@ -602,19 +605,19 @@ struct FootprintOutline: NSViewRepresentable {
         }
 
         /// How a row's tick box looks: nil hides it.
-        private func look(_ n: Node) -> (check: NSControl.StateValue?, locked: Bool) {
-            guard let item = n.item else { return (nil, false) }
-            guard item.removable else { return (nil, { if case .item = n.kind { true } else { false } }()) }
+        private func look(_ n: Node) -> (check: NSControl.StateValue?, locked: Bool, whitelisted: Bool) {
+            guard let item = n.item else { return (nil, false, false) }
+            guard item.removable else { return (nil, { if case .item = n.kind { true } else { false } }(), item.category == .kept) }
             // Kept in Deep Clean: shown locked, never ticked.
-            if let p = n.path, model.isKeptElsewhere(p) { return (nil, true) }
+            if let p = n.path, model.isKeptElsewhere(p) { return (nil, true, model.rules.protects(p)) }
             switch n.kind {
             case .item(let i):
-                return (state(model.check(i)), false)
+                return (state(model.check(i)), false, false)
             case .smallFiles(_, let folder, _, _):
                 // Small files go with their folder; they can't be chosen one by one.
-                return (model.state(of: folder) == .on ? .on : .off, false)
+                return (model.state(of: folder) == .on ? .on : .off, false, false)
             default:
-                return (n.path.map { state(model.state(of: $0)) }, false)
+                return (n.path.map { state(model.state(of: $0)) }, false, false)
             }
         }
 
@@ -859,6 +862,15 @@ private final class TreeNameCell: NSTableCellView, ColumnWidthProviding {
     private var isItem = false
     private var isSection = false
     private var choiceIsEditable = true
+    private var normalLockTint = NSColor.secondaryLabelColor
+
+    override var backgroundStyle: NSView.BackgroundStyle {
+        didSet { updateLockTint() }
+    }
+
+    private func updateLockTint() {
+        lock.contentTintColor = backgroundStyle == .emphasized ? .selectedControlTextColor : normalLockTint
+    }
 
     init(identifier: NSUserInterfaceItemIdentifier) {
         super.init(frame: .zero)
@@ -882,7 +894,7 @@ private final class TreeNameCell: NSTableCellView, ColumnWidthProviding {
     required init?(coder: NSCoder) { fatalError() }
 
     /// Only the tick box, for a change of what's chosen.
-    func update(_ look: (check: NSControl.StateValue?, locked: Bool)) {
+    func update(_ look: (check: NSControl.StateValue?, locked: Bool, whitelisted: Bool)) {
         if let state = look.check, check.state != state { check.state = state }
     }
 
@@ -891,7 +903,7 @@ private final class TreeNameCell: NSTableCellView, ColumnWidthProviding {
         check.toolTip = enabled ? nil : String(localized: "Refreshing folder contents…")
     }
 
-    func configure(_ n: FootprintOutline.Node, look: (check: NSControl.StateValue?, locked: Bool), onToggle: @escaping () -> Void) {
+    func configure(_ n: FootprintOutline.Node, look: (check: NSControl.StateValue?, locked: Bool, whitelisted: Bool), onToggle: @escaping () -> Void) {
         self.onToggle = onToggle
         isItem = false
         isSection = false
@@ -900,6 +912,9 @@ private final class TreeNameCell: NSTableCellView, ColumnWidthProviding {
         check.state = look.check ?? .off
         check.isEnabled = true
         lock.isHidden = !look.locked
+        normalLockTint = look.whitelisted ? .systemGreen : .secondaryLabelColor
+        updateLockTint()
+        lock.toolTip = look.whitelisted ? String(localized: "Whitelisted — this folder and its contents stay during cleanup.") : nil
         dot.isHidden = true
         icon.isHidden = false
         detail.isHidden = true

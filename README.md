@@ -1,8 +1,4 @@
-<p>
-  <img src="assets/mymole.png" alt="MyMole app icon" width="88" height="88">
-</p>
-
-# MyMole
+# <img src="assets/mymole.png" alt="MyMole app icon" width="88" height="88" align="absmiddle"> MyMole
 
 ![MyMole feature overview: map storage, review caches, apps and duplicates, and monitor system activity](.github/images/overview.svg)
 

@@ -6,6 +6,19 @@ import Testing
 
 @MainActor
 @Suite struct FileTableSortTests {
+    @Test func pinsStayFirstInBothSortDirectionsWithoutChangingEligibility() {
+        var pinned = FileRow(id: "/synthetic/Pinned", name: "Zeta", size: 1)
+        pinned.pinned = true
+        pinned.canChoose = false
+        let ordinary = FileRow(id: "/synthetic/Ordinary", name: "Alpha", size: 10_000)
+        for column in [FileColumn.name, .size] {
+            for ascending in [true, false] {
+                let sorted = FileTable.sorted([ordinary, pinned], by: column, ascending: ascending)
+                #expect(sorted.first?.id == pinned.id)
+                #expect(sorted.first?.canChoose == false)
+            }
+        }
+    }
     private func fixture(selection: Binding<Set<String>> = .constant([])) -> (FileTable.Coordinator, FileTableView) {
         let view = FileTable(rows: [], columns: [.name, .size], autosave: "synthetic.sort", selection: selection)
         let coordinator = view.makeCoordinator()

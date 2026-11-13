@@ -2,11 +2,15 @@ import AppKit
 import ServiceManagement
 import StorageKit
 import SwiftUI
+import SystemKit
 
 /// Settings stays in the main window, using the shared page width and section cards.
 struct SettingsView: View {
     @Bindable var app: AppModel
     @AppStorage(PerformanceLevel.defaultsKey) private var performance = PerformanceLevel.standard.rawValue
+    @AppStorage(ResultSize.defaultsKey) private var results = ResultSize.byDefault.rawValue
+    @AppStorage(Responsiveness.defaultsKey) private var responsiveness = Responsiveness.byDefault.rawValue
+    @AppStorage(MemoryRelief.defaultsKey) private var memoryRelief = false
     @AppStorage(Density.key) private var density = Density.standard.rawValue
     @AppStorage(AppearanceMode.key) private var mode = AppearanceMode.system.rawValue
     @AppStorage(ThemeFamily.key) private var theme = ThemeFamily.standard.rawValue
@@ -24,10 +28,12 @@ struct SettingsView: View {
     @AppStorage(LoadingSettings.prefetchKey) private var prefetch = true
     @AppStorage(LoadingSettings.historyKey) private var history = LoadingSettings.historyStandard
     @State private var savedBytes: Int64?
+    @State private var savedScanBytes: Int64?
+    @State private var spilledBytes: Int64?
     @State private var confirmingClear = false
     @State private var showingSelfRemoval = false
+    @State private var sectionColumns = 1
 
-    private var level: PerformanceLevel { PerformanceLevel(saved: performance) }
 
     private var diskAccessText: String {
         if !app.access.has(.home) {
@@ -46,6 +52,7 @@ struct SettingsView: View {
     }
 
     var body: some View {
+        let sectionSpacing = DS.Space.section
         VStack(spacing: 0) {
             DSPaneHeader {
                 DSMetric(
@@ -68,14 +75,23 @@ struct SettingsView: View {
                 ContentUnavailableView.search(text: app.settingsQuery)
             } else {
                 DSPage {
-                    ForEach(matches) { section in
-                        settingsSection(section)
-                            .accessibilityIdentifier("settings.section." + section.rawValue)
+                    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: sectionSpacing, alignment: .topLeading), count: sectionColumns),
+                              alignment: .leading, spacing: sectionSpacing) {
+                        ForEach(matches) { section in
+                            settingsSection(section)
+                                .accessibilityIdentifier("settings.section." + section.rawValue)
+                        }
                     }
+                    .onGeometryChange(for: Int.self) { geometry in
+                        min(2, max(1, Int((geometry.size.width + sectionSpacing) / (480 + sectionSpacing))))
+                    } action: { sectionColumns = $0 }
                 }
             }
         }
         .paneToolbar("Settings", subtitle: "Appearance, behavior and safety")
+        .sheet(isPresented: $showingSelfRemoval, onDismiss: { loginItem = LoginItem.state }) {
+            SelfRemovalSheet(model: app.selfRemoval)
+        }
     }
 
     @ViewBuilder private func settingsSection(_ section: SettingsSection) -> some View {
@@ -86,7 +102,7 @@ struct SettingsView: View {
         case .performance: performanceSection
         case .loading: loadingSection
         case .diskMap: DiskMapSkipsSection()
-        case .confirmations: ConfirmationsSection()
+        case .confirmations: ConfirmationsSection(projectRules: app.projects.ruleConfirmations)
         case .diskAccess: diskAccessSection
         case .appManagement: appManagementSection
         case .timings: TimingsSection()
@@ -109,9 +125,6 @@ struct SettingsView: View {
                     .fixedSize()
                     .disabled(!app.selfRemoval.available)
             }
-        }
-        .sheet(isPresented: $showingSelfRemoval, onDismiss: { loginItem = LoginItem.state }) {
-            SelfRemovalSheet(model: app.selfRemoval)
         }
     }
 
@@ -222,37 +235,59 @@ struct SettingsView: View {
     }
 
     private var performanceSection: some View {
-        DSSection("Performance", footer: "How hard scans may work. Lower levels use fewer threads at a lower priority, so the Mac stays quiet while scans take longer. A change applies from the next scan.") {
-            VStack(alignment: .leading, spacing: 6) {
-                Slider(
-                    value: Binding(get: { Double(level.rawValue) }, set: { performance = Int($0.rounded()) }),
-                    in: 1...Double(PerformanceLevel.allCases.count), step: 1
-                ) {
-                    Text("Scan speed")
-                } minimumValueLabel: {
-                    Image(systemName: "tortoise").help("Gentle")
-                } maximumValueLabel: {
-                    Image(systemName: "hare").help("Full")
-                }
-                .accessibilityValue("\(level.title), level \(level.rawValue) of \(PerformanceLevel.allCases.count)")
-                HStack(spacing: 6) {
-                    Text("\(level.title) · level \(level.rawValue) of \(PerformanceLevel.allCases.count)")
-                        .fontWeight(.medium)
-                    if level == .standard {
-                        Text("Default").foregroundStyle(.secondary)
-                    } else {
-                        Button("Reset") { performance = PerformanceLevel.standard.rawValue }
-                            .buttonStyle(.link)
-                    }
-                }
-                .font(.caption)
-                Text(level.detail).font(.caption).foregroundStyle(.secondary)
+        DSSection("Performance", footer: "Each control has six steps, from Gentle to Hyperspeed, and starts at Maximum: well past the limits MyMole had before, which are now Balanced, step 3. Hyperspeed removes every limit and can use a lot of memory and disk. Results are always complete: every large file, match, process and item is listed at every step. If MyMole feels slow or makes this Mac sluggish, lower a control: a lower speed uses fewer threads at a lower priority, a smaller Large results step moves big lists to disk sooner and keeps fewer saved scans, and a lower responsiveness holds less in memory. Scans can always be stopped. A change applies from the next scan.") {
+            ScanSpeedControl(performance: $performance)
+            Picker(selection: Binding(
+                get: { ResultSize(saved: results) },
+                set: { results = $0.rawValue })
+            ) {
+                ForEach(ResultSize.allCases, id: \.self) { Text(stepTitle($0.title, hyperspeed: $0 == .hyperspeed)).tag($0) }
+            } label: {
+                Text("Large results")
+                Text(ResultSize(saved: results).detail)
+                Text(PerformanceSummary.results(ResultSize(saved: results)))
+                Text("Saved disk map scans take \(savedScanBytes.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? "…") on disk; large lists kept on disk now take \(spilledBytes.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? "…").")
             }
+            .accessibilityIdentifier("settings.result-size")
+            Picker(selection: Binding(
+                get: { Responsiveness(rawValue: responsiveness) ?? Responsiveness.byDefault },
+                set: { level in
+                    responsiveness = level.rawValue
+                    Responsiveness.apply()
+                })
+            ) {
+                ForEach(Responsiveness.allCases) { Text(stepTitle($0.title, hyperspeed: $0 == .hyperspeed)).tag($0) }
+            } label: {
+                Text("Responsiveness")
+                Text(responsivenessDetail)
+                Text(PerformanceSummary.responsiveness(Responsiveness(rawValue: responsiveness) ?? Responsiveness.byDefault))
+            }
+            .accessibilityIdentifier("settings.responsiveness")
+            Toggle(isOn: $memoryRelief) {
+                Text("Free memory when macOS runs low")
+                Text("When macOS warns that memory is short, scans started ahead of time stop and icon and chart caches empty; when it's critical, a disk map that isn't on screen goes too and maps again when you open it. Nothing you're looking at, have chosen or can undo is touched. Worth turning on, at any step, if this Mac gets sluggish.")
+            }
+            .accessibilityIdentifier("settings.memory-relief")
+        }
+        .task(id: results) {
+            savedScanBytes = await Task.detached(priority: .utility) { SavedResults.bytes(files: []) }.value
+            spilledBytes = await Task.detached(priority: .utility) { SpillTable.bytes() }.value
         }
     }
 
+    /// Hyperspeed is marked in every list it's chosen from.
+    private func stepTitle(_ title: String, hyperspeed: Bool) -> String {
+        hyperspeed ? String(localized: "\(title) (no limits)") : title
+    }
+
+    private var responsivenessDetail: String {
+        let saved = Responsiveness(rawValue: responsiveness) ?? Responsiveness.byDefault
+        guard saved == .automatic else { return saved.detail }
+        return String(localized: "\(saved.detail) Now: \(saved.resolved().title).")
+    }
+
     private var loadingSection: some View {
-        DSSection("Loading and Memory", footer: "Disk Map's saved scans take \(ByteSize.format(SnapshotStore.totalLimit)) at most together; the oldest go first, and the newest of each folder always stays.") {
+        DSSection("Loading and Memory", footer: "Disk Map's saved scans stay within what Large results allows, \(ResultSize(saved: results).savedScanLimit.map(ByteSize.format) ?? String(localized: "every one at Hyperspeed")); the oldest go first, and the newest of each folder always stays.") {
             Toggle(isOn: $prefetch) {
                 Text("Get every pane ready at launch")
                 Text("Scans run one after another in the background, at a lower priority, so each pane opens with a fresh result. Off: a pane scans when you open it.")
@@ -341,8 +376,16 @@ struct SettingsView: View {
 
     private var systemTasksSection: some View {
         DSSection("System Tasks") {
-            Text("System Clean, Optimize's administrator tasks and system-wide app leftovers run as root. macOS asks for an administrator's password each time one runs; nothing is installed and nothing keeps running.")
+            Text("System Clean, Optimize's administrator tasks and protected app moves need administrator rights. The optional helper lets macOS approve this once. Without it, macOS asks when each task runs.")
                 .foregroundStyle(.secondary)
+            #if !APPSTORE
+            if let helper = app.privileged.helper {
+                HelperSettingsView(helper: helper)
+                    .disabled(app.privileged.busy || app.privileged.outcomeUnknown)
+            } else {
+                Text("The helper isn't available in this copy of MyMole.").foregroundStyle(.secondary)
+            }
+            #endif
         }
     }
 
@@ -400,7 +443,7 @@ struct SettingsView: View {
         DSSection("About") {
             Text("MyMole is source-available. Personal non-commercial use is permitted; business and organizational use requires a paid commercial license.")
                 .foregroundStyle(.secondary)
-            Text("MyMole is a native Mac cleaner. Everything it removes is chosen by you; your own files go to the Trash, with Undo. In the direct edition, system caches are deleted after macOS asks for an administrator's password.")
+            Text("MyMole is a native Mac cleaner. Everything it removes is chosen by you; your own files go to the Trash, with Undo. In the direct edition, system tasks use administrator approval or the optional approved helper.")
                 .foregroundStyle(.secondary)
             DSFlow(spacing: DS.Space.md) {
                 Link(destination: Links.website) { Text(verbatim: "mymole.viktornyberg.com") }

@@ -17,6 +17,7 @@ extension NSTableView {
                 column.isHidden.toggle()
                 fitFlexibleColumn(FileColumn.name.rawValue)
                 updateScrollableWidth()
+                columnsChanged()
             }
             item.state = column.isHidden ? .off : .on
             item.isEnabled = !fixed
@@ -28,6 +29,7 @@ extension NSTableView {
             for column in tableColumns { column.isHidden = false }
             fitFlexibleColumn(FileColumn.name.rawValue)
             updateScrollableWidth()
+            columnsChanged()
         })
         if let defaults = (self as? any UserColumnTable)?.defaultHiddenColumns {
             menu.addItem(ClosureMenuItem(String(localized: "Restore Default Columns")) { [weak self] in
@@ -35,6 +37,7 @@ extension NSTableView {
                 for column in tableColumns { column.isHidden = defaults.contains(column.identifier.rawValue) && column.identifier.rawValue != "name" }
                 fitFlexibleColumn(FileColumn.name.rawValue)
                 updateScrollableWidth()
+                columnsChanged()
             })
         }
         addColumnWidthActions(to: menu)

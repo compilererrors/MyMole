@@ -1,10 +1,20 @@
 import Foundation
 import PrivilegedKit
 
-// MyMole's privileged tool. macOS starts it as root, once per request, after
-// the user enters an administrator's password in its standard prompt; it
-// handles the one request given as its argument, prints the reply and exits.
-// Nothing is installed and nothing keeps running.
+// The direct edition supports an approved launchd service, or one-shot
+// administrator execution for users who prefer not to enable the service.
+
+#if !APPSTORE
+if CommandLine.arguments == [CommandLine.arguments[0], "--serve"] {
+    guard geteuid() == 0, let identity = HelperServiceIdentity.current(helper: true) else { exit(77) }
+    let service = HelperService(identity: identity)
+    let listener = NSXPCListener(machServiceName: identity.serviceID)
+    listener.delegate = service
+    listener.resume()
+    withExtendedLifetime(service) { RunLoop.main.run() }
+    exit(0)
+}
+#endif
 
 guard CommandLine.arguments.count == 2 else {
     FileHandle.standardError.write(Data("usage: \(PrivilegedTool.name) <request>\n".utf8))

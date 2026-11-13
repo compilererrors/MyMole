@@ -11,22 +11,27 @@ public final class ScanProgress: Sendable {
     let cancelled = Atomic<Bool>(false)
     private let cancellationObservers = Mutex<[UUID: @Sendable () -> Void]>([:])
     /// Large files found since the last `drainFound()`, at most
-    /// `foundLimit`: past that only the largest are kept. Collected only
+    /// `keepsFound`: past that only the largest are kept. Collected only
     /// when someone drains them (`collectsFound`).
     let found = Mutex<[FoundFile]>([])
     let collectsFound: Bool
+    public let keepsFound: Int
+    /// What a scan keeps between drains at the standard result size.
     public static let foundLimit = 10_000
 
     /// `collectsFound`: large files are handed out while the scan runs.
-    public init(collectsFound: Bool = false) { self.collectsFound = collectsFound }
+    public init(collectsFound: Bool = false, keepsFound: Int = ScanProgress.foundLimit) {
+        self.collectsFound = collectsFound
+        self.keepsFound = max(keepsFound, 1)
+    }
 
     func add(_ files: [FoundFile]) {
         guard collectsFound, !files.isEmpty else { return }
         found.withLock { f in
             f.append(contentsOf: files)
-            if f.count > Self.foundLimit {
+            if f.count > keepsFound {
                 f.sort { $0.size > $1.size }
-                f.removeLast(f.count - Self.foundLimit)
+                f.removeLast(f.count - keepsFound)
             }
         }
     }
@@ -84,6 +89,8 @@ public struct FoundFile: Sendable {
     public let size: Int64
     public let modified: Date
     public let kind: FileKind
+    /// What removing it frees, with the clone family it may complete.
+    public var reclaim: Reclaim? = nil
     public var path: String { folder == "/" ? "/" + name : folder + "/" + name }
 }
 
@@ -211,6 +218,7 @@ private final class Walk: @unchecked Sendable {
         var found: [FoundFile] = []
         var files = 0
         var bytes: Int64 = 0
+        var reclaim = Reclaim()
         for e in entries {
             guard !progress.isCancelled else { folder.riskListed = false; break }
             folder.ownRiskCode = PathRisk.merging(folder.ownRiskCode, PathRisk.childCode(e.name, in: path))
@@ -228,12 +236,17 @@ private final class Walk: @unchecked Sendable {
                 if e.linkCount > 1 && !hardLinks.withLock({ $0.insert(e.fileID).inserted }) { continue }
                 let kind = folder.inheritedKind ?? Classifier.kind(ofFile: e.name)
                 folder.ownBytes[kind] += e.allocated
+                let own = e.reclaim
+                reclaim.add(own)
                 let modified = Date(timeIntervalSince1970: e.modified)
                 folder.latestChange = max(folder.latestChange, modified)
                 folder.ownLatestChange = folder.latestChange
                 if e.allocated >= Folder.listedFileSize {
-                    folder.listedFiles.append(FileItem(name: e.name, size: e.allocated, modified: modified, kind: kind))
-                    found.append(FoundFile(name: e.name, folder: path, size: e.allocated, modified: modified, kind: kind))
+                    var item = FileItem(name: e.name, size: e.allocated, modified: modified, kind: kind)
+                    item.shared = own.shared(of: e.allocated)
+                    if !own.open.isEmpty { item.clones = own }
+                    folder.listedFiles.append(item)
+                    found.append(FoundFile(name: e.name, folder: path, size: e.allocated, modified: modified, kind: kind, reclaim: own))
                 } else {
                     folder.smallFileCount += 1
                     folder.smallFileBytes += e.allocated
@@ -245,6 +258,8 @@ private final class Walk: @unchecked Sendable {
             }
         }
         folder.subfolders = subs
+        folder.ownShared = reclaim.shared(of: folder.ownBytes.total)
+        folder.ownClones = reclaim.open
         progress.add(found)
         progress.filesCounter.add(files, ordering: .relaxed)
         progress.foldersCounter.add(1, ordering: .relaxed)
@@ -311,3 +326,4 @@ private final class SubtreeCounter: Sendable {
         }
     }
 }
+

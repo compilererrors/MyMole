@@ -45,7 +45,8 @@ extension SystemReaders {
         battery: { IORegistry.battery() },
         // The App Sandbox hides other processes' counters, so `ps` shows
         // nothing there; the tile stays away instead of running it in vain.
-        processes: { ProcessList.sandboxed ? [] : ProcessList.top() })
+        // Every process: the list is small, and the Processes sheet draws only the rows in view.
+        processes: { ProcessList.sandboxed ? [] : ProcessList.top(limit: .max) })
     #endif
 
     #if DEBUG || SMOKE

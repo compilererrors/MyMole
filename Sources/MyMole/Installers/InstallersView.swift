@@ -37,9 +37,8 @@ struct InstallersView: View {
         .confirmationKeyboard(isPresented: Binding(get: { model.problem != nil }, set: { if !$0 { model.problem = nil } }))
     }
 
-    @ToolbarContentBuilder private var tools: some ToolbarContent {
-        ToolbarItemGroup(placement: .primaryAction) {
-            Menu {
+    @PaneToolsBuilder private var tools: [PaneTool] {
+            PaneTool.menu("installers.folders", "Searched Folders", symbol: "folder", help: "The folders searched for installers") {
                 Section("Looking in") {
                     ForEach(model.locations, id: \.path) { loc in
                         Menu(String(localized: "\(Breakable.path(loc.path).replacingOccurrences(of: "\u{200B}", with: "")) · \(loc.depth) level\(loc.depth == 1 ? "" : "s") deep")) {
@@ -59,26 +58,12 @@ struct InstallersView: View {
                         }
                     }
                 }
-            } label: {
-                Label("Searched Folders", systemImage: "folder")
             }
-            .help("The folders searched for installers")
             if model.scanning {
-                Button {
-                    model.stop()
-                } label: {
-                    Label("Stop", systemImage: "stop.fill")
-                }
-                .help("Stop looking; the last complete result stays")
+                PaneTool.button("installers.scan", "Stop", symbol: "stop.fill", help: "Stop looking; the last complete result stays") { model.stop() }
             } else {
-                Button {
-                    model.scan()
-                } label: {
-                    Label("Rescan", systemImage: "arrow.clockwise")
-                }
-                .help("Look for installers again")
+                PaneTool.button("installers.scan", "Rescan", symbol: "arrow.clockwise", help: "Look for installers again") { model.scan() }
             }
-        }
     }
 
     // MARK: Header

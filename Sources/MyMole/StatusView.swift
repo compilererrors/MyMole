@@ -104,25 +104,13 @@ struct StatusView: View {
             }
         }
         .paneToolbar("Live Status", subtitle: "\(meta)") {
-            ToolbarItemGroup(placement: .primaryAction) {
-                Button {
-                    editingLayout.toggle()
-                } label: {
-                    Label(editingLayout ? String(localized: "Done Arranging") : String(localized: "Edit Layout"),
-                          systemImage: editingLayout ? "checkmark" : "rectangle.3.group")
-                }
-                .help("Move and resize cards directly in the grid")
-                Button {
-                    StatusActions.openActivityMonitor()
-                } label: {
-                    Label("Activity Monitor", systemImage: "waveform.path.ecg")
-                }.help("Open Activity Monitor")
-                Button {
-                    customizing = true
-                } label: {
-                    Label("Customize Live Status…", systemImage: "slider.horizontal.3")
-                }.help("Show, hide, resize and reorder cards")
-            }
+            PaneTool.button("status.arrange", editingLayout ? "Done Arranging" : "Edit Layout",
+                            symbol: editingLayout ? "checkmark" : "rectangle.3.group",
+                            help: "Move and resize cards directly in the grid") { editingLayout.toggle() }
+            PaneTool.button("status.activity-monitor", "Activity Monitor", symbol: "waveform.path.ecg",
+                            help: "Open Activity Monitor") { StatusActions.openActivityMonitor() }
+            PaneTool.button("status.customize", "Customize Live Status…", symbol: "slider.horizontal.3",
+                            help: "Show, hide, resize and reorder cards") { customizing = true }
         }
         .sheet(isPresented: $customizing) { StatusLayoutEditor(layout: layoutBinding) }
         .sheet(isPresented: $showingProcesses) { StatusProcessesSheet(app: app, order: $order) }
@@ -169,9 +157,8 @@ struct StatusView: View {
     }
 
     private func accept(_ items: [StatusCardDrag], before target: StatusCardID?) -> Bool {
-        guard editingLayout, items.count == 1, let item = items.first,
-              item.canMove(in: layout, session: dragSession, before: target) else { return false }
-        change { $0.move(item.card, before: target) }
+        guard editingLayout, let changed = StatusCardDrag.applying(items, to: layout, session: dragSession, before: target) else { return false }
+        apply(changed)
         dropTarget = nil
         return true
     }
@@ -206,7 +193,7 @@ struct StatusView: View {
                 .help("Show one hidden card or bring them all back")
             }
         }
-        .frame(maxWidth: DS.Size.pageMaxWidth, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, DS.Space.page)
         .padding(.bottom, DS.Space.md)
         .frame(maxWidth: .infinity)
@@ -341,7 +328,7 @@ struct StatusOverviewStrip: View {
                     .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
             }
         }
-        .frame(maxWidth: DS.Size.pageMaxWidth)
+        .frame(maxWidth: .infinity)
         .padding(.horizontal, DS.Space.page)
         .padding(.vertical, DS.Space.md)
         .frame(maxWidth: .infinity)

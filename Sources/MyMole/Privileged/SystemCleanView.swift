@@ -27,15 +27,8 @@ struct SystemCleanView: View {
             EmptyView()
         }
         .paneToolbar("System Clean", subtitle: "System-wide caches and old logs") {
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    model.scan()
-                } label: {
-                    Label("Rescan", systemImage: "arrow.clockwise")
-                }
-                .help("Scan again")
-                .disabled(!model.privileged.isAvailable || model.scanning || model.removing)
-            }
+            PaneTool.button("system-clean.rescan", "Rescan", symbol: "arrow.clockwise", help: "Scan again",
+                            enabled: model.privileged.isAvailable && !model.scanning && !model.removing) { model.scan() }
         }
         .actionConfirmation(String(localized: "Permanently delete \(fmt(model.chosenBytes))?"), isPresented: $confirming,
                             button: String(localized: "Delete for Good"),

@@ -228,9 +228,9 @@ public enum ProjectAttribution {
             let r = StorageScanner.scan(path: path)
             if !r.deniedPaths.isEmpty || r.root.unreadable { misses.paths.append(path) }
             let latest = r.root.latestChange == .distantPast ? mtime : max(r.root.latestChange, mtime)
-            return FootprintEntry(path: path, bytes: r.root.size, modified: latest, isDirectory: true)
+            return FootprintEntry(path: path, bytes: r.root.size, modified: latest, isDirectory: true, reclaim: r.root.reclaim)
         case S_IFREG:
-            return FootprintEntry(path: path, bytes: Int64(st.st_blocks) * 512, modified: mtime, isDirectory: false)
+            return FootprintEntry(path: path, bytes: Int64(st.st_blocks) * 512, modified: mtime, isDirectory: false, reclaim: Reclaim.file(at: path))
         default:
             return nil
         }

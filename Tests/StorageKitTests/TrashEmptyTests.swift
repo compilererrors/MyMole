@@ -46,9 +46,11 @@ import Testing
         let listing = try #require(TrashEmptier.list(box.trash))
         #expect(listing.entries.map(\.name) == ["old-project", "report.pdf"])
         #expect(listing.bytes >= 70_000)
+        // Nothing in it is a clone: emptying frees all it takes.
+        #expect(listing.frees == listing.bytes)
 
         let out = TrashEmptier.empty(listing)
-        #expect(out == TrashEmptier.Outcome(removed: 2, bytes: listing.bytes, failed: 0, skipped: 0))
+        #expect(out == TrashEmptier.Outcome(removed: 2, bytes: listing.bytes, frees: listing.bytes, failed: 0, skipped: 0))
         #expect(!box.exists(box.trash + "/report.pdf") && !box.exists(box.trash + "/old-project"))
         // Finder's record of where things came from stays, and so does the folder.
         #expect(box.exists(box.trash + "/.DS_Store"))

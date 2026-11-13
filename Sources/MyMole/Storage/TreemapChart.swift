@@ -20,6 +20,7 @@ struct TreemapChart: View {
             let cells = cells
             let bounds = CGRect(origin: .zero, size: geo.size)
             Canvas { ctx, _ in
+                var outlines = Path()
                 for c in cells {
                     let fill = fill(for: c)
                     let shape = Path(roundedRect: c.rect.insetBy(dx: 1, dy: 1), cornerRadius: c.level == 1 ? 6 : 3)
@@ -30,10 +31,10 @@ struct TreemapChart: View {
                         with: .linearGradient(
                             Gradient(colors: [fill.mix(with: .white, by: 0.12), fill.mix(with: .black, by: 0.12)]),
                             startPoint: c.rect.origin, endPoint: CGPoint(x: c.rect.maxX, y: c.rect.maxY)))
-                    if c.level == 1 {
-                        ctx.stroke(shape, with: .color(.black.opacity(0.25)), lineWidth: 1)
-                    }
+                    if c.level == 1 { outlines.addPath(shape) }
                 }
+                // Top-level blocks never overlap: their outlines in one stroke.
+                ctx.stroke(outlines, with: .color(.black.opacity(0.25)), lineWidth: 1)
 
                 // Labels follow the fills so a nested name stays inside its
                 // own block. Tiny blocks borrow their parent's label strip.
@@ -74,9 +75,12 @@ struct TreemapChart: View {
             }
             .task(id: Key(model: model, size: geo.size)) {
                 let next = layout(in: bounds)
-                withAnimation(model.showingLive ? nil : Motion.content) {
+                // Only another folder or map is animated in; a new size,
+                // as on every frame of a resize, takes effect at once.
+                let key = SunburstChart.LayoutKey(model)
+                withAnimation(model.showingLive || key == drawing ? nil : Motion.content) {
                     self.cells = next
-                    drawing = SunburstChart.LayoutKey(model)
+                    drawing = key
                 }
             }
         }

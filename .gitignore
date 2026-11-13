@@ -6,3 +6,5 @@
 /MyMole-AppStore.app
 /MyMole-AppStore.pkg
 /dist/
+__pycache__/
+*.pyc

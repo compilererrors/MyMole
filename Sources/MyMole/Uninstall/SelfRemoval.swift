@@ -10,6 +10,7 @@ final class SelfRemovalModel {
     private let prepare: @MainActor () async -> String?
     private let resume: @MainActor () -> Void
     private let quit: @MainActor () -> Void
+    private let readReviewSource: @Sendable (AppBundle) -> RemovedApp.Source?
     private(set) var app: AppBundle?
     private(set) var leftovers: [Leftover] = []
     private(set) var loading = false
@@ -23,17 +24,21 @@ final class SelfRemovalModel {
     var chosen = Set<String>()
     var selection = Set<String>()
     private var loadID: UUID?
+    private var source: RemovedApp.Source?
+    private var reviewedIdentity: Trasher.Identity?
 
     init(apps: AppsModel, prepare: @escaping @MainActor () async -> String?,
-         resume: @escaping @MainActor () -> Void, quit: @escaping @MainActor () -> Void) {
+         resume: @escaping @MainActor () -> Void, quit: @escaping @MainActor () -> Void,
+         readReviewSource: @escaping @Sendable (AppBundle) -> RemovedApp.Source? = RemovedApp.Source.capture) {
         self.apps = apps
         self.prepare = prepare
         self.resume = resume
         self.quit = quit
+        self.readReviewSource = readReviewSource
     }
 
     var available: Bool { apps.ownAppPath != nil }
-    var canRemove: Bool { app != nil && !keepsUnreadable && !kept.contains(app?.path ?? "") }
+    var canRemove: Bool { app != nil && reviewedIdentity != nil && !keepsUnreadable && !kept.contains(app?.path ?? "") }
     var chosenLeftovers: [Leftover] { leftovers.filter { $0.canRemove && chosen.contains($0.path) } }
 
     func load() async {
@@ -42,6 +47,8 @@ final class SelfRemovalModel {
         loadID = run
         loading = true
         problem = nil
+        source = nil
+        reviewedIdentity = nil
         defer { if loadID == run { loading = false; loadID = nil } }
         let found = await Task.detached(priority: .userInitiated) { AppFinder.read(path) }.value
         guard !Task.isCancelled, loadID == run else { return }
@@ -50,6 +57,18 @@ final class SelfRemovalModel {
             app = nil
             return
         }
+        let readReviewSource = readReviewSource
+        let (source, identity) = await Task.detached(priority: .userInitiated) {
+            (readReviewSource(found), Trasher.identity(of: found.path))
+        }.value
+        guard !Task.isCancelled, loadID == run else { return }
+        guard let identity else {
+            problem = String(localized: "This copy of MyMole couldn't be verified. Nothing was moved. Open the installed app and try again.")
+            app = nil
+            return
+        }
+        self.source = source
+        reviewedIdentity = identity
         app = found
         let report = await apps.leftoverReport(for: found)
         let data = report?.items
@@ -65,12 +84,22 @@ final class SelfRemovalModel {
     }
 
     func remove() async {
-        guard !running, !loading, !removed, canRemove, let app, apps.isSelf(app) else { return }
+        guard !running, !loading, !removed, canRemove, let app, let reviewedIdentity, apps.isSelf(app) else { return }
         running = true
+        defer { running = false }
         problem = nil
+        let source = source
+        guard await Task.detached(priority: .userInitiated, operation: {
+            Trasher.identity(of: app.path) == reviewedIdentity && (source?.isAtOriginalPath ?? true)
+        }).value else {
+            problem = String(localized: "This copy of MyMole changed after the review. Nothing was moved. Open the review again.")
+            return
+        }
         // The capability is scoped to this call and this copy's exact path and ID.
         apps.prepareSelfRemoval = prepare
-        defer { apps.prepareSelfRemoval = nil; running = false }
+        apps.selfRemovalSource = source
+        apps.selfRemovalIdentity = reviewedIdentity
+        defer { apps.prepareSelfRemoval = nil; apps.selfRemovalSource = nil; apps.selfRemovalIdentity = nil }
         let result = await apps.uninstall(app, leftovers: chosenLeftovers)
         switch result {
         case .done:
@@ -105,7 +134,7 @@ struct SelfRemovalSheet: View {
             }
             DSNotice(
                 .info,
-                "MyMole stops its scans, turns off Open at Login and moves this copy to the Trash, then quits. Settings and saved results stay unless you choose them. Data another installed copy uses stays. Use Put Back in Finder's Trash to restore anything moved."
+                "MyMole stops its scans, turns off Open at Login, disables its optional helper and moves this copy to the Trash, then quits. Settings and saved results stay unless you choose them. Data another installed copy uses stays. Use Put Back in Finder's Trash to restore anything moved."
             )
             if model.dataUnavailable {
                 DSNotice(
@@ -162,6 +191,7 @@ struct SelfRemovalSheet: View {
         .padding(DS.Space.xl)
         .frame(width: DS.Size.reviewWidth)
         .dialogKeyboard(canClose: !model.running && !model.removed)
+        .interactiveDismissDisabled(model.running || model.removed)
         .task { await model.load() }
         .actionConfirmation(
             String(localized: "Uninstall this copy of MyMole?"), isPresented: $confirming,

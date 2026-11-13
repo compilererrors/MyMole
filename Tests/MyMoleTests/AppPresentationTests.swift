@@ -5,6 +5,22 @@ import Testing
 @testable import MyMole
 
 @Suite struct AppPresentationTests {
+    @Test func pinnedAppsLeadBothPresentationsAndKeepTheirOriginalStatus() {
+        let apps = [
+            AppBundle(path: "/synthetic/Small.app", name: "Small", bundleID: "org.example.Small", version: nil, bytes: 10, fromAppStore: false),
+            AppBundle(path: "/synthetic/Large.app", name: "Large", bundleID: "org.example.Large", version: nil, bytes: 1000, fromAppStore: false),
+        ]
+        for asList in [true, false] {
+            let presentation = AppPresentation(apps, query: "", sort: .size, showMacOS: false, asList: asList,
+                running: [apps[0].path], ownPath: nil, pinned: [apps[0].path])
+            #expect(presentation.apps.map(\.path) == apps.map(\.path))
+            #expect(presentation.totalBytes == 1010)
+            if asList {
+                #expect(presentation.rows.first?.pinned == true)
+                #expect(presentation.rows.first?.badge == String(localized: "Open"))
+            }
+        }
+    }
     @Test func preparedRowsFollowScopeAndBadgesWithoutLosingHiddenBatchChoices() {
         let apps = [
             AppBundle(path: "/synthetic/Editor.app", name: "Editor", bundleID: "org.synthetic.Editor", version: "2", bytes: 40, fromAppStore: false),

@@ -14,6 +14,8 @@ import StorageKit
         let items: [Marked]
         let protections: UserProtections
         let inspectOpenFiles: Bool
+        /// What the scanned tree says the items free; the rest is read here.
+        var known: [String: Reclaim] = [:]
     }
     struct Value: Sendable {
         let key: Key
@@ -21,6 +23,9 @@ import StorageKit
         var keepsUnreadable = false
         var links: [String: Int] = [:]
         var openIn: [String: [String]] = [:]
+        /// What moving the outermost items frees, together and one by one.
+        var frees: Int64?
+        var itemFrees: [String: Int64] = [:]
         var readAt = Date()
     }
     let prepared = OffMain<Value?>(nil)
@@ -54,6 +59,10 @@ import StorageKit
         } catch { value.keepsUnreadable = true }
         let files = input.items.filter { !$0.isFolder }
         value.links = HardLinks.otherNames(of: files.map(\.path), stop: { progress.isCancelled })
+        let reclaims = StorageModel.reclaims(of: input.items, known: input.known, stop: { progress.isCancelled })
+        guard !progress.isCancelled else { return value }
+        value.itemFrees = reclaims.mapValues(\.bytes)
+        value.frees = reclaims.values.reduce(Reclaim(), +).bytes
         if input.inspectOpenFiles {
             let biggest = files.filter { $0.size >= 100_000_000 }.sorted { $0.size > $1.size }.prefix(4)
             for file in biggest {

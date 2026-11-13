@@ -131,6 +131,9 @@ enum DS {
         static let reviewBodyMaxHeight: CGFloat = 640
         /// The status strip under a pane header: fixed, so nothing jumps.
         static var stripHeight: CGFloat { Density.pick(26, 28) }
+        static var appTileMinimum: CGFloat { Density.pick(128, 172) }
+        static var appTileIcon: CGFloat { Density.pick(44, 64) }
+        static var appTilePadding: CGFloat { Density.pick(10, 20) }
     }
 }
 

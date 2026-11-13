@@ -4,6 +4,7 @@ import SwiftUI
 
 enum ConfirmationAction: String, CaseIterable, Identifiable {
     case deepClean, installers, projects, duplicates, orphans, uninstall, reset, savedResults
+    case projectWhitelist, projectBlacklist
     var id: String { rawValue }
 
     var title: String {
@@ -16,6 +17,8 @@ enum ConfirmationAction: String, CaseIterable, Identifiable {
         case .uninstall: String(localized: "App uninstallation to the Trash")
         case .reset: String(localized: "Reset app data to the Trash")
         case .savedResults: String(localized: "Clear saved scan results")
+        case .projectWhitelist: String(localized: "Whitelist project folders")
+        case .projectBlacklist: String(localized: "Blacklist project folders")
         }
     }
 }
@@ -35,10 +38,13 @@ final class ConfirmationSettings {
     }
 
     func asks(_ action: ConfirmationAction?, always: Bool = false) -> Bool {
-        always || (action.map { !skipped.contains($0) } ?? true)
+        _ = skipped // Keep the local view's observation dependency.
+        let current = Set((defaults.stringArray(forKey: Self.key) ?? []).compactMap(ConfirmationAction.init(rawValue:)))
+        return always || (action.map { !current.contains($0) } ?? true)
     }
 
     func setAsking(_ asks: Bool, for action: ConfirmationAction) {
+        skipped = Set((defaults.stringArray(forKey: Self.key) ?? []).compactMap(ConfirmationAction.init(rawValue:)))
         if asks { skipped.remove(action) } else { skipped.insert(action) }
         defaults.set(skipped.map(\.rawValue).sorted(), forKey: Self.key)
     }
@@ -68,10 +74,12 @@ private struct ActionConfirmation: ViewModifier {
                 get: { requested && asks }, set: { requested = $0 }
             ), titleVisibility: .visible) {
                 Button(button, role: .destructive) { run(skip: false) }
+                    .accessibilityIdentifier("confirmation.accept")
                 if action != nil, !always {
                     Button(String(localized: "\(button) and Don't Ask Again"), role: .destructive) { run(skip: true) }
                 }
                 Button("Cancel", role: .cancel) { requested = false }
+                    .accessibilityIdentifier("confirmation.cancel")
             } message: {
                 Text(message + (action != nil && !always
                      ? "\n\n" + String(localized: "Don't Ask Again applies only to this action. Turn the question on again in Settings → Confirmations.") : ""))
@@ -134,18 +142,23 @@ struct ConfirmationToast: View {
 
 struct ConfirmationsSection: View {
     @State private var settings = ConfirmationSettings.shared
+    var projectRules: ConfirmationSettings? = nil
+
+    private func owner(_ action: ConfirmationAction) -> ConfirmationSettings {
+        (action == .projectWhitelist || action == .projectBlacklist) ? (projectRules ?? settings) : settings
+    }
 
     var body: some View {
         DSSection("Confirmations", footer: "Turning a question off applies only to that action. Your choices, Keep rules and all file checks still apply. Manually chosen unverified matches, permanent deletion, emptying the Trash, system maintenance, startup changes, similar-photo removal and uninstalling MyMole always ask.") {
             ForEach(ConfirmationAction.allCases) { action in
-                Toggle(isOn: Binding(get: { settings.asks(action) }, set: { settings.setAsking($0, for: action) })) {
+                Toggle(isOn: Binding(get: { owner(action).asks(action) }, set: { owner(action).setAsking($0, for: action) })) {
                     Text(action.title)
-                    Text(settings.asks(action) ? "Ask before making this change" : "Question turned off; turn this on to ask again")
+                    Text(owner(action).asks(action) ? "Ask before making this change" : "Question turned off; turn this on to ask again")
                         .foregroundStyle(.secondary)
                 }
             }
-            Button("Restore All Confirmations") { settings.restore() }
-                .disabled(settings.skipped.isEmpty)
+            Button("Restore All Confirmations") { settings.restore(); projectRules?.restore() }
+                .disabled(settings.skipped.isEmpty && (projectRules?.skipped.isEmpty ?? true))
         }
     }
 }

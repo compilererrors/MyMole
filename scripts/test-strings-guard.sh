@@ -4,8 +4,10 @@
 # only its own temporary folder.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-work="$(mktemp -d)"
-trap 'rm -rf "$work"' EXIT
+work="$(mktemp -d "${TMPDIR:-/tmp}/mymole-check-XXXXXX")"
+work="$(cd "$work" && pwd -P)"
+cleanup_lease=$(python3 -I scripts/test-cleanup.py lease "$work")
+trap 'cleanup_result=$?; trap - EXIT; python3 -I scripts/test-cleanup.py clean "$work" "$cleanup_lease" || cleanup_result=1; exit "$cleanup_result"' EXIT
 
 fail=0
 expect() {

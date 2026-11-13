@@ -40,7 +40,10 @@ public enum FolderContents {
         return Item(path: path, bytes: 0, identity: identity, parent: parent)
     }
 
-    public static func read(_ path: String, progress: ScanProgress = ScanProgress(), limit: Int = 100_000) -> [Item]? {
+    /// Items read at the standard result size.
+    public static let standardLimit = 100_000
+
+    public static func read(_ path: String, progress: ScanProgress = ScanProgress(), limit: Int = standardLimit) -> [Item]? {
         var items: [Item] = []
         var truncated = false
         var unsupported = false

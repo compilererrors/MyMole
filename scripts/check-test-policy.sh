@@ -37,7 +37,8 @@ done < <(find Tests -name '*.swift' | sort)
 # snapshot store, and emptying the Trash.
 only() {
   local pattern=$1 file allowed; shift
-  for file in $(grep -rlE "$pattern" Sources || true); do
+  # ONLY_EXCEPT names lines that match but are no file operation.
+  for file in $( (grep -rnE "$pattern" Sources || true) | grep -vE "${ONLY_EXCEPT:-^$}" | cut -d: -f1 | sort -u); do
     allowed=0
     for ok in "$@"; do [ "$file" = "$ok" ] && allowed=1; done
     [ $allowed = 1 ] || fail "Only $* may use $pattern: $file"
@@ -45,8 +46,9 @@ only() {
 }
 only 'trashItem\(' Sources/StorageKit/Trash.swift
 only '\.recycle\(' Sources/MyMole/Uninstall/AppsModel.swift
-only '(removeItem|moveItem|replaceItem)\(at(Path)?:|replaceItemAt\(|(^|[^a-zA-Z_.])(unlink|unlinkat|rmdir|removefile)\(' Sources/StorageKit/Trash.swift Sources/StorageKit/Snapshot.swift \
-  Sources/StorageKit/TrashEmpty.swift \
+# NSToolbar's removeItem(at:) takes an item off the window's toolbar.
+ONLY_EXCEPT='^[^:]+:[0-9]+: *toolbar\.removeItem\(at: ' only '(removeItem|moveItem|replaceItem)\(at(Path)?:|replaceItemAt\(|(^|[^a-zA-Z_.])(unlink|unlinkat|rmdir|removefile)\(' Sources/StorageKit/Trash.swift Sources/StorageKit/Snapshot.swift \
+  Sources/StorageKit/TrashEmpty.swift Sources/StorageKit/SpillTable.swift \
   Sources/PrivilegedKit/SystemCleanup.swift Sources/PrivilegedKit/SecureRemove.swift Sources/PrivilegedKit/Staging.swift Sources/PrivilegedKit/SystemLeftovers.swift \
   Sources/PrivilegedKit/ApplicationTrash.swift
 # Renames move things too: Undo, staging, and the helper's exact app/Trash move.

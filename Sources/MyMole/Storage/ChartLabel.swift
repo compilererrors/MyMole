@@ -1,3 +1,4 @@
+import Synchronization
 import SwiftUI
 
 /// The one way the charts write a name onto a colored block. A name is drawn
@@ -30,7 +31,9 @@ enum ChartLabel {
         let broken = Breakable.text(name)
         let pieces = broken.split(whereSeparator: { $0 == "\u{200B}" || $0 == " " })
         for piece in pieces {
-            let w = ctx.resolve(Text(String(piece)).font(font)).measure(in: CGSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)).width
+            let w = width(of: String(piece), large: large, emphasis: emphasis) {
+                ctx.resolve(Text(String(piece)).font(font)).measure(in: CGSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)).width
+            }
             if w > rect.width { return false }
         }
         let title = ctx.resolve(Text(broken).font(font).foregroundStyle(ink))
@@ -70,6 +73,28 @@ enum ChartLabel {
             c.draw(sub, in: CGRect(origin: CGPoint(x: x(subSize.width), y: origin.y + titleSize.height), size: subSize))
         }
         return true
+    }
+
+    private struct PieceKey: Hashable {
+        let text: String
+        let large: Bool
+        let emphasis: Bool
+    }
+
+    /// How wide an unbreakable piece of a name is set on one line. It
+    /// doesn't depend on the block, so a chart redrawn on every frame of a
+    /// resize measures each piece once. Bounded: cleared when it grows large.
+    private static let pieceWidths = Mutex<[PieceKey: CGFloat]>([:])
+
+    private static func width(of piece: String, large: Bool, emphasis: Bool, measure: () -> CGFloat) -> CGFloat {
+        let key = PieceKey(text: piece, large: large, emphasis: emphasis)
+        if let known = pieceWidths.withLock({ $0[key] }) { return known }
+        let measured = measure()
+        pieceWidths.withLock { widths in
+            if widths.count > 20_000 { widths.removeAll(keepingCapacity: true) }
+            widths[key] = measured
+        }
+        return measured
     }
 
     /// The relative luminance of the fill as drawn: laid over the theme's

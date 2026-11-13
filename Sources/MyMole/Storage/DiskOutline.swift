@@ -56,6 +56,10 @@ struct DiskOutline: NSViewRepresentable {
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSScrollView, context: Context) -> CGSize? {
+        NativeListViewport.size(proposal)
+    }
+
     func makeNSView(context: Context) -> NSScrollView {
         let outline = DiskOutlineView()
         let c = context.coordinator
@@ -80,8 +84,7 @@ struct DiskOutline: NSViewRepresentable {
             outline.addTableColumn(col)
             if column == .name { outline.outlineTableColumn = col }
         }
-        outline.autosaveName = "diskMap.tree"
-        outline.autosaveTableColumns = true
+        outline.persistColumns(as: "diskMap.tree")
         outline.sortDescriptors = [NSSortDescriptor(key: FileColumn.size.rawValue, ascending: false)]
         outline.dataSource = c
         outline.delegate = c

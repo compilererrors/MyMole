@@ -51,7 +51,7 @@ struct HistoryView: View {
                                     "Items moved to the Trash still take space until you empty it. Items deleted for good are counted separately on each run."
                                 )
                         }
-                        if app.trash.canEmpty, let bytes = app.trash.bytes {
+                        if app.trash.canEmpty, let bytes = app.trash.frees {
                             DSStripButton("Empty Trash (\(ByteSize.format(bytes)))…", symbol: "trash") {
                                 Task { await app.trash.askToEmpty() }
                             }
@@ -69,13 +69,8 @@ struct HistoryView: View {
             }
         }
         .paneToolbar("History", subtitle: "Every cleanup run on this Mac") {
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    Task { await app.refreshHistory() }
-                } label: {
-                    Label("Refresh", systemImage: "arrow.clockwise")
-                }
-                .help("Reload history")
+            PaneTool.button("history.refresh", "Refresh", symbol: "arrow.clockwise", help: "Reload history") {
+                Task { await app.refreshHistory() }
             }
         }
         .task {

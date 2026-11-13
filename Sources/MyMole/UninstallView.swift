@@ -10,8 +10,8 @@ enum AppIcons {
     private static var cache: [String: NSImage] = [:]
     /// In the order they were fetched, so the oldest go first.
     private static var order: [String] = []
-    /// More icons than any app list shows at once.
-    static let limit = 300
+    /// More icons than any app list shows at once; Settings → Responsiveness sets it.
+    static var limit = 300
 
     static func icon(_ path: String) -> NSImage {
         if let i = cache[path] { return i }
@@ -26,6 +26,12 @@ enum AppIcons {
     }
 
     static var count: Int { cache.count }
+
+    /// Lets the icons go under memory pressure; each is fetched again when shown.
+    static func release() {
+        cache = [:]
+        order = []
+    }
 }
 
 /// The apps on the Mac, as cards. Click one to uninstall it; ⌘-click,
@@ -58,6 +64,7 @@ struct UninstallView: View {
     @AppStorage("uninstall.asList") private var asList = false
     @State private var tableSelection = Set<String>()
     @State private var projected = OffMain<AppPresentation>(AppPresentation())
+    @State private var pins = PinnedItems.shared
     @State private var presentedFilter: FilterKey?
 
     static let showMacOSKey = "uninstall.showMacOS"
@@ -80,10 +87,11 @@ struct UninstallView: View {
         let query: String
         let sort: Sort
         let showMacOS: Bool
+        let pinned: Set<String>
     }
 
     private var filterKey: FilterKey {
-        FilterKey(revision: model.appListRevision, running: runningPaths, asList: asList, query: query, sort: sort, showMacOS: showMacOS)
+        FilterKey(revision: model.appListRevision, running: runningPaths, asList: asList, query: query, sort: sort, showMacOS: showMacOS, pinned: pins.paths)
     }
     private var hiddenMacOS: Int { projected.value.hiddenMacOS }
     private var filtered: [AppBundle] { projected.value.apps }
@@ -247,31 +255,12 @@ struct UninstallView: View {
             dropTargeted = $0
         }
         .paneToolbar("Uninstall", subtitle: "\(filtered.count) apps · leftovers go to the Trash too") {
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    showOrphans = true
-                } label: {
-                    Label("Left by Removed Apps…", systemImage: "folder.badge.questionmark")
-                }
-                .help("Caches, settings and data of apps that aren't on this Mac any more")
-            }
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    showPackages = true
-                } label: {
-                    Label("Installed Packages…", systemImage: "shippingbox")
-                }
-                .help("What Homebrew and installer packages put on the Mac, to look at")
-            }
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    model.load()
-                } label: {
-                    Label("Reload", systemImage: "arrow.clockwise")
-                }
-                .help("Reload the app list")
-                .disabled(model.loading)
-            }
+            PaneTool.button("uninstall.orphans", "Left by Removed Apps…", symbol: "folder.badge.questionmark",
+                            help: "Caches, settings and data of apps that aren't on this Mac any more") { showOrphans = true }
+            PaneTool.button("uninstall.packages", "Installed Packages…", symbol: "shippingbox",
+                            help: "What Homebrew and installer packages put on the Mac, to look at") { showPackages = true }
+            PaneTool.button("uninstall.reload", "Reload", symbol: "arrow.clockwise", help: "Reload the app list",
+                            enabled: !model.loading) { model.load() }
         }
         .dsBottom(showing: !picked.isEmpty) {
             DSActionBar {
@@ -289,14 +278,14 @@ struct UninstallView: View {
                 DSUndoToast(text: n.text, canUndo: n.canUndo, undo: { model.undoLatest() }, dismiss: { model.dismissNotice() })
             }
         }
-        .onAppear { model.loadIfNeeded() }
+        .onAppear { pins.refresh(); model.loadIfNeeded() }
         .task(id: filterKey) {
             let key = filterKey
             let apps = model.apps
             let ownPath = apps.first(where: model.isSelf)?.path
             await projected.update(count: apps.count, inlineLimit: 128) {
                 AppPresentation(apps, query: key.query, sort: key.sort, showMacOS: key.showMacOS,
-                                asList: key.asList, running: key.running, ownPath: ownPath)
+                                asList: key.asList, running: key.running, ownPath: ownPath, pinned: key.pinned)
             }
             if !Task.isCancelled { presentedFilter = key }
         }
@@ -365,6 +354,10 @@ struct UninstallView: View {
                 let chosen = ids.compactMap { byPath[$0] }.filter { !$0.sizePending }
                 guard let first = chosen.first else { return [] }
                 return [
+                    .action(chosen.allSatisfy { pins.contains($0.path) } ? String(localized: "Unpin") : String(localized: "Pin")) {
+                        let paths = chosen.map(\.path)
+                        pins.set(paths, pinned: !paths.allSatisfy(pins.contains))
+                    },
                     .action(chosen.count == 1 ? (first.isProtected ? String(localized: "Reset…") : String(localized: "Uninstall…")) : String(localized: "Uninstall \(chosen.count)…")) {
                         if chosen.count == 1 { selected = first } else { batch = BatchRequest(apps: chosen.filter { !$0.isProtected }) }
                     },
@@ -376,7 +369,7 @@ struct UninstallView: View {
     private func appGrid(_ filtered: [AppBundle]) -> some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 128), spacing: Theme.gap)], spacing: Theme.gap) {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: DS.Size.appTileMinimum), spacing: Theme.gap)], spacing: Theme.gap) {
                     ForEach(filtered) { item in
                         Button {
                             click(item)
@@ -392,6 +385,9 @@ struct UninstallView: View {
                         .disabled(item.sizePending)
                         .help(cardHelp(item))
                         .contextMenu {
+                            Button(pins.contains(item.path) ? "Unpin" : "Pin") {
+                                pins.set([item.path], pinned: !pins.contains(item.path))
+                            }
                             Button(item.isProtected ? "Reset…" : "Uninstall…") { selected = item }
                                 .disabled(item.sizePending)
                             if !item.isProtected {
@@ -403,11 +399,11 @@ struct UninstallView: View {
                         }
                     }
                 }
-                .frame(maxWidth: DS.Size.pageMaxWidth)
+                .frame(maxWidth: .infinity)
                 .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { gridWidth = $0 }
                 .onKeyPress(keys: [.leftArrow, .rightArrow, .upArrow, .downArrow]) { key in
                     guard key.modifiers.isEmpty, let current = filtered.firstIndex(where: { $0.path == focusedApp }) else { return .ignored }
-                    let columns = max(1, Int((gridWidth + Theme.gap) / (128 + Theme.gap)))
+                    let columns = max(1, Int((gridWidth + Theme.gap) / (DS.Size.appTileMinimum + Theme.gap)))
                     let direction: GridKeyboard.Direction = key.key == .leftArrow ? .left : key.key == .rightArrow ? .right : key.key == .upArrow ? .up : .down
                     let next = GridKeyboard.next(from: current, count: filtered.count, columns: columns, direction: direction)
                     guard !filtered[next].sizePending else { return .handled }
@@ -452,10 +448,10 @@ struct UninstallView: View {
 
     private func card(_ app: AppBundle) -> some View {
         let isPicked = picked.contains(app.path)
-        return VStack(spacing: 8) {
+        return VStack(spacing: DS.Space.sm) {
             Image(nsImage: AppIcons.icon(app.path))
                 .resizable()
-                .frame(width: 56, height: 56)
+                .frame(width: DS.Size.appTileIcon, height: DS.Size.appTileIcon)
             DSName(app.name, .lead, lines: 2, reservesSpace: true)
                 .multilineTextAlignment(.center)
             if app.isProtected {
@@ -469,7 +465,14 @@ struct UninstallView: View {
             }
         }
         .frame(maxWidth: .infinity)
-        .card(padding: 12)
+        .card(padding: DS.Size.appTilePadding)
+        .overlay(alignment: .bottomLeading) {
+            if pins.contains(app.path) {
+                Image(systemName: "pin.fill").font(.caption).foregroundStyle(.secondary).padding(DS.Space.sm)
+                    .help("Pinning keeps this app at the top. It doesn't protect the app from uninstalling.")
+                    .accessibilityLabel("Pinned")
+            }
+        }
         .overlay {
             if isPicked {
                 RoundedRectangle(cornerRadius: Theme.radius, style: .continuous).strokeBorder(palette.accent.color, lineWidth: 2)
@@ -744,6 +747,7 @@ struct UninstallSheet: View {
                     }
                     .primaryAction()
                     .tint(.red)
+                    .accessibilityIdentifier("uninstall.submit")
                     .disabled(
                         running || uninstaller != nil || model.uninstalling || submitted || keepsUnreadable || reviewUnavailable
                             || kept.contains(app.path))

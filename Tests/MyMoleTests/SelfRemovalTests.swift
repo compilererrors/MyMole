@@ -31,22 +31,29 @@ import Testing
 
         func exists(_ relative: String) -> Bool { FileManager.default.fileExists(atPath: path + "/" + relative) }
 
-        func model(prepareFailure: String? = nil, copiesUnavailable: Bool = false) -> SelfRemovalModel {
+        func model(prepareFailure: String? = nil, copiesUnavailable: Bool = false,
+                   denyNativeMove: Bool = false, finder: FinderAppTrash? = nil, reviewSourceAvailable: Bool = true) -> SelfRemovalModel {
             let backend = testBin(root)
             let apps = AppsModel(
                 home: path, folders: [path + "/Applications"], base: root.appending(path: "saved"),
                 logURL: root.appending(path: "Library/Application Support/Cleaner/history.json"),
                 recycle: { [self] paths in
                     events.append("recycle")
+                    if denyNativeMove {
+                        let error = NSError(domain: NSCocoaErrorDomain, code: NSFileWriteNoPermissionError)
+                        return TrashOutcome(moved: [], failed: paths.map { ($0, error.localizedDescription) },
+                            failureInfo: Dictionary(uniqueKeysWithValues: paths.map { ($0, .init(error, area: .uninstall)) }))
+                    }
                     return Trasher.moveToTrash(paths, through: TrashGate(still: { _ in true }, protections: TrashGate.keepsNothing), backend: backend)
-                }, isRunning: { _ in true }, otherCopies: { _ in copiesUnavailable ? nil : [] },
+                }, finderTrash: finder, isRunning: { _ in true }, otherCopies: { _ in copiesUnavailable ? nil : [] },
                 system: AppsModel.SystemSide(base: path + "/system", isReady: { false }, remove: { _, _, _ in .init() }),
                 trash: backend, protections: UserProtections(root: root.appending(path: "protections")),
                 imageOf: { _ in nil }, eject: { _ in "Not in tests" }, ownAppPath: appPath, ownAppID: bundleID, identityReaders: .init(groups: { _ in [] }))
             return SelfRemovalModel(apps: apps, prepare: { [self] in
                 events.append("prepare")
                 return prepareFailure
-            }, resume: { [self] in events.append("resume") }, quit: { [self] in events.append("quit") })
+            }, resume: { [self] in events.append("resume") }, quit: { [self] in events.append("quit") },
+                readReviewSource: { reviewSourceAvailable ? RemovedApp.Source.capture($0) : nil })
         }
     }
 
@@ -63,6 +70,57 @@ import Testing
         #expect(!fixture.exists("Library/Caches/org.example.Cleaner"))
         #expect(fixture.exists("Library/Preferences/org.example.Cleaner.plist"))
         #expect(fixture.exists("Library/Application Support/Cleaner/history.json"))
+    }
+
+    @Test func replacingTheReviewedAppNeverRemovesTheReplacementOrItsData() async throws {
+        let fixture = try Fixture()
+        let model = fixture.model()
+        await model.load()
+        let original = fixture.root.appending(path: "Original-held.app")
+        try FileManager.default.moveItem(at: URL(fileURLWithPath: fixture.appPath), to: original)
+        try fixture.file("Applications/Cleaner.app/Contents/MacOS/program")
+        let info: NSDictionary = ["CFBundleIdentifier": fixture.bundleID, "CFBundleName": "Replacement"]
+        try info.write(to: fixture.root.appending(path: "Applications/Cleaner.app/Contents/Info.plist"))
+        await model.remove()
+        #expect(!model.removed && !model.running && model.problem != nil)
+        #expect(fixture.events.isEmpty)
+        #expect(fixture.exists("Applications/Cleaner.app/Contents/MacOS/program"))
+        #expect(fixture.exists("Library/Caches/org.example.Cleaner/cache"))
+        #expect(fixture.exists("Original-held.app/Contents/MacOS/program"))
+    }
+
+    @Test func finderCanMoveOnlyTheReviewedSelfAfterNativePermissionDenial() async throws {
+        let fixture = try Fixture()
+        var prompts = 0
+        let finder = FinderAppTrash(authorize: { prompts += 1; return 0 }, move: { request in
+            #expect(request.stillCurrent())
+            #expect(request.source.path == fixture.appPath)
+            #expect(fixture.exists("Library/Preferences/org.example.Cleaner.plist"))
+            do {
+                let trash = fixture.root.appending(path: ".Trash")
+                try FileManager.default.createDirectory(at: trash, withIntermediateDirectories: true)
+                try FileManager.default.moveItem(at: request.source, to: trash.appending(path: "Cleaner.app"))
+                return 0
+            } catch { Issue.record(error); return -1 }
+        })
+        let model = fixture.model(denyNativeMove: true, finder: finder)
+        await model.load()
+        model.chosen = []
+        await model.remove()
+        #expect(model.removed && prompts == 1)
+        #expect(fixture.events == ["prepare", "recycle", "quit"])
+        #expect(fixture.exists(".Trash/Cleaner.app/Contents/MacOS/program"))
+        #expect(fixture.exists("Library/Preferences/org.example.Cleaner.plist"))
+    }
+
+    @Test func aReviewCanWaitForTheExactBundleGrantBeforeReadingItsParent() async throws {
+        let fixture = try Fixture()
+        let model = fixture.model(reviewSourceAvailable: false)
+        await model.load()
+        #expect(model.canRemove)
+        await model.remove()
+        #expect(model.removed && fixture.events.last == "quit")
+        #expect(fixture.exists("Library/Preferences/org.example.Cleaner.plist"))
     }
 
     @Test func chosenOwnDataIsNotRecreatedByTheUninstallHistory() async throws {

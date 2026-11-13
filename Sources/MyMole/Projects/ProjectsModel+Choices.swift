@@ -74,7 +74,7 @@ extension ProjectsModel {
     /// Whether `path` goes: chosen itself or inside something chosen and
     /// not left out; partly when something inside it differs.
     func state(of path: String) -> Check {
-        guard let o = owner(of: path) else { return .off }
+        guard !isKeptElsewhere(path), let o = owner(of: path) else { return .off }
         let goes = chosen.contains(path) || (!excluded.contains(path) && marker(above: path, top: o.entry.path)?.chosen == true)
         if index.holding.contains(path) { return .mixed }
         return goes ? .on : .off
@@ -123,7 +123,7 @@ extension ProjectsModel {
     private func note(_ p: String, in entry: String) {
         guard p != entry, partInfo[p] == nil else { return }
         if let f = contents[entry]?.find(path: p) {
-            partInfo[p] = FootprintEntry(path: p, bytes: f.size, modified: f.latestChange)
+            partInfo[p] = FootprintEntry(path: p, bytes: f.size, modified: f.latestChange, reclaim: f.reclaim)
             return
         }
         var st = stat()
@@ -135,12 +135,13 @@ extension ProjectsModel {
             partInfo[p] = FootprintEntry(path: p, bytes: 0, modified: modified)
             Task.detached(priority: .userInitiated) { [weak self] in
                 let f = StorageScanner.scan(path: p, workers: 2).root
-                await self?.measuredPart(FootprintEntry(path: p, bytes: f.size, modified: f.latestChange))
+                await self?.measuredPart(FootprintEntry(path: p, bytes: f.size, modified: f.latestChange, reclaim: f.reclaim))
             }
         } else {
             let name = (p as NSString).lastPathComponent
             let listed = contents[entry]?.find(path: (p as NSString).deletingLastPathComponent)?.listedFiles.first { $0.name == name }
-            partInfo[p] = FootprintEntry(path: p, bytes: listed?.size ?? Int64(st.st_blocks) * 512, modified: modified)
+            partInfo[p] = FootprintEntry(path: p, bytes: listed?.size ?? Int64(st.st_blocks) * 512, modified: modified,
+                                         reclaim: listed?.reclaim ?? Reclaim.file(at: p))
         }
     }
 

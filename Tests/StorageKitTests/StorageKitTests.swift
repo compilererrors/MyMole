@@ -450,11 +450,13 @@ func testBin(_ box: Sandbox) throws -> TrashBackend {
     @Test func unattendedScansAreSavedOnlyEveryFewHours() throws {
         let box = try Sandbox()
         let date = Date(timeIntervalSince1970: 1_800_000_000)
-        #expect(SnapshotStore.isDue(for: "/r", now: date, base: box.url))
+        // At Balanced, as before the scale: every six hours.
+        let interval = ResultSize.balanced.historyInterval
+        #expect(SnapshotStore.isDue(for: "/r", now: date, base: box.url, interval: interval))
         SnapshotStore.save(Snapshot(rootPath: "/r", date: date, sizes: ["": 1]), base: box.url)
-        #expect(!SnapshotStore.isDue(for: "/r", now: date.addingTimeInterval(3_600), base: box.url))
+        #expect(!SnapshotStore.isDue(for: "/r", now: date.addingTimeInterval(3_600), base: box.url, interval: interval))
         #expect(SnapshotStore.isDue(
-            for: "/r", now: date.addingTimeInterval(SnapshotStore.unattendedInterval), base: box.url))
+            for: "/r", now: date.addingTimeInterval(SnapshotStore.unattendedInterval), base: box.url, interval: interval))
     }
 
     @Test func twoScansInTheSameSecondAreBothKept() throws {
@@ -608,7 +610,8 @@ func testBin(_ box: Sandbox) throws -> TrashBackend {
             for background in [false, true] {
                 let workers = PerformanceLevel.allCases.map { $0.workers(background: background, cores: cores) }
                 #expect(workers == workers.sorted(), "cores \(cores), background \(background): \(workers)")
-                #expect(workers.allSatisfy { $0 >= 1 && $0 <= 48 })
+                // Up to Maximum the walkers have a ceiling; Hyperspeed has none.
+                #expect(workers.dropLast().allSatisfy { $0 >= 1 && $0 <= 48 })
             }
             // Work started ahead of need never gets more than work someone waits on.
             for level in PerformanceLevel.allCases {
@@ -629,12 +632,26 @@ func testBin(_ box: Sandbox) throws -> TrashBackend {
         #expect(!PerformanceLevel.light.runsScansTogether && PerformanceLevel.balanced.runsScansTogether)
     }
 
-    @Test func savedLevelIsReadAndUnknownValuesFallBack() {
-        #expect(PerformanceLevel(saved: 0) == .balanced)
+    @Test func savedLevelIsReadAndUnknownValuesFallBackToMaximum() {
+        #expect(PerformanceLevel.standard == .full && PerformanceLevel.full.title == "Maximum")
+        #expect(PerformanceLevel(saved: 0) == .full)
         #expect(PerformanceLevel(saved: 1) == .gentle)
-        #expect(PerformanceLevel(saved: 5) == .full)
-        #expect(PerformanceLevel(saved: 9) == .balanced)
-        #expect(PerformanceLevel(saved: -1) == .balanced)
+        #expect(PerformanceLevel(saved: 3) == .balanced)
+        #expect(PerformanceLevel(saved: 6) == .hyperspeed)
+        #expect(PerformanceLevel(saved: 9) == .full)
+        #expect(PerformanceLevel(saved: -1) == .full)
+    }
+
+    @Test func maximumKeepsItsLimitsAndHyperspeedHasNone() {
+        for cores in [1, 8, 24] {
+            #expect(PerformanceLevel.full.workers(background: false, cores: cores) == min(max(cores * 3, 4), 48))
+            #expect(PerformanceLevel.full.workers(background: true, cores: cores) == max(cores, 4))
+            let unlimited = PerformanceLevel.hyperspeed
+            #expect(unlimited.workers(background: true, cores: cores) == unlimited.workers(background: false, cores: cores))
+        }
+        // Balanced keeps the three walks of before; Maximum six or half the cores.
+        #expect(PerformanceLevel.allCases.map { $0.scanSlots(cores: 8) } == [1, 2, 3, 4, 6, .max])
+        #expect(PerformanceLevel.full.scanSlots(cores: 20) == 10)
     }
 }
 

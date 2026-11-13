@@ -10,6 +10,8 @@ struct LargeFile: Identifiable, Hashable, Sendable {
     let size: Int64
     let modified: Date
     let kind: FileKind
+    /// What moving it frees, where the scan saw it share blocks with clones.
+    var reclaim: Reclaim? = nil
     var id: String { path }
     var marked: Marked { Marked(path: path, name: name, size: size, isFolder: false) }
 }
@@ -75,7 +77,9 @@ final class StorageModel {
         StorageScanner.scan(path: $0, progress: $1, workers: $2, skip: $3, inheritedKind: $4)
     }
     @ObservationIgnored private var mapReader: (owner: UUID, job: Task<Void, Never>)?
-    @ObservationIgnored var collectFiles: @Sendable (Folder, @Sendable () -> Bool) -> [LargeFile] = { StorageModel.collectLargeFiles($0, stop: $1) }
+    @ObservationIgnored var collectFiles: @Sendable (Folder, @Sendable () -> Bool) -> [LargeFile] = {
+        StorageModel.collectLargeFiles($0, limit: .max, stop: $1)
+    }
     /// The ways the disk map can be drawn, picked from the toolbar menu.
     enum Chart: String, CaseIterable, Identifiable {
         case rings, wheel, pie, boxes, columns, bars
@@ -166,7 +170,7 @@ final class StorageModel {
             do {
                 let export = try ScanExport.read(data)
                 let tree = export.tree()
-                return .success((export, tree, ScanIndex(tree), Self.collectLargeFiles(tree)))
+                return .success((export, tree, ScanIndex(tree, limit: .max), Self.collectLargeFiles(tree, limit: .max)))
             } catch let f as ScanExport.Failure {
                 return .failure(f)
             } catch {
@@ -199,7 +203,7 @@ final class StorageModel {
             root = tree
             current = tree
             self.index = index
-            largeFiles = large
+            installLargeFiles(large, spill: nil)
             liveFiles = tree.fileCount
             liveBytes = tree.size
             opened = (url.lastPathComponent, export.date)
@@ -247,6 +251,40 @@ final class StorageModel {
     private(set) var compareProblem: String?
     private(set) var comparing = false
     private(set) var largeFiles: [LargeFile] = []
+    /// The large files on disk instead, once they're past the memory budget
+    /// of Large results; `largeFiles` is empty then.
+    private(set) var largeFilesSpill: SpillTable?
+    /// Moved to the Trash since the table was written: hidden from it.
+    private(set) var spillRemoved: [String] = []
+    /// What a large file list may take in memory; tests set their own.
+    @ObservationIgnored var largeResultBudget: @Sendable () -> Int64? = { ResultSize.current().memoryBudget() }
+    @ObservationIgnored var spillBase = SpillTable.defaultBase
+
+    /// The spilled rows still in the map.
+    var spillKeep: @Sendable (SpillTable.Row) -> Bool {
+        let gone = spillRemoved
+        return { row in !gone.contains { row.path == $0 || row.path.hasPrefix($0 + "/") } }
+    }
+
+    /// Puts a new large file list in place, in memory or on disk, and lets
+    /// the previous table go: a spill never outlives the result it holds.
+    private func installLargeFiles(_ files: [LargeFile], spill: SpillTable?) {
+        let old = largeFilesSpill
+        largeFilesSpill = spill
+        spillRemoved = []
+        largeFiles = spill == nil ? files : []
+        if let old, old !== spill { Task.detached(priority: .utility) { old.remove() } }
+    }
+
+    /// Writes `files` to disk when they'd take more memory than `budget`;
+    /// nil keeps them in memory, also when the write fails or is stopped.
+    nonisolated static func spillIfLarge(_ files: [LargeFile], budget: Int64?, base: URL, stop: () -> Bool) -> SpillTable? {
+        guard let budget, !files.isEmpty else { return nil }
+        let cost = ResultSize.memoryCost(pathBytes: files.reduce(0) { $0 + $1.path.utf8.count }, rows: files.count)
+        guard cost > budget else { return nil }
+        return try? SpillTable(writing: files.lazy.map { SpillTable.Row(path: $0.path, size: $0.size, modified: $0.modified, kind: $0.kind) },
+                               in: base, stop: stop)
+    }
     private(set) var lastDuration: TimeInterval?
     private(set) var incomplete = false
     /// Bumped whenever the tree's shape changes (streamed subtree, prune,
@@ -276,9 +314,55 @@ final class StorageModel {
     func invalidateRemovalHints() { protectionRevision &+= 1 }
     func warmRemovalHints() async {
         guard !marked.isEmpty, !trashing, opened == nil else { return }
-        await removalHints.update(.init(key: removalHintKey, items: Array(marked.values), protections: protections,
-                                       inspectOpenFiles: !Edition.current.isSandboxed))
+        let items = Array(marked.values)
+        await removalHints.update(.init(key: removalHintKey, items: items, protections: protections,
+                                       inspectOpenFiles: !Edition.current.isSandboxed, known: knownReclaims(items)))
     }
+
+    /// What the scanned tree says moving each item frees, for the items it
+    /// has finished reading. Siblings are looked up together, so choosing a
+    /// whole folder's contents stays one pass over it.
+    func knownReclaims(_ items: [Marked]) -> [String: Reclaim] {
+        guard root != nil else { return [:] }
+        let ready = isReady
+        var out: [String: Reclaim] = [:]
+        for (parentPath, children) in Dictionary(grouping: items, by: { ($0.path as NSString).deletingLastPathComponent }) {
+            guard let parent = accessibleFolder(parentPath), ready(parent) else { continue }
+            let folders = Dictionary(parent.subfolders.map { ($0.name, $0) }, uniquingKeysWith: { a, _ in a })
+            let files = Dictionary(parent.listedFiles.map { ($0.name, $0) }, uniquingKeysWith: { a, _ in a })
+            for item in children {
+                let name = (item.path as NSString).lastPathComponent
+                if item.isFolder {
+                    if let f = folders[name], ready(f), f.isFinished, f.size == item.size { out[item.path] = f.reclaim }
+                } else if let f = files[name], f.size == item.size {
+                    out[item.path] = f.reclaim
+                }
+            }
+        }
+        return out
+    }
+
+    /// What moving each outermost item frees: from the tree where it was
+    /// read, else the file as it is now. A folder the tree doesn't hold
+    /// counts its size.
+    nonisolated static func reclaims(of items: [Marked], known: [String: Reclaim], stop: () -> Bool = { false }) -> [String: Reclaim] {
+        let top = Set(Trasher.outermost(items.map(\.path)))
+        var out: [String: Reclaim] = [:]
+        for item in items where top.contains(item.path) {
+            guard !stop() else { break }
+            if let reclaim = known[item.path] {
+                out[item.path] = reclaim
+            } else if !item.isFolder, let reclaim = Reclaim.file(at: item.path) {
+                out[item.path] = reclaim
+            } else {
+                out[item.path] = Reclaim(bytes: item.size)
+            }
+        }
+        return out
+    }
+
+    /// What moving the chosen items frees, once worked out off the main thread.
+    var markedFrees: Int64? { currentRemovalHints?.frees }
     var showReview = false {
         didSet { if !showReview { reviewScan = nil } }
     }
@@ -294,7 +378,7 @@ final class StorageModel {
     private enum Pruned {
         case folder(parent: Folder, child: Folder)
         case file(parent: Folder, item: FileItem)
-        case smallFiles(parent: Folder, bytes: KindBytes, files: Int)
+        case smallFiles(parent: Folder, Folder.SmallFiles)
     }
 
     private var progress: ScanProgress?
@@ -302,6 +386,12 @@ final class StorageModel {
     private var epoch = 0
     /// The running scan was started ahead of need, not by the user.
     private var scanInBackground = false
+    /// Memory pressure stopped a scan started ahead of need; its partial
+    /// map goes once the scan has ended.
+    private var releaseAfterStop = false
+    /// What the pane maps when it opens without a map; only a map of this
+    /// is let go under memory pressure, since opening brings it back.
+    @ObservationIgnored var mapsOnOpen = Home.path
     /// A move that can still be put back, and where in the tree its
     /// entries were taken from.
     private struct Run: UndoableRun {
@@ -309,6 +399,9 @@ final class StorageModel {
         var records: [TrashRecord]
         var pruned: [Pruned]
         var refreshAfterUndo = false
+        /// What each moved item freed, by its original path, so what comes
+        /// back is taken off the history's total in the same measure.
+        var reclaims: [String: Reclaim] = [:]
     }
 
     private var shelf = UndoShelf<Run>()
@@ -335,6 +428,8 @@ final class StorageModel {
     /// A saved scan younger than this makes launch skip the walk; opening
     /// the pane still scans.
     static let freshFor: TimeInterval = 30 * 60
+    /// How long a saved scan makes launch skip the walk at this responsiveness; nil never.
+    @ObservationIgnored var freshWindow: @MainActor (TimeInterval) -> TimeInterval? = { Responsiveness.current().freshWindow($0) }
 
     /// At launch: walks `path` with fewer threads and low priority, unless a
     /// recent scan is saved or the map is already loaded.
@@ -346,7 +441,7 @@ final class StorageModel {
         Task { [weak self] in
             let last = await Task.detached(priority: .utility) { SnapshotStore.history(for: Volumes.historyKey(for: path), base: base).first }.value
             guard let self, root == nil, !scanning else { return }
-            if let last, Date().timeIntervalSince(last.date) < Self.freshFor { return }
+            if let window = freshWindow(Self.freshFor), let last, Date().timeIntervalSince(last.date) < window { return }
             scan(path: path, background: true)
         }
     }
@@ -370,7 +465,10 @@ final class StorageModel {
         let session = DiskScanSession()
         scanSession = session
         scanInBackground = background
-        let p = ScanProgress(collectsFound: true)
+        releaseAfterStop = false
+        // Every result is complete: nothing a scan finds is left out of a list or a search.
+        let indexLimit = Int.max
+        let p = ScanProgress(collectsFound: true, keepsFound: .max)
         progress = p
         // The same folder again, with a complete map in place: that map stays.
         let keepsMap = path == rootPath && root != nil && (!scanning || refreshing)
@@ -385,7 +483,7 @@ final class StorageModel {
             hovered = nil
             marked.removeAll()
             denied = []
-            largeFiles = []
+            installLargeFiles([], spill: nil)
         }
         completed = []
         scanning = true
@@ -408,21 +506,24 @@ final class StorageModel {
         }
 
         poller?.cancel()
+        let interval = Responsiveness.current().publishInterval
+        // Large files trickle into their list about twice a second, whatever the counts' pace.
+        let foundEvery = max(1, Int((Duration.milliseconds(600) / interval).rounded()))
         poller = Task { [weak self] in
             var tick = 0
             while !Task.isCancelled {
                 self?.liveFiles = p.files
                 self?.liveBytes = p.bytes
-                // Large files trickle into their list about twice a second.
                 tick += 1
-                if tick % 3 == 0 { self?.addFound(p.drainFound(), run: run) }
-                try? await Task.sleep(for: .milliseconds(200))
+                if tick % foundEvery == 0 { self?.addFound(p.drainFound(), run: run) }
+                try? await Task.sleep(for: interval)
             }
         }
 
         let level = PerformanceLevel.current()
         let workers = level.workers(background: background)
         let (budget, scanFolder, collectFiles) = (scanBudget, scanFolder, collectFiles)
+        let (memoryBudget, spillBase) = (largeResultBudget(), spillBase)
         let skips = DiskMapSkips.under(path)
         skipped = skips.full.sorted()
         scanJob = Task.detached(priority: level.priority(background: background)) { [weak self] in
@@ -452,16 +553,20 @@ final class StorageModel {
                 return
             }
             let large = collectFiles(result.root, { p.isCancelled })
+            let spill = p.isCancelled ? nil : Self.spillIfLarge(large, budget: memoryBudget, base: spillBase, stop: { p.isCancelled })
             // For searching the whole scan; the tree doesn't change until it's handed over.
-            let index = p.isCancelled ? nil : ScanIndex(result.root, stop: { p.isCancelled })
+            let index = p.isCancelled ? nil : ScanIndex(result.root, limit: indexLimit, stop: { p.isCancelled })
             // Kept for comparing even when part couldn't be read, marked so
             // what was missed never shows as having shrunk or vanished.
             let snapshot = p.isCancelled
                 ? nil
                 : Snapshot(
                     of: result.root, incomplete: !result.deniedPaths.isEmpty || result.root.unreadable, excluded: skips.relative, stop: { p.isCancelled })
-            await self?.finish(result, large: p.isCancelled ? nil : large, snapshot: p.isCancelled ? nil : snapshot,
-                               index: p.isCancelled ? nil : index, run: run, stopped: p.isCancelled)
+            // Read once: a stop between two reads mustn't both install the table and delete it.
+            let stopped = p.isCancelled
+            if stopped { spill?.remove() }
+            await self?.finish(result, large: stopped ? nil : (spill == nil ? large : []), snapshot: stopped ? nil : snapshot,
+                               index: stopped ? nil : index, run: run, stopped: stopped, spill: stopped ? nil : spill)
         }
     }
 
@@ -502,11 +607,12 @@ final class StorageModel {
         let read = scanSubfolder
         let budget = scanBudget
         poller?.cancel()
+        let interval = Responsiveness.current().publishInterval
         poller = Task { [weak self] in
             while !Task.isCancelled {
                 self?.liveFiles = p.files
                 self?.liveBytes = p.bytes
-                try? await Task.sleep(for: .milliseconds(200))
+                try? await Task.sleep(for: interval)
             }
         }
         scanJob = Task.detached(priority: level.priority(background: false)) { [weak self] in
@@ -535,20 +641,25 @@ final class StorageModel {
         let predecessor = mapReader?.job
         let owner = UUID()
         let collect = collectFiles
+        let indexLimit = Int.max
+        let (memoryBudget, spillBase) = (largeResultBudget(), spillBase)
         let worker = Task.detached(priority: .userInitiated) {
             await predecessor?.value
             guard !progress.isCancelled,
-                  let updated = map.replacingSubtree(at: path, with: result.root, stop: { progress.isCancelled }) else { return nil as (Folder, [LargeFile], ScanIndex)? }
+                  let updated = map.replacingSubtree(at: path, with: result.root, stop: { progress.isCancelled }) else { return nil as (Folder, [LargeFile], ScanIndex, SpillTable?)? }
             let files = collect(updated, { progress.isCancelled })
             guard !progress.isCancelled else { return nil }
-            let index = ScanIndex(updated, stop: { progress.isCancelled })
-            return progress.isCancelled ? nil : (updated, files, index)
+            let index = ScanIndex(updated, limit: indexLimit, stop: { progress.isCancelled })
+            let spill = progress.isCancelled ? nil : Self.spillIfLarge(files, budget: memoryBudget, base: spillBase, stop: { progress.isCancelled })
+            guard !progress.isCancelled else { spill?.remove(); return nil }
+            return (updated, files, index, spill)
         }
         let barrier = Task { _ = await worker.value }
         mapReader = (owner, barrier)
         let prepared = await worker.value
         if mapReader?.owner == owner { mapReader = nil }
-        guard run == epoch, !progress.isCancelled, let (updated, files, index) = prepared else {
+        guard run == epoch, !progress.isCancelled, let (updated, files, index, spill) = prepared else {
+            prepared?.3?.remove()
             if let prepared { RetiredValue(prepared).releaseLater() }
             if run == epoch { finish(nil, large: nil, snapshot: nil, index: nil, run: run) }
             return
@@ -558,7 +669,7 @@ final class StorageModel {
         root = updated
         current = location.lazy.compactMap { updated.find(path: $0) }.first ?? updated
         self.index = index
-        largeFiles = files
+        installLargeFiles(files, spill: spill)
         selection = selection.filter { Self.holds(updated, $0) }
         marked = marked.filter { key, _ in key != path && !key.hasPrefix(path + "/") && !path.hasPrefix(key + "/") }
         denied.removeAll { $0 == path || $0.hasPrefix(path + "/") }
@@ -613,19 +724,17 @@ final class StorageModel {
         var all = largeFiles
         all.reserveCapacity(all.count + found.count)
         for f in found {
-            all.append(LargeFile(path: f.path, name: f.name, folder: f.folder, size: f.size, modified: f.modified, kind: f.kind))
-        }
-        if all.count > Self.largeFileLimit {
-            all.sort { $0.size > $1.size }
-            all.removeLast(all.count - Self.largeFileLimit)
+            all.append(LargeFile(path: f.path, name: f.name, folder: f.folder, size: f.size, modified: f.modified, kind: f.kind,
+                                 reclaim: f.reclaim.flatMap { $0.bytes < f.size ? $0 : nil }))
         }
         largeFiles = all
     }
 
-    nonisolated static let largeFileLimit = 5000
+    /// The largest files listed at the standard result size.
+    nonisolated static let standardLargeFiles = 5000
 
     /// Whether `folder` has a folder or a listed file at `path`.
-    static func holds(_ folder: Folder, _ path: String) -> Bool {
+    nonisolated static func holds(_ folder: Folder, _ path: String) -> Bool {
         if folder.find(path: path) != nil { return true }
         let name = (path as NSString).lastPathComponent
         return folder.find(path: (path as NSString).deletingLastPathComponent)?.listedFiles.contains { $0.name == name } ?? false
@@ -645,7 +754,10 @@ final class StorageModel {
         revision += 1
     }
 
-    private func finish(_ r: ScanResult?, large: [LargeFile]?, snapshot: Snapshot?, index: ScanIndex?, run: Int, stopped: Bool = false) {
+    private func finish(_ r: ScanResult?, large: [LargeFile]?, snapshot: Snapshot?, index: ScanIndex?, run: Int, stopped: Bool = false,
+                        spill: SpillTable? = nil) {
+        // A table that didn't become the list on screen goes at once.
+        defer { if let spill, spill !== largeFilesSpill { spill.remove() } }
         guard run == epoch else { return }
         scanSession = nil
         poller?.cancel()
@@ -684,7 +796,7 @@ final class StorageModel {
         if let current { selection = selected.filter { Self.holds(current, $0) } }
         denied = r.deniedPaths
         incomplete = stopped || r.cancelled || !r.deniedPaths.isEmpty || r.root.unreadable
-        if let large { largeFiles = large }
+        if let large { installLargeFiles(large, spill: spill) }
         lastDuration = r.duration
         liveFiles = r.root.fileCount
         liveBytes = r.root.size
@@ -708,7 +820,45 @@ final class StorageModel {
         }
         scanning = false
         revision += 1
+        if releaseAfterStop {
+            releaseAfterStop = false
+            releaseMap()
+            return
+        }
         readDiskSpace(of: r.root.path, run: run)
+    }
+
+    /// Memory macOS asked back. A scan started ahead of need stops, and the
+    /// partial map it leaves goes. Under critical pressure a finished map of
+    /// the home folder goes too while the pane isn't on screen; opening the
+    /// pane maps again, and saved scans and Changes stay.
+    func relieveMemory(critical: Bool, onScreen: Bool) {
+        if scanning, scanInBackground, !refreshing {
+            releaseAfterStop = !onScreen
+            cancelScan()
+            return
+        }
+        if critical, !onScreen { releaseMap() }
+    }
+
+    /// A lean setting doesn't keep the map while you're elsewhere; opening
+    /// the pane maps again. The same guards as under memory pressure apply.
+    func releaseIdleMap() { releaseMap() }
+
+    /// Lets go of the map, unless anything depends on it: marks, a move or
+    /// its Undo, a scan, or a map opened from a file.
+    private func releaseMap() {
+        guard root != nil, !scanning, !trashing, marked.isEmpty, !canUndo, opened == nil, rootPath == mapsOnOpen else { return }
+        let previous = RetiredValue((root, current, index, largeFiles))
+        defer { previous.releaseLater() }
+        ChartLayouts.removeAll()
+        root = nil
+        current = nil
+        hovered = nil
+        index = nil
+        installLargeFiles([], spill: nil)
+        selection = []
+        revision += 1
     }
 
     /// How the disk the map was made of is used beyond the map, read off the
@@ -817,10 +967,13 @@ final class StorageModel {
         comparing = false
     }
 
-    nonisolated static func collectLargeFiles(_ root: Folder, limit: Int = StorageModel.largeFileLimit, stop: () -> Bool = { false }) -> [LargeFile] {
+    nonisolated static func collectLargeFiles(_ root: Folder, limit: Int = StorageModel.standardLargeFiles, stop: () -> Bool = { false }) -> [LargeFile] {
         guard limit > 0, !stop() else { return [] }
+        // Trimmed back to `limit` whenever twice as many are held; without a
+        // limit nothing is trimmed and the list grows as needed.
+        let batch = limit > Int.max / 2 ? Int.max : limit * 2
         var out: [LargeFile] = []
-        out.reserveCapacity(limit * 2)
+        out.reserveCapacity(min(batch, 16_384))
         var cutoff = Int64.min
         func largestFirst(_ a: LargeFile, _ b: LargeFile) -> Bool { a.size == b.size ? a.path < b.path : a.size > b.size }
         var stack = [root]
@@ -834,8 +987,8 @@ final class StorageModel {
                 out.append(
                     LargeFile(
                         path: path + "/" + item.name, name: item.name, folder: path, size: item.size,
-                        modified: item.modified, kind: item.kind))
-                if out.count >= limit * 2 {
+                        modified: item.modified, kind: item.kind, reclaim: item.shared > 0 ? item.reclaim : nil))
+                if out.count >= batch {
                     out.sort(by: largestFirst)
                     out.removeLast(out.count - limit)
                     cutoff = out.last?.size ?? Int64.min
@@ -888,7 +1041,8 @@ final class StorageModel {
     /// Hovered, or selected in the list.
     func isHighlighted(_ s: Segment) -> Bool {
         if hovered == s { return true }
-        if case .folder(let f) = s { return selection.contains(f.path) }
+        // Asked for every segment on every frame a chart draws.
+        if case .folder(let f) = s, !selection.isEmpty { return selection.contains(f.path) }
         return false
     }
 
@@ -992,7 +1146,7 @@ final class StorageModel {
         let sizes = Dictionary(current.subfolders.filter { !isPending($0) }.map { ($0.path, $0.size) }, uniquingKeysWith: { a, _ in a })
         let progress = ScanProgress()
         let listed = await withTaskCancellationHandler {
-            await Task.detached(priority: .userInitiated) { FolderContents.read(path, progress: progress) }.value
+            await Task.detached(priority: .userInitiated) { FolderContents.read(path, progress: progress, limit: .max) }.value
         } onCancel: { progress.cancel() }
         guard !Task.isCancelled, run == epoch, self.current === current, opened == nil, !trashing else { return }
         guard let listed else {
@@ -1079,6 +1233,7 @@ final class StorageModel {
         trashing = true
         removalPhase = .preparing
         let selected = marked
+        let known = knownReclaims(Array(selected.values))
         let wasScanning = scanning
         cancelScan()
         let stoppedAt = ContinuousClock.now
@@ -1104,7 +1259,8 @@ final class StorageModel {
                     guard !job.isStopped, item.proof?.isCurrent != false, let fresh = FolderContents.capture(item.path) else { return nil }
                     return (item.path, fresh)
                 }, uniquingKeysWith: { a, _ in a })
-                return (items, proofs)
+                // Read before the move, while the files are where they were chosen.
+                return (items, proofs, Self.reclaims(of: items, known: known, stop: { job.isStopped }))
             }
             if wasScanning { removalPhase = .stoppingScan }
             await scanner?.value
@@ -1127,7 +1283,8 @@ final class StorageModel {
             Timings.record(.removalMove, since: movedAt)
             trashing = false
             removalPhase = nil
-            Timings.measure(.removalApply, rows: items.count) { applyTrash(outcome, items: items) }
+            let reclaims = prepared.2
+            Timings.measure(.removalApply, rows: items.count) { applyTrash(outcome, items: items, reclaims: reclaims) }
         }
     }
 
@@ -1179,13 +1336,16 @@ final class StorageModel {
         scan(path: next.path, background: next.background)
     }
 
-    private func applyTrash(_ outcome: TrashOutcome, items: [Marked]) {
+    private func applyTrash(_ outcome: TrashOutcome, items: [Marked], reclaims: [String: Reclaim]) {
         let oldLineage = current?.lineage ?? []
         var pruned: [Pruned] = []
-        var freed: Int64 = 0
+        var movedBytes: Int64 = 0
         let movedPaths = Set(outcome.moved.map(\.original.path))
+        let movedReclaims = reclaims.filter { movedPaths.contains($0.key) }
+        let freed = min(items.filter { movedPaths.contains($0.path) }.reduce(0) { $0 + $1.size },
+                        movedReclaims.values.reduce(Reclaim(), +).bytes)
         for item in items where movedPaths.contains(item.path) {
-            freed += item.size
+            movedBytes += item.size
             if item.isFolder, let f = root?.find(path: item.path), let parent = f.parent {
                 parent.remove(f)
                 pruned.append(.folder(parent: parent, child: f))
@@ -1198,8 +1358,7 @@ final class StorageModel {
         }
         if let choice = allContentsChoice, !choice.paths.isEmpty, choice.paths.isSubset(of: movedPaths),
            let folder = root?.find(path: choice.folder), folder.smallFileCount > 0 {
-            let small = folder.removeSmallFiles()
-            pruned.append(.smallFiles(parent: folder, bytes: small.bytes, files: small.files))
+            pruned.append(.smallFiles(parent: folder, folder.removeSmallFiles()))
         }
         allContentsChoice = nil
         // Inner marks went along with their folder.
@@ -1211,9 +1370,12 @@ final class StorageModel {
         let previousFiles = RetiredValue(largeFiles)
         largeFiles = largeFiles.filter { !removed($0.path) }
         previousFiles.releaseLater()
+        if largeFilesSpill != nil { spillRemoved += Trasher.outermost(movedPaths) }
         let record = CleanupRecord(source: "Disk Map", items: outcome.moved.count, bytes: freed, failed: outcome.failed.count)
         let needsRefresh = items.contains { $0.needsRefresh && movedPaths.contains($0.path) }
-        if !outcome.moved.isEmpty { shelf.add(Run(id: record.id, records: outcome.moved, pruned: pruned, refreshAfterUndo: needsRefresh)) }
+        if !outcome.moved.isEmpty {
+            shelf.add(Run(id: record.id, records: outcome.moved, pruned: pruned, refreshAfterUndo: needsRefresh, reclaims: movedReclaims))
+        }
         if needsRefresh, scanAfterTrash == nil { scanAfterTrash = (rootPath, false) }
         CleanupLog.submit(record, to: logURL)
         // If the open folder went to the Trash, step out to its parent.
@@ -1223,7 +1385,7 @@ final class StorageModel {
         revision += 1
         var text = outcome.moved.isEmpty && !outcome.failed.isEmpty
             ? nothingMoved(outcome.failed)
-            : String(localized: "Moved \(outcome.moved.count) item\(outcome.moved.count == 1 ? "" : "s") (\(ByteCountFormatter.string(fromByteCount: freed, countStyle: .file))) to the Trash")
+            : String(localized: "Moved \(outcome.moved.count) item\(outcome.moved.count == 1 ? "" : "s") (\(Freeing.phrase(movedBytes, frees: freed))) to the Trash")
         if !outcome.moved.isEmpty && !outcome.failed.isEmpty { text += String(localized: " · \(outcome.failed.count) skipped") }
         showNotice(Notice(text: text, canUndo: !outcome.moved.isEmpty))
     }
@@ -1269,14 +1431,18 @@ final class StorageModel {
             case .file(let parent, let item) where !failed.contains(parent.path + "/" + item.name):
                 parent.restoreFile(item)
                 bytes += item.size
-            case .smallFiles(let parent, let small, let files) where failed.isEmpty:
-                parent.restoreSmallFiles(bytes: small, files: files)
-                bytes += small.total
+            case .smallFiles(let parent, let small) where failed.isEmpty:
+                parent.restoreSmallFiles(small)
+                bytes += small.bytes.total
             default:
                 stillOut.append(p)
             }
         }
         let restored = undoRecords.count - failed.count
+        // Counted as the move was: what those items freed.
+        let reclaims = undone?.reclaims ?? [:]
+        let back = undoRecords.map(\.original.path).filter { !failed.contains($0) }
+        if !reclaims.isEmpty { bytes = back.compactMap { reclaims[$0] }.reduce(Reclaim(), +).bytes }
         if let id = undoLogID { CleanupLog.submitRestore(id, restored: restored, bytes: bytes, failed: failed.count, in: logURL) }
         // What couldn't come back stays ready for another try.
         undoRecords = failedRecords

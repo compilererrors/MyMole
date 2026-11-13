@@ -7,7 +7,9 @@ import Synchronization
 /// any background one, so the disk and the cores aren't split so finely
 /// that nothing finishes. A scan stopped while it waits leaves the queue.
 public final class ScanBudget: Sendable {
-    public static let shared = ScanBudget(slots: 3)
+    /// The app's walks, as many at once as the scan speed allows; read as
+    /// each walk asks for a slot, so a change applies to the next one.
+    public static let shared = ScanBudget(slots: { PerformanceLevel.current().scanSlots() })
 
     private final class Request: Sendable {
         let cancelled = Atomic<Bool>(false)
@@ -25,9 +27,15 @@ public final class ScanBudget: Sendable {
     }
 
     private let state = Mutex(State())
-    public let slots: Int
+    private let slotCount: @Sendable () -> Int
+    public var slots: Int { max(1, slotCount()) }
 
-    public init(slots: Int) { self.slots = max(1, slots) }
+    public init(slots: Int) {
+        let fixed = max(1, slots)
+        slotCount = { fixed }
+    }
+
+    public init(slots: @escaping @Sendable () -> Int) { slotCount = slots }
 
     /// Scans running now, and waiting.
     public var running: Int { state.withLock { $0.running } }

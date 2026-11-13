@@ -18,10 +18,10 @@ extension ProjectsModel {
 
         var title: String {
             switch self {
-            case .cleanPath(let p, _): String(localized: "Clean \((p as NSString).lastPathComponent)")
-            case .cleanName(let n): String(localized: "Clean every folder named “\(n)”")
-            case .keepPath(let p): String(localized: "Keep \((p as NSString).lastPathComponent)")
-            case .keepName(let n): String(localized: "Keep everything named “\(n)”")
+            case .cleanPath(let p, _): String(localized: "Blacklist: \((p as NSString).lastPathComponent)")
+            case .cleanName(let n): String(localized: "Blacklist every folder named “\(n)”")
+            case .keepPath(let p): String(localized: "Whitelist: \((p as NSString).lastPathComponent)")
+            case .keepName(let n): String(localized: "Whitelist everything named “\(n)”")
             }
         }
 
@@ -126,7 +126,8 @@ extension ProjectsModel {
         guard panel.runModal() == .OK else { return }
         let picked = panel.urls.map { ($0.path as NSString).standardizingPath }
         let refused = picked.filter { !ProjectRules.canClean($0, project: project) }
-        clean(picked, in: project)
+        let accepted = picked.filter { ProjectRules.canClean($0, project: project) }
+        if !accepted.isEmpty { requestRule(.blacklist(accepted, project: project)) }
         if !refused.isEmpty {
             show(Notice(text: String(localized: "\(refused.count) can't be cleaned: the project folder, its history or a protected place"), canUndo: false))
         }

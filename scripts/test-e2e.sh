@@ -1,15 +1,23 @@
 #!/bin/bash
-# Model-to-filesystem E2E tests. No user files, system commands or real Trash.
+# UI or model-to-filesystem E2E. No user files, commands or real Trash.
 set -euo pipefail
 umask 077
 repo=$(cd "$(dirname "$0")/.." && pwd -P)
 cd "$repo"
 build=()
-if [ "${1:-}" = --appstore ]; then build=(--scratch-path .build/appstore-tests -Xswiftc -DAPPSTORE); shift; fi
-[ "$#" = 0 ] || { echo 'Usage: scripts/test-e2e.sh [--appstore]' >&2; exit 2; }
+filter=AppEndToEndTests
+ui=0
+for option in "$@"; do
+  case "$option" in
+    --appstore) build=(--scratch-path .build/appstore-tests -Xswiftc -DAPPSTORE) ;;
+    --ui) filter=UIInteractionEndToEndTests; ui=1 ;;
+    *) echo 'Usage: scripts/test-e2e.sh [--appstore] [--ui]' >&2; exit 2 ;;
+  esac
+done
 [ -z "${MYMOLE_GUARDED_TEST:-}" ] || { echo 'Start E2E tests outside another test run.' >&2; exit 2; }
 [ -x /usr/bin/sandbox-exec ] || { echo 'E2E requires the macOS process sandbox.' >&2; exit 2; }
 scripts/check-test-policy.sh
+python3 -I scripts/check-ui-coverage.py sources
 swift build --build-tests ${build[@]+"${build[@]}"}
 bin=$(swift build --show-bin-path ${build[@]+"${build[@]}"})
 test_targets=()
@@ -21,10 +29,26 @@ helper="$(dirname "$(xcrun --find swift)")/../libexec/swift/pm/swiftpm-testing-h
 helper="$(cd "$(dirname "$helper")" && pwd -P)/$(basename "$helper")"
 root=$(mktemp -d /private/tmp/mymole-ui-smoke-e2e-XXXXXXXX)
 outside=$(mktemp -d /private/tmp/mymole-e2e-canary-XXXXXXXX)
+root_lease=$(python3 -I scripts/test-cleanup.py lease "$root")
+outside_lease=$(python3 -I scripts/test-cleanup.py lease "$outside")
 token=$(uuidgen)
 test_name="mymole-e2e-${token//-/}"
-cp "$helper" "$root/$test_name"
-helper="$root/$test_name"
+if [ "$ui" = 1 ]; then
+  host="$root/Synthetic UI Host.app/Contents"
+  mkdir -p "$host/MacOS"
+  cp "$helper" "$host/MacOS/$test_name"
+  helper="$host/MacOS/$test_name"
+  python3 -I - "$host/Info.plist" "$test_name" <<'PY'
+import plistlib,sys
+with open(sys.argv[1], 'wb') as stream:
+    plistlib.dump({'CFBundleIdentifier':'com.example.mymole.synthetic-ui-host.'+sys.argv[2].removeprefix('mymole-e2e-').lower(),
+                  'CFBundleExecutable':sys.argv[2], 'CFBundleName':'Synthetic UI Host',
+                  'CFBundlePackageType':'APPL', 'NSPrincipalClass':'NSApplication'},stream)
+PY
+else
+  cp "$helper" "$root/$test_name"
+  helper="$root/$test_name"
+fi
 usertmp=$(cd "$(getconf DARWIN_USER_TEMP_DIR)" && pwd -P)
 items="$usertmp/TemporaryItems"
 mkdir -p "$items"
@@ -43,7 +67,7 @@ PY
 cleanup() {
   local result=$?
   trap - EXIT
-  python3 -I - "$root" "$outside" "$token" "$lease" "$items" "$atomic_prefix" <<'PY' || result=1
+  if python3 -I - "$root" "$outside" "$token" "$lease" "$items" "$atomic_prefix" <<'PY'
 from pathlib import Path
 import json,os,shutil,stat,sys
 root,outside=map(Path,sys.argv[1:3])
@@ -66,8 +90,13 @@ for p in items.glob(prefix+'*'):
     s=p.lstat()
     assert stat.S_ISDIR(s.st_mode) and not p.is_symlink() and s.st_uid==os.getuid() and s.st_mode & 0o077==0
     shutil.rmtree(p)
-for p in [root,outside]: shutil.rmtree(p)
 PY
+  then
+    python3 -I scripts/test-cleanup.py clean "$root" "$root_lease" || result=1
+    python3 -I scripts/test-cleanup.py clean "$outside" "$outside_lease" || result=1
+  else
+    result=1
+  fi
   exit "$result"
 }
 trap cleanup EXIT
@@ -109,13 +138,30 @@ probe "exec 3>'$root/tmp/allowed'" || { cat "$root/probe-error.txt" >&2; echo 'E
 probe '/usr/bin/true' && { echo 'E2E refused: external programs were allowed.' >&2; exit 1; }
 echo 'E2E guard verified: owned fixtures and nonce-bound atomic staging only; outside canary protected; external commands, Apple events and remote network blocked.'
 developer=$(xcode-select -p)
+filters=("$filter")
+if [ "$ui" = 1 ]; then
+  # Native tracking loops and focus state are process local. Give each UI
+  # scenario a fresh AppKit instance, while retaining the strict file sandbox.
+  python3 -I scripts/check-ui-coverage.py e2e-tests > "$root/scenarios"
+  filters=()
+  while IFS= read -r scenario; do filters+=("$scenario"); done < "$root/scenarios"
+fi
+: > "$root/ui-evidence"
+result=0
 for target in "${test_targets[@]}"; do
-  TMPDIR="$root/tmp/" HOME="$root/home" CFFIXED_USER_HOME="$root/home" XDG_CACHE_HOME="$root/cache" \
-    MYMOLE_GUARDED_TEST=1 MYMOLE_E2E=1 MYMOLE_E2E_ROOT="$root" MYMOLE_E2E_TOKEN="$token" MYMOLE_E2E_CANARY="$outside/sentinel" \
-    PLATFORM="$developer/Platforms/MacOSX.platform/Developer" /usr/bin/sandbox-exec -f "$profile" /bin/sh -c \
+ for filter in "${filters[@]}"; do
+  if TMPDIR="$root/tmp/" HOME="$root/home" CFFIXED_USER_HOME="$root/home" XDG_CACHE_HOME="$root/cache" \
+    MYMOLE_GUARDED_TEST=1 MYMOLE_E2E=1 MYMOLE_UI_E2E="$ui" MYMOLE_E2E_ROOT="$root" MYMOLE_E2E_TOKEN="$token" MYMOLE_E2E_CANARY="$outside/sentinel" \
+    PLATFORM="$developer/Platforms/MacOSX.platform/Developer" python3 -I "$repo/scripts/run-test-process.py" --timeout 90 /usr/bin/sandbox-exec -f "$profile" /bin/sh -c \
     'DYLD_FRAMEWORK_PATH="$PLATFORM/Library/Frameworks" DYLD_LIBRARY_PATH="$PLATFORM/usr/lib" exec "$@"' sh \
     "$helper" --test-bundle-path "$bin/$target.xctest/Contents/MacOS/$target" \
-    --testing-library swift-testing --filter AppEndToEndTests --no-parallel \
-    --event-stream-output-path "$root/$target.events.jsonl"
-  python3 -I "$repo/scripts/check-test-events.py" "$root/$target.events.jsonl" --no-skips
+    --testing-library swift-testing --filter "$filter" --no-parallel \
+    --event-stream-output-path "$root/$target.$filter.events.jsonl" | tee -a "$root/ui-evidence"; then
+    python3 -I "$repo/scripts/check-test-events.py" "$root/$target.$filter.events.jsonl" --no-skips || result=1
+  else
+    result=1
+  fi
+ done
 done
+if [ "$ui" = 1 ]; then python3 -I scripts/check-ui-coverage.py e2e "$root/ui-evidence" || result=1; fi
+exit "$result"

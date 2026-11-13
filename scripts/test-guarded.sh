@@ -5,23 +5,31 @@
 # Writes are allowed only inside a fresh run folder and the package's build
 # folder; tests move files into a "Trash" folder of their own. A test that
 # reached for real user data would fail instead of acting.
-# Usage: scripts/test-guarded.sh [--appstore | --sanitize=thread | --release] [--filter <pattern>]
+# Usage: scripts/test-guarded.sh [--appstore] [--release | --sanitize=thread] [--filter <pattern>]
 set -euo pipefail
 umask 077
 
 # A sanitizer changes the build; the run itself is guarded the same way.
 build=()
-if [ "${1:-}" = --sanitize=thread ]; then
-  build=(--sanitize=thread)
+test_edition=direct
+test_configuration=debug
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --appstore) test_edition=appstore ;;
+    --release) test_configuration=release ;;
+    --sanitize=thread) test_configuration=thread ;;
+    *) break ;;
+  esac
   shift
-elif [ "${1:-}" = --release ]; then
-  # Optimized as shipped, using the same isolated fixtures.
-  build=(-c release -Xswiftc -enable-testing --scratch-path .build/release-tests)
-  shift
-elif [ "${1:-}" = --appstore ]; then
-  # The App Store edition's code, built apart so the two never mix.
-  build=(--scratch-path .build/appstore-tests -Xswiftc -DAPPSTORE)
-  shift
+done
+if [ "$test_configuration" = thread ]; then build=(--sanitize=thread); fi
+if [ "$test_configuration" = release ]; then build=(-c release -Xswiftc -enable-testing); fi
+if [ "$test_edition" = appstore ]; then
+  test_scratch=.build/appstore-tests
+  [ "$test_configuration" != release ] || test_scratch=.build/appstore-release-tests
+  build+=(--scratch-path "$test_scratch" -Xswiftc -DAPPSTORE)
+elif [ "$test_configuration" = release ]; then
+  build+=(--scratch-path .build/release-tests)
 fi
 
 fail() { printf '%s\n' "$*" >&2; exit 1; }
@@ -38,6 +46,8 @@ swift build --build-tests ${build[@]+"${build[@]}"}
 root=$(mktemp -d "${TMPDIR:-/tmp}/mymole-guarded-test-XXXXXX")
 root=$(cd "$root" && pwd -P)
 outside=$(mktemp -d /private/tmp/mymole-guard-canary-XXXXXXXX)
+root_lease=$(python3 -I scripts/test-cleanup.py lease "$root")
+outside_lease=$(python3 -I scripts/test-cleanup.py lease "$outside")
 lease=$(python3 -I - "$root" "$outside" <<'PY'
 import json,os,sys
 print(json.dumps({p:[os.lstat(p).st_dev,os.lstat(p).st_ino,os.getuid()] for p in sys.argv[1:]}))
@@ -46,7 +56,7 @@ PY
 cleanup() {
   local result=$?
   trap - EXIT
-  python3 -I - "$root" "$outside" "$lease" <<'PY' || result=1
+  if python3 -I - "$root" "$outside" "$lease" <<'PY'
 import json,os,shutil,stat,sys
 lease=json.loads(sys.argv[3])
 for path in sys.argv[1:3]:
@@ -57,8 +67,13 @@ sentinel=os.path.join(sys.argv[2],'sentinel')
 s=os.lstat(sentinel)
 assert stat.S_ISREG(s.st_mode) and s.st_uid==os.getuid() and s.st_mode & 0o077==0
 with open(sentinel,'rb') as f: assert f.read()==b'synthetic canary'
-for path in sys.argv[1:3]: shutil.rmtree(path)
 PY
+  then
+    python3 -I scripts/test-cleanup.py clean "$root" "$root_lease" || result=1
+    python3 -I scripts/test-cleanup.py clean "$outside" "$outside_lease" || result=1
+  else
+    result=1
+  fi
   exit "$result"
 }
 trap cleanup EXIT
@@ -109,6 +124,13 @@ if [ "${build[0]:-}" = --sanitize=thread ]; then
 fi
 status=0
 matched=0
+test_ui_home=""
+test_deadline=600
+if [ "${MYMOLE_UI_BENCHMARK:-}" = 1 ]; then
+  mkdir -m 700 "$root/ui-home"
+  test_ui_home="$root/ui-home"
+  test_deadline=180
+fi
 targets=()
 # SwiftPM can link one package test bundle or separate target bundles.
 # Run every supported product present so an older layout cannot hide a newer one.
@@ -138,8 +160,8 @@ for target in "${targets[@]}"; do
   # macOS drops DYLD_ variables when it starts a system program such as
   # sandbox-exec, so they're set inside, right before the helper starts.
   if TMPDIR="$root/tmp/" MYMOLE_GUARDED_TEST=1 XDG_CACHE_HOME="$root/cache" PLATFORM="$developer/Platforms/MacOSX.platform/Developer" \
-    INSERT="$insert" /usr/bin/sandbox-exec -f "$profile" /bin/sh -c \
-    '[ -z "$INSERT" ] || export DYLD_INSERT_LIBRARIES="$INSERT"; DYLD_FRAMEWORK_PATH="$PLATFORM/Library/Frameworks" DYLD_LIBRARY_PATH="$PLATFORM/usr/lib" exec "$@"' sh \
+    INSERT="$insert" TEST_UI_HOME="$test_ui_home" python3 -I "$repo/scripts/run-test-process.py" --timeout "$test_deadline" /usr/bin/sandbox-exec -f "$profile" /bin/sh -c \
+    '[ -z "$TEST_UI_HOME" ] || export HOME="$TEST_UI_HOME" CFFIXED_USER_HOME="$TEST_UI_HOME"; [ -z "$INSERT" ] || export DYLD_INSERT_LIBRARIES="$INSERT"; DYLD_FRAMEWORK_PATH="$PLATFORM/Library/Frameworks" DYLD_LIBRARY_PATH="$PLATFORM/usr/lib" exec "$@"' sh \
     "$helper" --test-bundle-path "$bundle" --testing-library swift-testing ${parallel[@]+"${parallel[@]}"} "$@" \
     --event-stream-output-path "$root/$target.events.jsonl"; then
     verified=0

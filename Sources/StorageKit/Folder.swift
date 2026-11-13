@@ -6,6 +6,14 @@ public struct FileItem: Sendable, Hashable {
     public let size: Int64
     public let modified: Date
     public let kind: FileKind
+    /// Of `size`, the bytes it shares with clones: removing it alone
+    /// doesn't free them.
+    public internal(set) var shared: Int64 = 0
+    /// Whole clone family membership, so choosing every member frees a copy.
+    var clones: Reclaim? = nil
+
+    /// What removing this file frees, with the clone family it may complete.
+    public var reclaim: Reclaim { clones ?? Reclaim(bytes: size - shared) }
 }
 
 /// One directory in a scanned tree.
@@ -47,9 +55,18 @@ public final class Folder: Identifiable, @unchecked Sendable {
     public internal(set) var smallFileBytes: Int64 = 0
     /// Bytes of the files directly in this folder, by kind.
     public internal(set) var ownBytes = KindBytes()
+    /// Of `ownBytes`, what those files share with clones, and the clone
+    /// families they belong to that aren't whole among them.
+    var ownShared: Int64 = 0
+    var ownClones: [CloneFamily: CloneMembers] = [:]
 
     // Subtree totals, valid after `finish()`.
     public internal(set) var size: Int64 = 0
+    /// Of `size`, the bytes shared with clones outside the folder, or with
+    /// clones inside it that some file outside still holds.
+    public internal(set) var sharedBytes: Int64 = 0
+    /// Clone families with members inside and the rest elsewhere.
+    var openClones: [CloneFamily: CloneMembers] = [:]
     public internal(set) var fileCount = 0
     public internal(set) var totalBytes = KindBytes()
     public internal(set) var latestChange = Date.distantPast
@@ -84,6 +101,14 @@ public final class Folder: Identifiable, @unchecked Sendable {
     /// Bytes of files directly inside (listed and small).
     public var looseBytes: Int64 { ownBytes.total }
 
+    /// What moving the whole folder frees: `size` less the blocks clones
+    /// elsewhere keep, with the families it would complete. Valid after
+    /// `finish()`; after pruning, an estimate until the place is read again.
+    public var reclaim: Reclaim { Reclaim(bytes: size - sharedBytes, open: openClones) }
+
+    /// What moving only the files directly inside frees.
+    public var looseReclaim: Reclaim { Reclaim(bytes: looseBytes - ownShared, open: ownClones) }
+
     /// Folders from the root down to this one.
     public var lineage: [Folder] {
         var out: [Folder] = []
@@ -109,12 +134,14 @@ public final class Folder: Identifiable, @unchecked Sendable {
         }
         for f in order.reversed() where f === self || !f.isFinished {
             var total = f.ownBytes
+            var reclaim = f.looseReclaim
             var count = f.listedFiles.count + f.smallFileCount
             var latest = f.latestChange
             var risk = f.ownRiskCode
             var complete = f.riskListed && !f.unreadable
             for s in f.subfolders {
                 total.add(s.totalBytes)
+                reclaim.add(s.reclaim)
                 count += s.fileCount
                 latest = max(latest, s.latestChange)
                 risk = PathRisk.merging(risk, s.riskCode)
@@ -122,6 +149,8 @@ public final class Folder: Identifiable, @unchecked Sendable {
             }
             f.totalBytes = total
             f.size = total.total
+            f.sharedBytes = reclaim.shared(of: f.size)
+            f.openClones = reclaim.open
             f.fileCount = count
             f.latestChange = latest
             f.riskCode = risk
@@ -143,6 +172,8 @@ public final class Folder: Identifiable, @unchecked Sendable {
         copy.smallFileCount = smallFileCount
         copy.smallFileBytes = smallFileBytes
         copy.ownBytes = ownBytes
+        copy.ownShared = ownShared
+        copy.ownClones = ownClones
         copy.ownLatestChange = ownLatestChange
         copy.latestChange = ownLatestChange
         copy.ownRiskCode = ownRiskCode
@@ -181,12 +212,16 @@ public final class Folder: Identifiable, @unchecked Sendable {
             copy.smallFileCount = source.smallFileCount
             copy.smallFileBytes = source.smallFileBytes
             copy.ownBytes = source.ownBytes
+            copy.ownShared = source.ownShared
+            copy.ownClones = source.ownClones
             copy.ownLatestChange = source.ownLatestChange
             copy.latestChange = source.latestChange
             copy.ownRiskCode = source.ownRiskCode
             copy.riskListed = source.riskListed
             copy.totalBytes = source.totalBytes
             copy.size = source.size
+            copy.sharedBytes = source.sharedBytes
+            copy.openClones = source.openClones
             copy.fileCount = source.fileCount
             copy.riskCode = source.riskCode
             copy.riskComplete = source.riskComplete
@@ -212,7 +247,7 @@ public final class Folder: Identifiable, @unchecked Sendable {
     public func remove(_ child: Folder) {
         guard let i = subfolders.firstIndex(where: { $0 === child }) else { return }
         subfolders.remove(at: i)
-        propagate(removing: child.totalBytes, files: child.fileCount)
+        propagate(removing: child.totalBytes, shared: child.sharedBytes, clones: child.openClones, files: child.fileCount)
     }
 
     /// Removes a listed file and subtracts it from every ancestor.
@@ -222,27 +257,54 @@ public final class Folder: Identifiable, @unchecked Sendable {
         var bytes = KindBytes()
         bytes[f.kind] = f.size
         ownBytes.subtract(bytes)
-        propagate(removing: bytes, files: 1)
+        ownShared = max(0, ownShared - f.shared)
+        let clones = f.clones?.open ?? [:]
+        Self.count(clones, by: -1, in: &ownClones, shared: &ownShared)
+        propagate(removing: bytes, shared: f.shared, clones: clones, files: 1)
+    }
+
+    /// The small files `removeSmallFiles()` took out, to put back on Undo.
+    public struct SmallFiles: Sendable {
+        public let bytes: KindBytes
+        public let files: Int
+        let shared: Int64
+        let ownClones: [CloneFamily: CloneMembers]
+        let clones: [CloneFamily: CloneMembers]
     }
 
     /// Presentation update after every entry in a complete directory choice
     /// has moved. Individual small files have no nodes in the scanned tree.
-    public func removeSmallFiles() -> (bytes: KindBytes, files: Int) {
+    public func removeSmallFiles() -> SmallFiles {
         var bytes = ownBytes
         for file in listedFiles { bytes[file.kind] = max(0, bytes[file.kind] - file.size) }
-        let files = smallFileCount
+        let listed = listedFiles.reduce(Reclaim()) { $0 + $1.reclaim }
+        let left = listed.shared(of: listedFiles.reduce(0) { $0 + $1.size })
+        // Members of open families that weren't listed files were small ones.
+        var listedCounts: [CloneFamily: Int] = [:]
+        for file in listedFiles { for (family, m) in file.clones?.open ?? [:] { listedCounts[family, default: 0] += m.count } }
+        var small: [CloneFamily: CloneMembers] = [:]
+        for (family, held) in ownClones {
+            var m = held
+            m.count -= listedCounts[family] ?? 0
+            if m.count > 0 { small[family] = m }
+        }
+        let removed = SmallFiles(bytes: bytes, files: smallFileCount, shared: max(0, ownShared - left), ownClones: ownClones, clones: small)
         smallFileCount = 0
         smallFileBytes = 0
         ownBytes.subtract(bytes)
-        propagate(removing: bytes, files: files)
-        return (bytes, files)
+        ownShared = left
+        ownClones = listed.open
+        propagate(removing: bytes, shared: removed.shared, clones: small, files: removed.files)
+        return removed
     }
 
-    public func restoreSmallFiles(bytes: KindBytes, files: Int) {
-        smallFileCount += files
-        smallFileBytes += bytes.total
-        ownBytes.add(bytes)
-        propagate(adding: bytes, files: files)
+    public func restoreSmallFiles(_ removed: SmallFiles) {
+        smallFileCount += removed.files
+        smallFileBytes += removed.bytes.total
+        ownBytes.add(removed.bytes)
+        ownShared += removed.shared
+        ownClones = removed.ownClones
+        propagate(adding: removed.bytes, shared: removed.shared, clones: removed.clones, files: removed.files)
     }
 
     /// Puts back a subfolder removed with `remove(_:)` (undo).
@@ -250,7 +312,7 @@ public final class Folder: Identifiable, @unchecked Sendable {
         guard !subfolders.contains(where: { $0 === child }) else { return }
         subfolders.append(child)
         subfolders.sort { $0.size > $1.size }
-        propagate(adding: child.totalBytes, files: child.fileCount)
+        propagate(adding: child.totalBytes, shared: child.sharedBytes, clones: child.openClones, files: child.fileCount)
     }
 
     /// Puts back a file removed with `removeFile(named:)` (undo).
@@ -261,26 +323,63 @@ public final class Folder: Identifiable, @unchecked Sendable {
         var bytes = KindBytes()
         bytes[file.kind] = file.size
         ownBytes.add(bytes)
-        propagate(adding: bytes, files: 1)
+        ownShared += file.shared
+        let clones = file.clones?.open ?? [:]
+        Self.count(clones, by: 1, in: &ownClones, shared: &ownShared)
+        propagate(adding: bytes, shared: file.shared, clones: clones, files: 1)
     }
 
-    private func propagate(removing bytes: KindBytes, files: Int) {
+    /// A pruned item still holds its blocks in the Trash, so a clone family
+    /// it completed is open again in every folder that held it.
+    private func propagate(removing bytes: KindBytes, shared: Int64, clones: [CloneFamily: CloneMembers], files: Int) {
         var cur: Folder? = self
         while let c = cur {
             c.totalBytes.subtract(bytes)
             c.size = c.totalBytes.total
+            c.sharedBytes = max(0, c.sharedBytes - shared)
+            Self.count(clones, by: -1, in: &c.openClones, shared: &c.sharedBytes)
+            c.sharedBytes = min(c.size, c.sharedBytes)
             c.fileCount = max(0, c.fileCount - files)
             cur = c.parent
         }
     }
 
-    private func propagate(adding bytes: KindBytes, files: Int) {
+    private func propagate(adding bytes: KindBytes, shared: Int64, clones: [CloneFamily: CloneMembers], files: Int) {
         var cur: Folder? = self
         while let c = cur {
             c.totalBytes.add(bytes)
             c.size = c.totalBytes.total
+            c.sharedBytes += shared
+            Self.count(clones, by: 1, in: &c.openClones, shared: &c.sharedBytes)
+            c.sharedBytes = min(c.size, c.sharedBytes)
             c.fileCount += files
             cur = c.parent
+        }
+    }
+
+    /// Takes members of an item's open families out of (`by: -1`) or back
+    /// into (`by: 1`) a folder's count. A family missing from `open` was
+    /// complete there: losing members reopens it and its copy is shared
+    /// again; regaining them all completes it once more.
+    private static func count(_ members: [CloneFamily: CloneMembers], by sign: Int, in open: inout [CloneFamily: CloneMembers], shared: inout Int64) {
+        for (family, item) in members {
+            if var held = open[family] {
+                held.count += sign * item.count
+                if held.count >= held.total {
+                    open[family] = nil
+                    shared = max(0, shared - held.bytes)
+                } else if held.count <= 0 {
+                    open[family] = nil
+                } else {
+                    open[family] = held
+                }
+            } else if sign < 0 {
+                var rest = item
+                rest.count = item.total - item.count
+                guard rest.count > 0 else { continue }
+                open[family] = rest
+                shared += item.bytes
+            }
         }
     }
 

@@ -71,7 +71,11 @@ struct OptimizeView: View {
                 }
             }
             if model.privileged.isAvailable {
-                DSCapsule("Administrator tasks ask for a password", symbol: "lock.shield")
+                if model.privileged.usesApprovedHelper {
+                    DSCapsule("Helper enabled for administrator tasks", symbol: "checkmark.shield")
+                } else {
+                    DSCapsule("macOS approval when administrator access is needed", symbol: "lock.shield")
+                }
             } else {
                 DSCapsule("App Store edition: tasks on your own files", symbol: "lock.shield")
             }

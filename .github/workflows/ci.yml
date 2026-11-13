@@ -53,11 +53,26 @@ jobs:
       - name: End-to-end App Store file flows (synthetic data only)
         run: scripts/test-e2e.sh --appstore
 
+      - name: Native UI interactions (isolated app and synthetic data only)
+        run: scripts/test-e2e.sh --ui
+
+      - name: Native App Store UI interactions (synthetic data only)
+        run: scripts/test-e2e.sh --appstore --ui
+
       - name: Test policy catches violations
         run: scripts/test-policy-guard.sh
 
+      - name: Test cleanup refuses changed roots and symlinks
+        run: python3 -I scripts/test-cleanup-guard.py
+
       - name: Test execution guard rejects skipped and incomplete runs
         run: bash scripts/test-events-guard.sh
+
+      - name: UI inventory rejects missing scenarios and invalid KPI reports
+        run: python3 -I scripts/test-ui-coverage-guard.py
+
+      - name: Test watchdog stops blocked disposable children
+        run: python3 -I scripts/test-process-guard.py
 
       - name: Negative string checks catch unreadable binaries and matches
         run: scripts/test-strings-guard.sh
@@ -92,7 +107,12 @@ jobs:
           MYMOLE_UI_BENCHMARK: '1'
           MYMOLE_STRICT_UI_BENCHMARKS: '1'
           MYMOLE_UI_BENCHMARK_SCOPE: interaction
-        run: scripts/test-guarded.sh --release --filter UIResponsivenessBenchmarkTests
+        run: scripts/test-ui-benchmarks.sh
+
+      - name: Optimized App Store UI interaction budgets
+        env:
+          MYMOLE_UI_BENCHMARK_SCOPE: interaction
+        run: scripts/test-ui-benchmarks.sh --appstore
 
   thread-sanitizer:
     # Shared state across threads in one process: the cleanup log's queue

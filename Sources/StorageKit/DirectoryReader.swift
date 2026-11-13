@@ -13,6 +13,11 @@ struct Entry {
     let fileID: UInt64
     let device: Int32
     let modified: TimeInterval
+    /// How a file shares its blocks; nil where it shares none or the volume doesn't say.
+    var sharing: FileSpace.Sharing? = nil
+
+    /// What removing this file alone frees.
+    var reclaim: Reclaim { .file(allocated: allocated, device: device, sharing: sharing) }
 }
 
 enum ReadOutcome { case ok, denied, failed, cancelled }
@@ -36,6 +41,12 @@ enum DirectoryReader {
     /// FSOPT_PACK_INVAL_ATTRS: every requested attribute gets its slot even
     /// when invalid, so each record has a fixed layout to walk.
     private static let packInvalid: UInt64 = 0x0000_0008
+    /// FSOPT_ATTR_CMN_EXTENDED: `forkattr` asks for extended common
+    /// attributes; the walk asks only for the flags that say a file may
+    /// share blocks. Private size and clone count cost the kernel far more
+    /// per file, so they are read only for the files flagged.
+    private static let commonExtended: UInt64 = 0x0000_0020
+    private static let cmnExtFlags = attrgroup_t(ATTR_CMNEXT_EXT_FLAGS)
     private static let bufferSize = 256 * 1024
 
     static func read(_ path: String, isCancelled: () -> Bool = { false }, _ body: (Entry) -> Void) -> ReadOutcome {
@@ -48,6 +59,7 @@ enum DirectoryReader {
         list.bitmapcount = u_short(ATTR_BIT_MAP_COUNT)
         list.commonattr = cmnReturned | cmnName | cmnDevID | cmnObjType | cmnModTime | cmnFileID | cmnError
         list.fileattr = fileLinkCount | fileAllocSize
+        list.forkattr = cmnExtFlags
 
         let buffer = UnsafeMutableRawPointer.allocate(byteCount: bufferSize, alignment: 8)
         defer { buffer.deallocate() }
@@ -55,7 +67,12 @@ enum DirectoryReader {
         var outcome = ReadOutcome.ok
         while true {
             guard !isCancelled() else { return .cancelled }
-            let count = getattrlistbulk(fd, &list, buffer, bufferSize, packInvalid)
+            var count = getattrlistbulk(fd, &list, buffer, bufferSize, packInvalid | commonExtended)
+            if count < 0, errno == EINVAL || errno == ENOTSUP, list.forkattr != 0 {
+                // A file system that won't say how files share blocks is read without it.
+                list.forkattr = 0
+                count = getattrlistbulk(fd, &list, buffer, bufferSize, packInvalid)
+            }
             if count < 0 {
                 if errno == ENOTSUP || errno == EINVAL { return readFallback(fd: fd, isCancelled: isCancelled, body) }
                 return errno == EACCES || errno == EPERM ? .denied : .failed
@@ -65,7 +82,12 @@ enum DirectoryReader {
             for _ in 0..<count {
                 guard !isCancelled() else { return .cancelled }
                 let length = Int(record.loadUnaligned(as: UInt32.self))
-                if let e = parse(record + 4) { body(e) } else { outcome = .failed }
+                if var e = parse(record + 4, flags: list.forkattr != 0) {
+                    if e.sharing != nil { e.sharing = FileSpace.sharing(at: fd, e.name) }
+                    body(e)
+                } else {
+                    outcome = .failed
+                }
                 record += length
             }
         }
@@ -75,8 +97,9 @@ enum DirectoryReader {
     /// Order: the returned-set, then the error code (getattrlistbulk(2) puts
     /// it right after the returned-set, not in bit order), then the rest in
     /// attr.h bit order: name, devid, objtype, modtime, fileid, and finally
-    /// the file attributes.
-    private static func parse(_ start: UnsafeMutableRawPointer) -> Entry? {
+    /// the file attributes, then the extended flags. A file flagged as
+    /// maybe sharing blocks comes back with an empty `sharing`, to be read.
+    private static func parse(_ start: UnsafeMutableRawPointer, flags requested: Bool) -> Entry? {
         var p = start
         let returned = p.loadUnaligned(as: attribute_set_t.self)
         p += MemoryLayout<attribute_set_t>.size
@@ -99,6 +122,9 @@ enum DirectoryReader {
         let links = p.loadUnaligned(as: UInt32.self)
         p += 4
         let alloc = p.loadUnaligned(as: Int64.self)
+        p += 8
+        let flags = requested && returned.forkattr & cmnExtFlags != 0 ? p.loadUnaligned(as: UInt64.self) : 0
+        let sharing = objType == 1 && flags & UInt64(EF_MAY_SHARE_BLOCKS) != 0 ? FileSpace.Sharing() : nil
 
         if name.isEmpty { return nil }
         let kind: Entry.Kind =
@@ -113,7 +139,8 @@ enum DirectoryReader {
             name: name, kind: kind, allocated: hasAlloc ? alloc : 0,
             linkCount: returned.fileattr & fileLinkCount != 0 ? links : 1,
             fileID: fileID, device: device,
-            modified: TimeInterval(mod.tv_sec) + TimeInterval(mod.tv_nsec) / 1e9)
+            modified: TimeInterval(mod.tv_sec) + TimeInterval(mod.tv_nsec) / 1e9,
+            sharing: sharing)
     }
 
     static func readFallback(fd: Int32, isCancelled: () -> Bool = { false }, _ body: (Entry) -> Void) -> ReadOutcome {

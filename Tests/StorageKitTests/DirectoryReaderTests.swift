@@ -5,6 +5,28 @@ import Testing
 @testable import StorageKit
 
 @Suite struct DirectoryReaderTests {
+    @Test func bulkReadSaysHowFilesShareBlocks() throws {
+        let box = try Sandbox()
+        try box.file("dir/a.bin", bytes: 300_000)
+        #expect(clonefile(box.path + "/dir/a.bin", box.path + "/dir/a clone.bin", 0) == 0)
+        try box.file("dir/b.bin", bytes: 200_000)
+        try box.folder("dir/sub")
+        var entries: [String: Entry] = [:]
+        #expect(DirectoryReader.read(box.path + "/dir") { entries[$0.name] = $0 } == .ok)
+        let a = try #require(entries["a.bin"]), clone = try #require(entries["a clone.bin"]), b = try #require(entries["b.bin"])
+        // The reader's view matches one getattrlist per file.
+        #expect(a.sharing == FileSpace.sharing(box.path + "/dir/a.bin"))
+        #expect(clone.sharing == FileSpace.sharing(box.path + "/dir/a clone.bin"))
+        // A file that shares nothing isn't asked about further.
+        #expect(b.sharing == nil && FileSpace.sharing(box.path + "/dir/b.bin")?.privateBytes == nil)
+        #expect(a.sharing?.sharesAllBlocks == true && a.sharing?.cloneCount == 2 && a.sharing?.privateBytes == 0)
+        #expect(clone.sharing?.cloneID == a.sharing?.cloneID)
+        #expect(b.reclaim.bytes == b.allocated)
+        #expect(entries["sub"]?.sharing == nil && entries["sub"]?.kind == .folder)
+        #expect(a.allocated == box.allocated("dir/a.bin") && b.allocated == box.allocated("dir/b.bin"))
+        #expect(a.reclaim.bytes == 0 && (a.reclaim + clone.reclaim).bytes == a.allocated)
+    }
+
     @Test func bulkReadStopsWithinOneDirectory() throws {
         let box = try Sandbox()
         for i in 0..<128 { try box.file("wide/f\(i)", bytes: 1) }

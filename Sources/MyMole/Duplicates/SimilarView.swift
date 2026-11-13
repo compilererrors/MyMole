@@ -25,16 +25,14 @@ struct DuplicatesPane: View {
 }
 
 /// The switch between the two, in the toolbar of either.
-struct DuplicatesShowPicker: ToolbarContent {
-    @AppStorage(DuplicatesShow.key) private var show: DuplicatesShow = .identical
-
-    var body: some ToolbarContent {
-        ToolbarItem(placement: .principal) {
-            Picker("Show", selection: $show) {
-                ForEach(DuplicatesShow.allCases) { Text($0.title).tag($0) }
-            }
-            .pickerStyle(.segmented)
-        }
+extension DuplicatesShow {
+    /// Identical Files or Similar Photos, centred in the toolbar of both;
+    /// `DuplicatesPane` follows the saved choice.
+    static var picker: PaneTool {
+        let saved = Binding<DuplicatesShow>(
+            get: { UserDefaults.standard.string(forKey: key).flatMap(DuplicatesShow.init(rawValue:)) ?? .identical },
+            set: { UserDefaults.standard.set($0.rawValue, forKey: key) })
+        return PaneTool.choice("duplicates.show", "Show", selection: saved, options: allCases.map { ($0, $0.title) })
     }
 }
 
@@ -99,23 +97,12 @@ struct SimilarView: View {
             }
         }
         .paneToolbar("Duplicates", subtitle: "Pictures that look alike in your own folders") {
-            DuplicatesShowPicker()
-            ToolbarItem(placement: .primaryAction) {
-                if model.scanning {
-                    Button {
-                        model.stop()
-                    } label: {
-                        Label("Stop", systemImage: "stop.fill")
-                    }
-                    .help("Stop searching; the last complete result stays")
-                } else {
-                    Button {
-                        model.scan()
-                    } label: {
-                        Label("Search Again", systemImage: "arrow.clockwise")
-                    }
-                    .help("Look for pictures that look alike again")
-                }
+            DuplicatesShow.picker
+            if model.scanning {
+                PaneTool.button("similar.scan", "Stop", symbol: "stop.fill", help: "Stop searching; the last complete result stays") { model.stop() }
+            } else {
+                PaneTool.button("similar.scan", "Search Again", symbol: "arrow.clockwise",
+                                help: "Look for pictures that look alike again") { model.scan() }
             }
         }
         .actionConfirmation(

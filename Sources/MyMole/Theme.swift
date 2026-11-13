@@ -39,33 +39,6 @@ struct AppIconImage: View {
 // MARK: - Pane chrome
 
 extension View {
-    /// Puts Back and Forward, then the pane's title and subtitle, at the
-    /// leading edge of the window toolbar and its tools at the trailing
-    /// edge, the same on every pane.
-    func paneToolbar<Tools: ToolbarContent>(
-        _ title: LocalizedStringResource, subtitle: LocalizedStringResource, @ToolbarContentBuilder tools: () -> Tools
-    ) -> some View {
-        toolbar {
-            ToolbarItem(placement: .navigation) { PaneHistoryControls() }
-            ToolbarItem(placement: .navigation) {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(title).font(.headline)
-                    Text(subtitle).font(.caption).foregroundStyle(.secondary).lineLimit(1).help(Text(subtitle))
-                }
-                .padding(.horizontal, 6)
-            }
-            .sharedBackgroundVisibility(.hidden)
-            // Pushes the tools to the trailing edge on every pane.
-            ToolbarSpacer(.flexible)
-            tools()
-        }
-        .navigationTitle(Text(title))
-    }
-
-    func paneToolbar(_ title: LocalizedStringResource, subtitle: LocalizedStringResource) -> some View {
-        paneToolbar(title, subtitle: subtitle) { ToolbarItem { EmptyView() } }
-    }
-
     /// The pane's one prominent action. Its label is never shortened.
     func primaryAction() -> some View {
         buttonStyle(.borderedProminent).controlSize(.large).fixedSize()

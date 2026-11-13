@@ -3,10 +3,9 @@ import Foundation
 import StorageKit
 
 // MyMole's privileged tool: a program inside the app that macOS runs as root
-// for one request at a time, after the user enters an administrator's
-// password. Nothing is installed or left running. The request travels as
-// JSON (base64 on the command line), so no object graph from the app is
-// decoded as root, and the tool checks every path against its own rules.
+// for one request at a time, through an approved service or a one-shot prompt.
+// The request travels as versioned JSON (base64 on the command line or XPC).
+// XPC accepts strings only; the tool validates every decoded request and path.
 // Only the direct edition carries the tool; the App Store edition has none.
 
 /// What the app may ask the tool to do.
@@ -45,6 +44,13 @@ public enum PrivilegedReply: Codable, Sendable, Equatable {
 }
 
 public enum PrivilegedTool {
+    /// Used only by the authenticated service to resolve an interrupted reply.
+    /// The same lock also covers one-shot tools from another app instance.
+    public static func isIdle() -> Bool {
+        guard geteuid() == 0, let lock = ToolLock(path: lockPath) else { return false }
+        lock.release()
+        return true
+    }
     /// The tool and the app ship in one bundle; a mismatch means a tool from
     /// another build was asked, which is refused.
     public static let version = "8"

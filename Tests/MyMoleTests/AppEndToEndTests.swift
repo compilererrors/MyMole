@@ -1,5 +1,6 @@
 #if DEBUG
 import CoreGraphics
+import Darwin
 import Foundation
 import ImageIO
 import PrivilegedKit
@@ -13,6 +14,49 @@ import UniformTypeIdentifiers
 @MainActor
 @Suite(.serialized, .enabled(if: ProcessInfo.processInfo.environment["MYMOLE_E2E"] == "1"))
 struct AppEndToEndTests {
+    @Test func multiGigabyteSparseFileMovesAndRestoresWithoutAllocatingItsContents() async throws {
+        let f = try EndToEndFixture()
+        let prefix = Data(repeating: 37, count: 8_192)
+        let path = try f.file("Workspace/Synthetic/large.bin", data: prefix)
+        let length: UInt64 = 4 * 1_024 * 1_024 * 1_024
+        let writer = try FileHandle(forWritingTo: URL(fileURLWithPath: path))
+        try writer.truncate(atOffset: 1_048_576)
+        var probe = stat()
+        try #require(lstat(path, &probe) == 0 && probe.st_blocks * 512 < 65_536,
+                     "Verify sparse-file support on a small owned probe before extending it")
+        try writer.truncate(atOffset: length)
+        try writer.close()
+        var original = stat()
+        try #require(lstat(path, &original) == 0 && original.st_size == Int64(length))
+        try #require(original.st_blocks * 512 < 1_048_576, "The owned fixture must remain sparse and cannot fill the disk")
+        let model = StorageModel()
+        model.snapshotBase = f.root.appending(path: "snapshots")
+        model.protections = f.protections
+        model.logURL = f.log
+        model.trashBackend = f.backend
+        model.jobs = f.jobs
+        model.scanBudget = ScanBudget(slots: 1)
+        model.scan(path: f.home)
+        await model.scanJob?.value
+        model.show(folder: f.home + "/Workspace/Synthetic")
+        await model.chooseAllContents()
+        try #require(model.marked.keys.contains(path))
+        model.trashMarked()
+        await model.trashJob?.value
+        #expect(!f.exists(path) && model.canUndo)
+        model.undoTrash()
+        try await f.wait { !model.trashing && f.exists(path) }
+        await model.scanJob?.value
+        var restored = stat()
+        try #require(lstat(path, &restored) == 0)
+        #expect(restored.st_dev == original.st_dev && restored.st_ino == original.st_ino)
+        #expect(restored.st_size == original.st_size && restored.st_blocks == original.st_blocks)
+        let reader = try FileHandle(forReadingFrom: URL(fileURLWithPath: path))
+        defer { try? reader.close() }
+        #expect(try reader.read(upToCount: prefix.count) == prefix)
+        try reader.seek(toOffset: length - UInt64(prefix.count))
+        #expect(try reader.read(upToCount: prefix.count) == Data(repeating: 0, count: prefix.count))
+    }
     @Test func diskMapChecksAllMovesRealFixtureBytesRecordsHistoryAndRestoresExactly() async throws {
         let f = try EndToEndFixture()
         _ = try f.file("Workspace/Synthetic/.build/large.bin", data: Data(repeating: 17, count: 2_000_000))

@@ -52,6 +52,9 @@ final class ProjectsModel {
     /// The user's corrections: folders to clean that MyMole missed, and
     /// things it offers that must never be cleaned.
     private(set) var rules = ProjectRules()
+    let pins: PinnedItems
+    let ruleConfirmations: ConfirmationSettings
+    var pendingRule: RuleChange?
     /// Set when the saved rules couldn't be read: nothing is moved, and the
     /// file isn't saved over, until they can be.
     private(set) var rulesError: Problem?
@@ -128,6 +131,8 @@ final class ProjectsModel {
     @ObservationIgnored var readContents: @Sendable (String, Int) -> Folder = { StorageScanner.scan(path: $0, workers: $1).root }
 
     private var progress: ScanProgress?
+    /// The running scan was started ahead of need, not by the user.
+    private var scanInBackground = false
     /// A move that can still be put back, the entries it took, and whether
     /// putting it back needs a scan (items kept in part were around it).
     private struct Run: UndoableRun {
@@ -172,10 +177,19 @@ final class ProjectsModel {
     /// The move reads the list again itself.
     private(set) var keptInDeepClean = CleanKeepList()
 
-    /// Kept in Deep Clean, or inside something kept there. A folder that
+    /// Whitelisted here or kept in Deep Clean, including descendants. A folder that
     /// only holds something kept can still be chosen: it goes around it.
     func isKeptElsewhere(_ path: String) -> Bool {
-        keptInDeepClean.paths.contains { path == $0 || path.hasPrefix($0 + "/") }
+        if rules.protects(path) || keptInDeepClean.paths.contains(where: { path == $0 || path.hasPrefix($0 + "/") }) { return true }
+        // A name rule applies inside this entry, never to unrelated ancestors
+        // outside the project, such as a similarly named search root.
+        guard !rules.keepNames.isEmpty, let top = owner(of: path)?.entry.path else { return false }
+        var parent = path
+        while parent.count > top.count {
+            parent = (parent as NSString).deletingLastPathComponent
+            if rules.keepNames.contains((parent as NSString).lastPathComponent) { return true }
+        }
+        return false
     }
 
     /// For tests: these footprints and no saved roots or results; rules
@@ -184,6 +198,8 @@ final class ProjectsModel {
     init(footprints: [ProjectFootprint], base: URL, defaults: UserDefaults, logURL: URL, keepList: URL? = nil) {
         self.base = base
         self.defaults = defaults
+        pins = PinnedItems(defaults: defaults)
+        ruleConfirmations = ConfirmationSettings(defaults: defaults)
         self.logURL = logURL
         self.keepList = keepList ?? base.appending(path: "deep-clean-keep.json")
         roots = []
@@ -197,6 +213,8 @@ final class ProjectsModel {
     ) {
         self.base = base
         self.defaults = defaults
+        pins = PinnedItems(defaults: defaults)
+        ruleConfirmations = ConfirmationSettings(defaults: defaults)
         self.logURL = logURL
         self.keepList = keepList
         roots = defaults.stringArray(forKey: "projects.roots") ?? ProjectFinder.defaultRoots()
@@ -241,6 +259,8 @@ final class ProjectsModel {
     /// A complete result younger than this is shown as it is, not measured
     /// again at launch or when the pane opens; Rescan always measures.
     static let freshFor: TimeInterval = 10 * 60
+    /// How long a result counts as fresh at this responsiveness; nil never.
+    @ObservationIgnored var freshWindow: @MainActor (TimeInterval) -> TimeInterval? = { Responsiveness.current().freshWindow($0) }
 
     /// The running scan, so launch work can wait for it before starting the
     /// next heavy job.
@@ -255,7 +275,7 @@ final class ProjectsModel {
             return
         }
         guard !scannedThisLaunch, !refreshing else { return }
-        if let at = scannedAt, Date().timeIntervalSince(at) < Self.freshFor { return }
+        if let window = freshWindow(Self.freshFor), let at = scannedAt, Date().timeIntervalSince(at) < window { return }
         scan(background: background)
     }
 
@@ -277,6 +297,7 @@ final class ProjectsModel {
         rescanning = []
         scannedThisLaunch = true
         scanning = true
+        scanInBackground = background
         measuredCount = 0
         let roots = roots
         let rules = rules
@@ -305,6 +326,14 @@ final class ProjectsModel {
         _ onFound: ([ProjectFootprint]) -> Void, _ onProject: (ProjectFootprint) -> Void
     ) -> ProjectListing = {
         ProjectScanner.list(roots: $0, rules: $1, progress: $2, workers: $3, onFound: $4, onProject: $5)
+    }
+
+    /// Memory macOS asked back: a scan started ahead of need stops, and the
+    /// pane scans again when it's opened. The last complete result stays.
+    func relieveMemory() {
+        guard scanning, scanInBackground else { return }
+        stop()
+        scannedThisLaunch = false
     }
 
     func stop() {
@@ -386,7 +415,7 @@ final class ProjectsModel {
                 contents.removeValue(forKey: contentsOrder.removeFirst())
             }
             contentsRevision += 1
-            let replacement = FootprintEntry(path: entry.path, bytes: measured.size, modified: measured.latestChange, isDirectory: true)
+            let replacement = FootprintEntry(path: entry.path, bytes: measured.size, modified: measured.latestChange, isDirectory: true, reclaim: measured.reclaim)
             let items = footprint.items.map { item in
                 FootprintItem(id: item.id, category: item.category, title: item.title, location: item.location,
                               attribution: item.attribution, entries: item.entries.map { $0.path == entry.path ? replacement : $0 })
@@ -484,10 +513,17 @@ final class ProjectsModel {
     func growth(_ id: String) -> (bytes: Int64, since: Date)? { ProjectStore.growth(history[id] ?? []) }
 
     var totalBytes: Int64 { footprints.reduce(0) { $0 + $1.bytes } }
-    var freeableBytes: Int64 { footprints.reduce(0) { $0 + $1.removableBytes } }
+    var freeableBytes: Int64 { footprints.reduce(Reclaim()) { $0 + $1.removableReclaim }.bytes }
     var outsideBytes: Int64 { footprints.reduce(0) { $0 + $1.outsideBytes } }
 
     func count(_ heat: Heat) -> Int { footprints.filter { Heat($0.lastActivity) == heat }.count }
+
+    /// Every heat's count in one pass over the projects.
+    func heatCounts() -> [Heat: Int] {
+        var counts: [Heat: Int] = [:]
+        for f in footprints { counts[Heat(f.lastActivity), default: 0] += 1 }
+        return counts
+    }
 
     func bytes(_ category: FootprintCategory) -> Int64 { footprints.reduce(0) { $0 + $1.bytes(category) } }
 
@@ -505,7 +541,10 @@ final class ProjectsModel {
             let base = p == o.entry.path ? o.entry : partInfo[p] ?? FootprintEntry(path: p, bytes: 0, modified: .distantPast)
             let left = ix.leftOut[p] ?? 0
             if left == 0 && p == o.entry.path { return o }
-            let entry = FootprintEntry(path: p, bytes: max(0, base.bytes - left), modified: base.modified)
+            // What's left out may free less than it takes, so the rest is
+            // counted to free at least the difference.
+            let reclaim = left == 0 ? base.reclaim : base.reclaim.map { Reclaim(bytes: $0.bytes - left) }
+            let entry = FootprintEntry(path: p, bytes: max(0, base.bytes - left), modified: base.modified, reclaim: reclaim)
             return Chosen(project: o.project, item: o.item, entry: entry, part: true)
         }
     }
@@ -516,6 +555,12 @@ final class ProjectsModel {
     }
 
     var chosenBytes: Int64 { chosenEntries.reduce(0) { $0 + $1.entry.bytes } }
+    /// What moving the chosen entries frees: clones of files that stay free nothing.
+    var chosenFrees: Int64 { Self.frees(chosenEntries) }
+
+    nonisolated static func frees(_ entries: [Chosen]) -> Int64 {
+        min(entries.reduce(0) { $0 + $1.entry.bytes }, entries.reduce(Reclaim()) { $0 + $1.entry.freeing }.bytes)
+    }
 
     /// The item's entries that the age filter lets through.
     func eligible(_ item: FootprintItem) -> [FootprintEntry] {
@@ -706,7 +751,9 @@ final class ProjectsModel {
         // Gone whole: moved itself, not just around something kept.
         let whole = Set(plan.filter { top, paths in paths == [top] && moved.contains(top) }.keys)
         let gone = picked.filter { e in whole.contains { e.entry.path == $0 || e.entry.path.hasPrefix($0 + "/") } }
-        let freed = gone.filter { whole.contains($0.entry.path) }.reduce(0) { $0 + $1.entry.bytes }
+        let wholeGone = gone.filter { whole.contains($0.entry.path) }
+        let freed = Self.frees(wholeGone)
+        let movedBytes = wholeGone.reduce(0) { $0 + $1.entry.bytes }
         let partly = Set(plan.filter { top, paths in paths != [top] }.keys)
         let goneByProject = Dictionary(grouping: gone, by: \.project)
         for i in footprints.indices {
@@ -730,7 +777,7 @@ final class ProjectsModel {
         CleanupLog.submit(record, to: logURL)
         var text = outcome.moved.isEmpty && !outcome.failed.isEmpty
             ? nothingMoved(outcome.failed)
-            : String(localized: "Moved \(outcome.moved.count) item\(outcome.moved.count == 1 ? "" : "s") (\(ByteCountFormatter.string(fromByteCount: freed, countStyle: .file))) to the Trash")
+            : String(localized: "Moved \(outcome.moved.count) item\(outcome.moved.count == 1 ? "" : "s") (\(Freeing.phrase(movedBytes, frees: freed))) to the Trash")
         if !outcome.moved.isEmpty && !outcome.failed.isEmpty { text += String(localized: " · \(outcome.failed.count) couldn't be moved") }
         if !partly.isEmpty { text += String(localized: " · \(partly.count) kept in part") }
         if let why = held.values.sorted().first {
@@ -776,7 +823,7 @@ final class ProjectsModel {
         dropContents(touching: back.map(\.entry.path))
         let restored = undoRecords.count - failed.count
         if let id = undoLogID {
-            CleanupLog.submitRestore(id, restored: restored, bytes: back.reduce(0) { $0 + $1.entry.bytes }, failed: failed.count, in: logURL)
+            CleanupLog.submitRestore(id, restored: restored, bytes: Self.frees(back), failed: failed.count, in: logURL)
         }
         // What couldn't come back stays ready for another try.
         undoRecords = failedRecords

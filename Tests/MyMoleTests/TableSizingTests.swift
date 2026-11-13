@@ -203,6 +203,76 @@ import Testing
         #expect(name.width == 650)
     }
 
+    /// A window or pane resize fits the name column every frame. That fit
+    /// is not the user's choice and writes no setting: each write to the
+    /// defaults wakes every stored setting's view in the app, which drew the whole
+    /// window anew on every frame of a resize.
+    @Test(arguments: [0, 1, 2]) func fittingTheNameColumnWhileResizingWritesNoSetting(kind: Int) throws {
+        let box = FileManager.default.temporaryDirectory.appending(path: "table-fit-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: box) }
+        let defaults = testDefaults(in: box)
+        let table: NSTableView = kind == 0 ? FileTableView() : kind == 1 ? DiskOutlineView() : FootprintOutlineView()
+        let name = NSTableColumn(identifier: .init("name"))
+        name.width = 200
+        table.addTableColumn(name)
+        let size = NSTableColumn(identifier: .init("size"))
+        size.width = 100
+        table.addTableColumn(size)
+        table.persistColumns(as: "synthetic.fit.\(kind).\(UUID().uuidString)", defaults: defaults)
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 900, height: 200))
+        scroll.documentView = table
+        table.configureUserColumns()
+        var observers = table.keepFitting("name", defaults: defaults)
+        defer { NSTableView.stopFitting(&observers) }
+        let state = try #require((table as? any UserColumnTable)?.columnViewport)
+        state.fit()
+        var writes = 0
+        let token = NotificationCenter.default.addObserver(forName: UserDefaults.didChangeNotification, object: nil, queue: nil) { _ in writes += 1 }
+        defer { NotificationCenter.default.removeObserver(token) }
+        var slack: Set<Int> = []
+        for step in 0..<30 {
+            scroll.setFrameSize(NSSize(width: 700 + CGFloat(step % 10) * 40, height: 200))
+            scroll.tile()
+            state.resized()
+            slack.insert(Int((scroll.contentView.bounds.width - name.width).rounded()))
+        }
+        // Each fit fills the viewport and is kept, not undone by saved state.
+        #expect(slack.count == 1)
+        #expect(writes == 0, "\(writes) settings writes while the viewport resized")
+        #expect(defaults.double(forKey: "table.flexibleWidth.v1.\(table.autosaveName ?? "").name") == 200)
+    }
+
+    /// The user's columns come back: order, widths and the hidden ones.
+    /// The first time, what AppKit's own autosave kept is taken over.
+    @Test func aListsColumnsComeBackAsTheUserLeftThem() throws {
+        let box = FileManager.default.temporaryDirectory.appending(path: "table-columns-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: box) }
+        let defaults = testDefaults(in: box)
+        func table() -> NSTableView {
+            let table = FileTableView()
+            table.columnAutoresizingStyle = .noColumnAutoresizing
+            for (id, width) in [("name", 200.0), ("size", 100.0), ("kind", 120.0)] {
+                let column = NSTableColumn(identifier: .init(id))
+                column.width = width
+                column.maxWidth = 2_000
+                table.addTableColumn(column)
+            }
+            return table
+        }
+        let name = "synthetic.columns.\(UUID().uuidString)"
+        let first = table()
+        first.persistColumns(as: name, defaults: defaults)
+        first.tableColumns[1].width = 140
+        first.tableColumns[2].isHidden = true
+        first.moveColumn(1, toColumn: 0)
+        first.columnsChanged()
+        let second = table()
+        second.persistColumns(as: name, defaults: defaults)
+        #expect(second.tableColumns.map(\.identifier.rawValue) == ["size", "name", "kind"])
+        #expect(second.tableColumns[0].width == 140 && second.tableColumns[2].isHidden)
+        #expect(second.autosaveName == name && !second.autosaveTableColumns)
+    }
+
     @Test func clippedCellsExposeFullTextAndClearItWhenReused() throws {
         let title = "com.example.Editor.background.extension.with.a.long.name"
         let subtitle = "Found by an identity carried by the removed app"

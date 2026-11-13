@@ -58,36 +58,21 @@ struct DuplicatesView: View {
         ) { model.trashChosen() }
     }
 
-    @ToolbarContentBuilder private var tools: some ToolbarContent {
-        DuplicatesShowPicker()
-        ToolbarItemGroup(placement: .primaryAction) {
-            Menu {
-                Section("Looking in") {
-                    ForEach(model.roots, id: \.self) { root in
-                        Menu(Breakable.path(root).replacingOccurrences(of: "\u{200B}", with: "")) {
-                            FileMenuItems(paths: [root], canOpen: false)
-                        }
+    @PaneToolsBuilder private var tools: [PaneTool] {
+        DuplicatesShow.picker
+        PaneTool.menu("duplicates.folders", "Searched Folders", symbol: "folder", help: "The folders searched for duplicates") {
+            Section("Looking in") {
+                ForEach(model.roots, id: \.self) { root in
+                    Menu(Breakable.path(root).replacingOccurrences(of: "\u{200B}", with: "")) {
+                        FileMenuItems(paths: [root], canOpen: false)
                     }
                 }
-            } label: {
-                Label("Searched Folders", systemImage: "folder")
             }
-            .help("The folders searched for duplicates")
-            if model.scanning {
-                Button {
-                    model.stop()
-                } label: {
-                    Label("Stop", systemImage: "stop.fill")
-                }
-                .help("Stop searching; the last complete result stays")
-            } else {
-                Button {
-                    model.scan()
-                } label: {
-                    Label("Search Again", systemImage: "arrow.clockwise")
-                }
-                .help("Search for duplicates again")
-            }
+        }
+        if model.scanning {
+            PaneTool.button("duplicates.scan", "Stop", symbol: "stop.fill", help: "Stop searching; the last complete result stays") { model.stop() }
+        } else {
+            PaneTool.button("duplicates.scan", "Search Again", symbol: "arrow.clockwise", help: "Search for duplicates again") { model.scan() }
         }
     }
 
@@ -260,7 +245,11 @@ struct DuplicatesView: View {
                 g.files.map { f in
                     var r = FileRow(id: f.path, name: f.name, size: g.bytes, modified: f.modified, location: f.folder, symbol: "doc")
                     let clones = g.clones(of: f.path)
-                    if clones > 0 {
+                    if let frees = g.sharedOutside(f.path) {
+                        r.badge = String(localized: "Shared")
+                        r.badgeTint = .systemGray
+                        r.badgeHelp = String(localized: "Shares its space with a file outside this list: moving it frees about \(fmt(frees)).")
+                    } else if clones > 0 {
                         r.badge = String(localized: "Clone")
                         r.badgeTint = .systemGray
                         r.badgeHelp = String(localized: "Shares its space with \(clones) other cop\(clones == 1 ? "y" : "ies") here: moving it frees space only when they all go.")

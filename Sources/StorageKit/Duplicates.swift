@@ -28,6 +28,12 @@ public struct DuplicateFile: Sendable, Hashable, Identifiable {
     /// Its APFS clone family; nil where the volume can't say, which counts
     /// as a family of its own.
     public var cloneID: UInt64? = nil
+    /// How many files on the volume hold the family's blocks, outside the
+    /// group too; nil or 0 where the volume doesn't count them.
+    public var cloneCount: UInt32? = nil
+    /// What the copy holds that no other file shares; nil where the volume
+    /// doesn't say it shares any.
+    public var privateBytes: Int64? = nil
     var version: DuplicateVersion? = nil
 
     public var id: String { path }
@@ -46,9 +52,15 @@ public struct DuplicateGroup: Sendable, Hashable, Identifiable {
     public var files: [DuplicateFile]
 
     public var id: String { digest }
-    /// What goes when all but one copy do. Clones of one another share
-    /// their blocks, so each clone family takes the space of one copy.
-    public var spare: Int64 { bytes * Int64(max(0, families.count - 1)) }
+    /// What goes when all but one copy do, the one that stays being from
+    /// the family that frees least. Clones of one another share their
+    /// blocks, so each clone family takes the space of one copy, and a
+    /// family that shares with files outside the group frees only what its
+    /// copies hold alone.
+    public var spare: Int64 {
+        let each = families.map(familyFrees)
+        return each.reduce(0, +) - (each.min() ?? 0)
+    }
 
     private struct CloneFamily: Hashable {
         let device: Int32
@@ -67,21 +79,55 @@ public struct DuplicateGroup: Sendable, Hashable, Identifiable {
         return Array(byID.values) + alone
     }
 
+    /// Every file holding the family's blocks is in the group, as far as
+    /// the volume counts them.
+    private func isWhole(_ family: [DuplicateFile]) -> Bool {
+        guard let count = family.compactMap(\.cloneCount).max(), count > 0 else { return true }
+        return family.count >= Int(count)
+    }
+
+    /// What one copy frees by itself: a clone among others here frees
+    /// nothing until they all go, unless the volume says otherwise.
+    private func own(_ file: DuplicateFile, among family: Int) -> Int64 {
+        min(file.privateBytes ?? (family > 1 ? 0 : bytes), bytes)
+    }
+
+    /// What moving all of a family frees.
+    private func familyFrees(_ family: [DuplicateFile]) -> Int64 {
+        if family.count > 1 && isWhole(family) { return bytes }
+        return family.reduce(0) { $0 + own($1, among: family.count) }
+    }
+
     /// The other copies that share `path`'s blocks.
     public func clones(of path: String) -> Int {
         guard let file = files.first(where: { $0.path == path }), let id = file.cloneID else { return 0 }
         return files.filter { $0.device == file.device && $0.cloneID == id && $0.path != path }.count
     }
 
+    /// What moving `path` with the copies here that share its blocks frees,
+    /// when files outside the group keep some of those blocks; nil when it
+    /// frees a whole copy.
+    public func sharedOutside(_ path: String) -> Int64? {
+        guard let family = families.first(where: { $0.contains { $0.path == path } }) else { return nil }
+        let frees = familyFrees(family)
+        return frees < bytes ? frees : nil
+    }
+
     /// What moving the copies in `going` frees, by path: a family's space is
     /// freed once all of it goes, and counted on its last copy in `going`.
+    /// A copy that shares blocks with files outside the group frees only
+    /// what it holds alone.
     public func freed(going: Set<String>) -> [String: Int64] {
         var out: [String: Int64] = [:]
         for family in families {
-            let leaving = family.filter { going.contains($0.path) }.map(\.path).sorted()
-            guard !leaving.isEmpty else { continue }
-            for p in leaving { out[p] = 0 }
-            if leaving.count == family.count, let last = leaving.last { out[last] = bytes }
+            let leaving = family.filter { going.contains($0.path) }.sorted { $0.path < $1.path }
+            guard let last = leaving.last else { continue }
+            if leaving.count == family.count && family.count > 1 && isWhole(family) {
+                for f in leaving { out[f.path] = 0 }
+                out[last.path] = bytes
+            } else {
+                for f in leaving { out[f.path] = own(f, among: family.count) }
+            }
         }
         return out
     }
@@ -354,8 +400,10 @@ public enum DuplicateFinder {
                 let group = DuplicateGroup(
                     length: ordered[0].length, bytes: ordered.map(\.bytes).min() ?? 0, digest: d,
                     files: ordered.map {
-                        DuplicateFile(path: $0.path, modified: $0.modified, inode: $0.inode, device: $0.device,
-                                      cloneID: FileSpace.cloneID($0.path), version: $0.version)
+                        let sharing = FileSpace.sharing($0.path)
+                        return DuplicateFile(path: $0.path, modified: $0.modified, inode: $0.inode, device: $0.device,
+                                             cloneID: sharing?.cloneID, cloneCount: sharing?.cloneCount,
+                                             privateBytes: sharing?.privateBytes, version: $0.version)
                     })
                 out.append(group)
                 onGroup?(group)

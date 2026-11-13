@@ -85,8 +85,6 @@ enum MenuBarText {
 struct MenuBarLabel: View {
     let app: AppModel
     @AppStorage(MenuBarSettings.freeKey) private var showFree = false
-    @Environment(\.openWindow) private var openWindow
-
     var body: some View {
         let volume = app.status?.startupVolume
         HStack(spacing: 3) {
@@ -94,10 +92,7 @@ struct MenuBarLabel: View {
             if showFree, let volume { Text(MenuBarText.free(volume.available)) }
         }
         .accessibilityLabel(volume.map { String(localized: "MyMole, \(MenuBarText.free($0.available)) free") } ?? "MyMole")
-        .task {
-            app.openWindow = { openWindow(id: MyMoleApp.mainWindow) }
-            app.startMonitoring()
-        }
+        .task { app.startMonitoring() }
     }
 }
 
@@ -128,7 +123,7 @@ struct MenuBarPanel: View {
                             app.showWindow(on: find.pane)
                         }
                     }
-                    if app.trash.canEmpty, let bytes = app.trash.bytes {
+                    if app.trash.canEmpty, let bytes = app.trash.frees {
                         row(String(localized: "Trash"), symbol: "trash", value: ByteSize.format(bytes), help: "Empty the Trash, after a confirmation") {
                             app.showWindow(on: .history)
                             Task { await app.trash.askToEmpty() }

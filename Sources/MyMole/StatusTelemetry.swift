@@ -173,9 +173,16 @@ struct StatusTelemetry: View {
             DSText("Process details aren't available for this reading.", .metadata)
             if showsProcessMonitorLink { link("Activity Monitor", symbol: "arrow.up.forward") { action(.activityMonitor) } }
         } else {
-            VStack(spacing: 0) {
-                ForEach(order.sorted(snapshot.topProcesses).prefix(processLimit)) { process in
-                    StatusProcessRow(process: process, emphasis: order, requestQuit: requestQuit)
+            let rows = order.sorted(snapshot.topProcesses).prefix(processLimit)
+            // The full list, in its own scrolling sheet, can hold every
+            // process; only the rows in view are built. A card keeps its few.
+            if processLimit == .max {
+                LazyVStack(spacing: 0) {
+                    ForEach(rows) { StatusProcessRow(process: $0, emphasis: order, requestQuit: requestQuit) }
+                }
+            } else {
+                VStack(spacing: 0) {
+                    ForEach(rows) { StatusProcessRow(process: $0, emphasis: order, requestQuit: requestQuit) }
                 }
             }
         }

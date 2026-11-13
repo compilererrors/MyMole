@@ -108,6 +108,20 @@ final class AppModel {
     var pane: Pane = .dashboard {
         didSet {
             if pane != oldValue && !movingInHistory { history.left(oldValue) }
+            if oldValue == .diskMap && pane != .diskMap { leftDiskMap() }
+        }
+    }
+    @ObservationIgnored private var leanRelease: Task<Void, Never>?
+
+    /// At the gentle level the map goes a while after you leave Disk Map,
+    /// unless you've come back by then; reopening maps again.
+    private func leftDiskMap() {
+        leanRelease?.cancel()
+        guard !Responsiveness.current().keepsMapAway else { return }
+        leanRelease = Task { [weak self] in
+            try? await Task.sleep(for: Responsiveness.idleMapGrace)
+            guard !Task.isCancelled, let self, pane != .diskMap, !Responsiveness.current().keepsMapAway else { return }
+            storage.releaseIdleMap()
         }
     }
     private(set) var history = PaneHistory()
@@ -137,11 +151,15 @@ final class AppModel {
     /// The last readings, kept in memory only, for small graphs.
     private(set) var statusHistory = StatusHistory()
     private let sampler = SystemSampler()
+    @ObservationIgnored private var memoryWatch: MemoryPressureWatch?
+    @ObservationIgnored private var powerObserver: NSObjectProtocol?
     /// The one model of the running app, for what AppKit hands to the app
     /// rather than to a view: a click on the Dock icon or on a notification.
     @ObservationIgnored static weak var live: AppModel?
     /// Opens the main window; set by the views that can.
     @ObservationIgnored var openWindow: (() -> Void)?
+    /// Hides or shows the main window's sidebar, once the window is up.
+    @ObservationIgnored var toggleSidebar: (() -> Void)?
     /// MyMole was opened at login and waits in the menu bar: no window and
     /// no scans until the user opens it.
     @ObservationIgnored var waitsInMenuBar = false
@@ -199,6 +217,10 @@ final class AppModel {
     let systemClean: SystemCleanModel
 
     init() {
+        // Before any setting is read: lifts what older builds saved to today's maximum defaults.
+        PerformanceDefaults.migrate()
+        // Large results an earlier run kept on disk, before this run can write any.
+        SpillTable.removeAll()
         // Folders chosen for a pane before, opened again before any pane reads them.
         ChosenFolders.shared.restore()
         #if SMOKE
@@ -243,6 +265,15 @@ final class AppModel {
         systemClean = SystemCleanModel(privileged: privileged)
         #endif
         diskAccess.didChange = { [weak self] in self?.prefetchScans() }
+        memoryWatch = MemoryPressureWatch { [weak self] level in self?.relieveMemory(level) }
+        Responsiveness.apply()
+        #if SMOKE
+        ResizeExercise.runIfAsked(self)
+        #endif
+        // Automatic follows Low Power Mode as it turns on and off.
+        powerObserver = NotificationCenter.default.addObserver(
+            forName: .NSProcessInfoPowerStateDidChange, object: nil, queue: .main
+        ) { _ in MainActor.assumeIsolated { Responsiveness.apply() } }
         recheckDiskAccess()
     }
 
@@ -337,7 +368,7 @@ final class AppModel {
                     }
                 },
                 { try? await Task.sleep(for: Self.diskMapDelay) },
-                { [self] in storage.prewarm(path: Home.path) },
+                { [self] in if Responsiveness.current().prewarmsDiskMap { storage.prewarm(path: Home.path) } },
             ], while: allowed, waitingWhile: { [weak self] in self?.anyScanRunning ?? false })
         }
     }
@@ -442,7 +473,8 @@ final class AppModel {
     private func prepareToRemoveSelf() async -> String? {
         guard !deepClean.trashing, !installers.trashing, !projects.trashing, !storage.trashing,
               !startup.trashing, !duplicates.trashing, !orphans.trashing, !similar.trashing,
-              !systemClean.removing, maintenance.phase == .idle, !trash.emptying else {
+              !systemClean.removing, maintenance.phase == .idle, !trash.emptying,
+              !privileged.busy, !privileged.outcomeUnknown else {
             return String(localized: "Wait for the current move or maintenance task to finish.")
         }
         if Edition.current.isSandboxed {
@@ -480,6 +512,15 @@ final class AppModel {
             StoreWrites.flush()
             CleanupLog.flush()
         }.value
+        #if !APPSTORE
+        if let helper = privileged.helper {
+            helper.refresh()
+            if helper.status == .enabled || helper.status == .requiresApproval {
+                await helper.disable()
+                if let problem = helper.problem { return problem }
+            }
+        }
+        #endif
         if LoginItem.state == .on || LoginItem.state == .needsApproval { return LoginItem.set(false) }
         return nil
     }

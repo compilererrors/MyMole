@@ -1,0 +1,338 @@
+{
+  "version": 1,
+  "benchmarkTests": [
+    "continuousNativeHeaderResize",
+    "scanSpeedSliderInputAndRendering",
+    "dragDropTransportAndVisibleReorder",
+    "diskChartAndInspectorResize",
+    "nativeStatusAndStorageResizeInput",
+    "editableStatusControlsAndPersistence",
+    "nativeHeaderAdjustmentsAndDensity",
+    "tableResizeScrollAndMenuService",
+    "projectInspectorResize",
+    "filterMenuScrollingAndComponentLoading",
+    "statusCardsResizeScrollAndLoadingTransitions",
+    "diskResizeWhileScansRunInTheBackground",
+    "largeDiskMapResizeSteps"
+  ],
+  "benchmarks": {
+    "table.load.10000": {
+      "budgetMilliseconds": 1000,
+      "minimumSamples": 1
+    },
+    "table.resize.10000": {
+      "budgetMilliseconds": 16.7,
+      "minimumSamples": 60
+    },
+    "table.scroll.10000": {
+      "budgetMilliseconds": 16.7,
+      "minimumSamples": 60
+    },
+    "table.menu": {
+      "budgetMilliseconds": 16.7,
+      "minimumSamples": 60
+    },
+    "projects.split.service": {
+      "budgetMilliseconds": 16.7,
+      "minimumSamples": 60
+    },
+    "projects.workspace.resize": {
+      "budgetMilliseconds": 16.7,
+      "minimumSamples": 60
+    },
+    "projects.split.frame-delivery": {
+      "budgetMilliseconds": 25,
+      "minimumSamples": 60
+    },
+    "projects.outline.scroll.500": {
+      "budgetMilliseconds": 16.7,
+      "minimumSamples": 60
+    },
+    "filters.window.present.12": {
+      "budgetMilliseconds": 500,
+      "minimumSamples": 1
+    },
+    "filters.window.present.100": {
+      "budgetMilliseconds": 500,
+      "minimumSamples": 1
+    },
+    "filters.first-render.12": {
+      "budgetMilliseconds": 100,
+      "minimumSamples": 1
+    },
+    "filters.first-render.100": {
+      "budgetMilliseconds": 500,
+      "minimumSamples": 1
+    },
+    "filters.scroll.12": {
+      "budgetMilliseconds": 16.7,
+      "minimumSamples": 60
+    },
+    "filters.scroll.100": {
+      "budgetMilliseconds": 16.7,
+      "minimumSamples": 60
+    },
+    "filters.scroll.100.frame-delivery": {
+      "budgetMilliseconds": 25,
+      "minimumSamples": 60
+    },
+    "status.loading-transition": {
+      "budgetMilliseconds": 100,
+      "minimumSamples": 20
+    },
+    "status.resize": {
+      "budgetMilliseconds": 16.7,
+      "minimumSamples": 60
+    },
+    "status.scroll": {
+      "budgetMilliseconds": 16.7,
+      "minimumSamples": 60
+    },
+    "status.edit.resize.input": {
+      "budgetMilliseconds": 16.7,
+      "minimumSamples": 60
+    },
+    "status.edit.resize.visible": {
+      "budgetMilliseconds": 100,
+      "minimumSamples": 60
+    },
+    "status.edit.persistence": {
+      "budgetMilliseconds": 16.7,
+      "minimumSamples": 60
+    },
+    "storage.divider.adjust": {
+      "budgetMilliseconds": 16.7,
+      "minimumSamples": 60
+    },
+    "table.header.mouse-resize": {
+      "budgetMilliseconds": 16.7,
+      "minimumSamples": 150
+    },
+    "table.columns.visibility": {
+      "budgetMilliseconds": 16.7,
+      "minimumSamples": 60
+    },
+    "table.columns.fit": {
+      "budgetMilliseconds": 16.7,
+      "minimumSamples": 60
+    },
+    "table.columns.reorder": {
+      "budgetMilliseconds": 16.7,
+      "minimumSamples": 60
+    },
+    "appearance.density.table": {
+      "budgetMilliseconds": 16.7,
+      "minimumSamples": 60
+    },
+    "status.edit.mouse-resize.input": {
+      "budgetMilliseconds": 16.7,
+      "minimumSamples": 60
+    },
+    "storage.divider.mouse-resize.input": {
+      "budgetMilliseconds": 16.7,
+      "minimumSamples": 60
+    },
+    "disk.chart.rings.first-render": {
+      "budgetMilliseconds": 500,
+      "minimumSamples": 1
+    },
+    "disk.chart.rings.resize.input": {
+      "budgetMilliseconds": 16.7,
+      "minimumSamples": 500
+    },
+    "disk.chart.rings.frame-delivery": {
+      "budgetMilliseconds": 25,
+      "minimumSamples": 500
+    },
+    "disk.chart.wheel.first-render": {
+      "budgetMilliseconds": 500,
+      "minimumSamples": 1
+    },
+    "disk.chart.wheel.resize.input": {
+      "budgetMilliseconds": 16.7,
+      "minimumSamples": 500
+    },
+    "disk.chart.wheel.frame-delivery": {
+      "budgetMilliseconds": 25,
+      "minimumSamples": 500
+    },
+    "disk.chart.pie.first-render": {
+      "budgetMilliseconds": 500,
+      "minimumSamples": 1
+    },
+    "disk.chart.pie.resize.input": {
+      "budgetMilliseconds": 16.7,
+      "minimumSamples": 500
+    },
+    "disk.chart.pie.frame-delivery": {
+      "budgetMilliseconds": 25,
+      "minimumSamples": 500
+    },
+    "disk.chart.boxes.first-render": {
+      "budgetMilliseconds": 500,
+      "minimumSamples": 1
+    },
+    "disk.chart.boxes.resize.input": {
+      "budgetMilliseconds": 16.7,
+      "minimumSamples": 500
+    },
+    "disk.chart.boxes.frame-delivery": {
+      "budgetMilliseconds": 25,
+      "minimumSamples": 500
+    },
+    "disk.chart.columns.first-render": {
+      "budgetMilliseconds": 500,
+      "minimumSamples": 1
+    },
+    "disk.chart.columns.resize.input": {
+      "budgetMilliseconds": 16.7,
+      "minimumSamples": 500
+    },
+    "disk.chart.columns.frame-delivery": {
+      "budgetMilliseconds": 25,
+      "minimumSamples": 500
+    },
+    "disk.chart.bars.first-render": {
+      "budgetMilliseconds": 500,
+      "minimumSamples": 1
+    },
+    "disk.chart.bars.resize.input": {
+      "budgetMilliseconds": 16.7,
+      "minimumSamples": 500
+    },
+    "disk.chart.bars.frame-delivery": {
+      "budgetMilliseconds": 25,
+      "minimumSamples": 500
+    },
+    "status.drop.transfer": {
+      "budgetMilliseconds": 16.7,
+      "minimumSamples": 60
+    },
+    "status.drop.visible-reorder": {
+      "budgetMilliseconds": 100,
+      "minimumSamples": 60
+    },
+    "uninstall.drop.url-decoding": {
+      "budgetMilliseconds": 16.7,
+      "minimumSamples": 60
+    },
+    "settings.scan-speed.visible": {
+      "budgetMilliseconds": 100,
+      "minimumSamples": 60
+    },
+    "settings.scan-speed.adjust.input": {
+      "budgetMilliseconds": 16.7,
+      "minimumSamples": 60
+    },
+    "table.columns.native-menu": {
+      "budgetMilliseconds": 100,
+      "minimumSamples": 60
+    },
+    "table.header.frame-delivery": {
+      "budgetMilliseconds": 25,
+      "minimumSamples": 150
+    },
+    "disk.rings.resize-step.background-scans": {
+      "budgetMilliseconds": 16.7,
+      "minimumSamples": 300
+    },
+    "disk.rings.frame-delivery.background-scans": {
+      "budgetMilliseconds": 25,
+      "minimumSamples": 299
+    },
+    "disk.boxes.resize-step.background-scans": {
+      "budgetMilliseconds": 16.7,
+      "minimumSamples": 300
+    },
+    "disk.boxes.frame-delivery.background-scans": {
+      "budgetMilliseconds": 25,
+      "minimumSamples": 299
+    },
+    "disk.large.rings.resize-step": {
+      "budgetMilliseconds": 16.7,
+      "minimumSamples": 300
+    },
+    "disk.large.wheel.resize-step": {
+      "budgetMilliseconds": 16.7,
+      "minimumSamples": 300
+    },
+    "disk.large.pie.resize-step": {
+      "budgetMilliseconds": 16.7,
+      "minimumSamples": 300
+    },
+    "disk.large.boxes.resize-step": {
+      "budgetMilliseconds": 16.7,
+      "minimumSamples": 300
+    },
+    "disk.large.columns.resize-step": {
+      "budgetMilliseconds": 16.7,
+      "minimumSamples": 300
+    },
+    "disk.large.bars.resize-step": {
+      "budgetMilliseconds": 16.7,
+      "minimumSamples": 300
+    }
+  },
+  "e2eTests": {
+    "inspectorNativeDividerMouseTracking": "inspector.divider.mouse-width-restoration",
+    "tableNativeHeadersMenusSelectionAndKeyboard": "table.header-mouse-reorder-menu-selection-keyboard",
+    "statusWidthMouseKeyboardAndPersistence": "status.resize.mouse-keyboard-persistence",
+    "statusEditorUsesRealControls": "status.editor.visibility-order-persistence",
+    "diskMapDividerMouseDrag": "storage.divider.mouse-clamping",
+    "statusDropDecodingAndSessionIsolation": "status.drop.decoding-session-isolation",
+    "everyStatusCardResizesAndNarrowWindowsDisableWidthEdits": "status.all-cards.resize-narrow-identity",
+    "cancellingNativeResizeRestoresPreferences": "resize.escape-cancels-without-saving",
+    "uninstallConfirmationMovesOnlyOwnedFixtureAndUndoRestoresBytes": "uninstall.confirm-cancel-owned-trash-restore",
+    "scanSpeedAccessibilityResetAndPersistence": "settings.scan-speed.accessibility-reset-persistence",
+    "resizeReturningToOriginDoesNotClickAndShortDragsDoNotLeakState": "resize.return-and-short-drag-state"
+  },
+  "sourcePatterns": {
+    "drag": "\\bDragGesture\\s*\\(",
+    "dragSource": "\\.(?:draggable|onDrag)\\s*[({]",
+    "drop": "\\.(?:dropDestination|onDrop)\\s*\\(",
+    "reorder": "\\.onMove\\s*[({]",
+    "slider": "\\bSlider\\s*\\(",
+    "nativeTracking": "\\b(?:trackEvents|mouseDown)\\s*\\(",
+    "split": "\\bNSSplitView\\s*\\(",
+    "columnResize": "allowsColumn(?:Resizing|Reordering)\\s*="
+  },
+  "adjustmentSources": {
+    "Sources/MyMole/Access/AppMoveAccessNotice.swift": {
+      "dragSource": 1
+    },
+    "Sources/MyMole/Design/FileTable.swift": {
+      "columnResize": 2
+    },
+    "Sources/MyMole/Design/HorizontalDragHandle.swift": {
+      "nativeTracking": 2
+    },
+    "Sources/MyMole/Design/InspectorSplit.swift": {
+      "split": 1
+    },
+    "Sources/MyMole/Design/PagedFileTable.swift": {
+      "columnResize": 2
+    },
+    "Sources/MyMole/Design/StatusGrid.swift": {
+      "dragSource": 1
+    },
+    "Sources/MyMole/Design/TableSizing.swift": {
+      "columnResize": 2
+    },
+    "Sources/MyMole/ScanSpeedControl.swift": {
+      "slider": 1
+    },
+    "Sources/MyMole/StatusCardDrag.swift": {
+      "drop": 1
+    },
+    "Sources/MyMole/StatusLayoutEditor.swift": {
+      "reorder": 1
+    },
+    "Sources/MyMole/StatusView.swift": {
+      "drop": 1
+    },
+    "Sources/MyMole/UninstallView.swift": {
+      "drag": 1,
+      "drop": 1
+    }
+  }
+}

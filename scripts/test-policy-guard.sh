@@ -5,8 +5,10 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 fail=0
 case_() {
-    local name=$1 file=$2 text=$3 work status=0
-    work="$(mktemp -d)"
+    local name=$1 file=$2 text=$3 work cleanup_lease status=0
+    work="$(mktemp -d "${TMPDIR:-/tmp}/mymole-policy-XXXXXX")"
+    work="$(cd "$work" && pwd -P)"
+    cleanup_lease=$(python3 -I scripts/test-cleanup.py lease "$work")
     mkdir -p "$work/scripts" "$work/Sources/Ok" "$work/Sources/MyMole/Privileged" "$work/Tests/OkTests" "$(dirname "$work/$file")"
     echo '#if !APPSTORE' > "$work/Sources/MyMole/Privileged/PrivilegedClient.swift"
     cp scripts/check-test-policy.sh "$work/scripts/"
@@ -14,7 +16,7 @@ case_() {
     echo 'let y = 1' > "$work/Tests/OkTests/Ok.swift"
     if ! "$work/scripts/check-test-policy.sh" >/dev/null 2>&1; then
         echo "✗ clean fixture rejected: $name"
-        rm -rf "$work"
+        python3 -I scripts/test-cleanup.py clean "$work" "$cleanup_lease"
         fail=1
         return
     fi
@@ -25,10 +27,10 @@ case_() {
     else
         echo "✗ $name: exit $status, wanted 1"; fail=1
     fi
-    rm -rf "$work"
+    python3 -I scripts/test-cleanup.py clean "$work" "$cleanup_lease"
 }
 case_ "a program started outside the runner" Sources/Ok/Bad.swift 'let p = Process()'
-case_ "a shell call" Sources/Ok/Bad.swift 'system("rm -rf x")'
+case_ "a shell call" Sources/Ok/Bad.swift 'system("echo synthetic")'
 case_ "a delete outside the safe places" Sources/Ok/Bad.swift 'try FileManager.default.removeItem(atPath: p)'
 case_ "a rename outside Undo and staging" Sources/Ok/Bad.swift 'rename(a, b)'
 case_ "a replace outside the safe places" Sources/Ok/Bad.swift 'try FileManager.default.replaceItemAt(a, withItemAt: b)'

@@ -23,7 +23,9 @@ dupes=$(find Sources -name '*.swift' -exec basename {} \; | sort | uniq -d)
 [ -z "$dupes" ] || fail "Swift files share a name, so their phrases would mix: $dupes"
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/mymole-strings-XXXXXX")
-trap 'rm -rf "$work"' EXIT
+work=$(cd "$work" && pwd -P)
+cleanup_lease=$(python3 -I scripts/test-cleanup.py lease "$work")
+trap 'cleanup_result=$?; trap - EXIT; python3 -I scripts/test-cleanup.py clean "$work" "$cleanup_lease" || cleanup_result=1; exit "$cleanup_result"' EXIT
 
 # Builds of their own, kept between runs: a file compiles again only when it
 # changed, so its list from an earlier run still holds. Lists of files that
@@ -38,7 +40,7 @@ collect() {
   for f in "$data"/*.stringsdata; do
     [ -e "$f" ] || continue
     base=$(basename "$f" .stringsdata)
-    [ -n "$(find Sources -name "$base.swift" -print -quit)" ] || { rm -f "$f"; continue; }
+    [ -n "$(find Sources -name "$base.swift" -print -quit)" ] || { continue; }
     cp "$f" "$work/$name-$base.stringsdata"
   done
 }

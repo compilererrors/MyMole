@@ -4,6 +4,19 @@ import Testing
 @testable import MyMole
 
 @MainActor @Suite struct ConfirmationSettingsTests {
+    @Test func separateRuleAndCleanupControlsPreserveEachOthersPreferences() {
+        let root = FileManager.default.temporaryDirectory.appending(path: "confirmations-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let defaults = testDefaults(in: root)
+        let cleanup = ConfirmationSettings(defaults: defaults)
+        let rules = ConfirmationSettings(defaults: defaults)
+        cleanup.setAsking(false, for: .projects)
+        rules.setAsking(false, for: .projectWhitelist)
+        #expect(!cleanup.asks(.projects) && !cleanup.asks(.projectWhitelist))
+        #expect(!rules.asks(.projects) && !rules.asks(.projectWhitelist))
+        rules.setAsking(true, for: .projectWhitelist)
+        #expect(!cleanup.asks(.projects) && cleanup.asks(.projectWhitelist))
+    }
     @Test func skippingAQuestionIsScopedPersistentAndRestorable() throws {
         let root = FileManager.default.temporaryDirectory.appending(path: "confirmations-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }

@@ -18,12 +18,14 @@ struct StatusLayoutEditor: View {
                             Label(card.id.title, systemImage: card.id.symbol)
                         }
                         .toggleStyle(.checkbox)
+                        .accessibilityIdentifier("status.visible." + card.id.rawValue)
                         Spacer(minLength: DS.Space.sm)
                         Picker("Size", selection: Binding(get: { card.size }, set: { layout.setSize($0, for: card.id) })) {
                             ForEach(StatusCardSize.allCases) { Text($0.title).tag($0) }
                         }
                         .fixedSize()
                         .accessibilityLabel("Size for \(card.id.title)")
+                        .accessibilityIdentifier("status.size." + card.id.rawValue)
                         Button {
                             layout.move(card.id, by: -1)
                         } label: {
@@ -31,6 +33,7 @@ struct StatusLayoutEditor: View {
                         }
                         .disabled(layout.cards.first?.id == card.id)
                         .accessibilityLabel("Move \(card.id.title) earlier")
+                        .accessibilityIdentifier("status.earlier." + card.id.rawValue)
                         Button {
                             layout.move(card.id, by: 1)
                         } label: {
@@ -38,6 +41,7 @@ struct StatusLayoutEditor: View {
                         }
                         .disabled(layout.cards.last?.id == card.id)
                         .accessibilityLabel("Move \(card.id.title) later")
+                        .accessibilityIdentifier("status.later." + card.id.rawValue)
                     }
                     .padding(.vertical, DS.Space.xs)
                 }
@@ -47,7 +51,9 @@ struct StatusLayoutEditor: View {
             DSActionGroup {
                 DSFlow(spacing: DS.Space.sm) {
                     Button("Show All Cards") { layout.showAll() }.disabled(layout.hidden.isEmpty)
+                        .accessibilityIdentifier("status.show-all")
                     Button("Restore Default Layout") { layout = StatusLayout() }
+                        .accessibilityIdentifier("status.restore-default")
                 }
             } trailing: {
                 Button("Done") { dismiss() }.primaryAction().keyboardShortcut(.cancelAction)

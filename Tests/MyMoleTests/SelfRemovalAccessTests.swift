@@ -4,6 +4,14 @@ import Testing
 @testable import MyMole
 
 @MainActor @Suite struct SelfRemovalAccessTests {
+    @Test func nonFileAndDecoratedURLsCannotGrantSelfRemovalAccess() {
+        let own = "/synthetic/Applications/Cleaner.app"
+        for text in ["https://example.invalid/Applications/Cleaner.app", "file:///synthetic/Applications/Cleaner.app?other=1", "file:///synthetic/Applications/Cleaner.app#other"] {
+            var starts = 0
+            let access = AppBundleAccess(choose: { _ in URL(string: text) }, start: { _ in starts += 1; return true }, stop: { _ in })
+            #expect(!access.acquire(path: own) && starts == 0 && access.url == nil)
+        }
+    }
     @Test func cancellationOrAnotherAppNeverGrantsAccess() {
         let own = "/synthetic/Applications/Cleaner.app"
         var started = 0

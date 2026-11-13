@@ -127,6 +127,25 @@ import Testing
         #expect(home.exists("Applications/Editor.app"))
     }
 
+    @Test func aHelperMoveDoesNotTriggerFindersSeparateAuthorizationPrompt() async throws {
+        let home = try Home()
+        var finderPrompts = 0, helperMoves = 0
+        let side = AppsModel.SystemSide(base: home.path + "/system", isReady: { true }, remove: { _, _, _ in .init() },
+            trashApp: { app, source in
+                helperMoves += 1
+                return try Self.simulatedAdministratorMove(app, source, home: home.path)
+            })
+        let finder = FinderAppTrash(authorize: { finderPrompts += 1; return FinderAppTrash.cancelled }, move: { _ in
+            Issue.record("Finder must not run after the helper moved the app")
+            return -1
+        })
+        let model = home.model(system: side, recycle: Self.deniedRecycle, finderTrash: finder)
+        let app = try #require(AppFinder.metadata(home.path + "/Applications/Editor.app"))
+        #expect(await model.uninstall(app, leftovers: []) == .done)
+        #expect(helperMoves == 1 && finderPrompts == 0)
+        #expect(home.exists("Library/Preferences/com.vendor.Editor.plist"))
+    }
+
     @Test func finderMovesOnlyTheConfirmedAppAndDataWaitsForItsVerifiedTrashIdentity() async throws {
         let home = try Home()
         try home.addViewer()

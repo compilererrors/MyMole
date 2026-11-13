@@ -13,6 +13,8 @@ struct LargeFilesView: View {
     @State private var place: Place = .anywhere
     @State private var reviewingDownloads = false
     @State private var selection = Set<String>()
+    /// The rows a list kept on disk shows now, in order.
+    @State private var spilledOrder: [UInt32] = []
 
     /// Where the files are: anywhere in the map, or in one of the folders
     /// downloads and old work pile up in. With "Older than" it finds old downloads.
@@ -39,7 +41,11 @@ struct LargeFilesView: View {
         }
 
         nonisolated func contains(_ f: LargeFile, home: String = Home.path) -> Bool {
-            folder(home: home).map { f.folder == $0 || f.folder.hasPrefix($0 + "/") } ?? true
+            contains(folder: f.folder, home: home)
+        }
+
+        nonisolated func contains(folder path: String, home: String = Home.path) -> Bool {
+            folder(home: home).map { path == $0 || path.hasPrefix($0 + "/") } ?? true
         }
     }
 
@@ -90,54 +96,129 @@ struct LargeFilesView: View {
                             .help("Includes small downloads too. Opens a separate review; nothing is chosen for you.")
                     }
                 }
-                DSText("Files of 1 MB or more from the current scan", .metadata)
-                if model.largeFiles.count >= StorageModel.largeFileLimit {
-                    DSText("Only the \(StorageModel.largeFileLimit.formatted()) largest files are listed. Browse individual folders to see the rest.", .metadata)
-                }
+                DSText("Every file of 1 MB or more from the current scan", .metadata)
             }
             .padding(.horizontal, DS.Space.page)
             .padding(.vertical, DS.Space.md)
             Divider()
 
-            FileTable(
-                rows: shown.map(fileRow),
-                columns: [.name, .size, .modified, .kind, .location],
-                hiddenByDefault: [.kind],
-                autosave: "diskMap.largeFiles",
-                selection: $selection,
-                marks: model.opened == nil ? Set(model.marked.keys) : nil,
-                onToggleMark: { id in byID[id].map { model.toggle($0.marked) } },
-                onOpen: { ids in FileActions.reveal(ids) },
-                onMark: { ids in model.mark(ids.compactMap { byID[$0] }.map(\.marked)) },
-                onSetMarks: { ids, checked in
-                    if checked { model.mark(ids.compactMap { byID[$0] }.map(\.marked)) }
-                    else { model.unmark(ids) }
-                },
-                menu: { ids in menu(ids.compactMap { byID[$0] }, rows: shown) })
-                .dsEmptyOverlay(showing: rows.isEmpty) { emptyState.allowsHitTesting(false) }
-            Divider()
-            DSActionGroup {
-                HStack(spacing: DS.Space.sm) {
-                    if model.scanning || filtered.working { PulseDot() }
-                    DSText(counts(shown: shown, picked: picked), .metadata)
+            if let spill = model.largeFilesSpill {
+                spilledList(spill)
+            } else {
+                FileTable(
+                    rows: shown.map(fileRow),
+                    columns: [.name, .size, .modified, .kind, .location],
+                    hiddenByDefault: [.kind],
+                    autosave: "diskMap.largeFiles",
+                    selection: $selection,
+                    marks: model.opened == nil ? Set(model.marked.keys) : nil,
+                    onToggleMark: { id in byID[id].map { model.toggle($0.marked) } },
+                    onOpen: { ids in FileActions.reveal(ids) },
+                    onMark: { ids in model.mark(ids.compactMap { byID[$0] }.map(\.marked)) },
+                    onSetMarks: { ids, checked in
+                        if checked { model.mark(ids.compactMap { byID[$0] }.map(\.marked)) }
+                        else { model.unmark(ids) }
+                    },
+                    menu: { ids in menu(ids.compactMap { byID[$0] }, rows: shown) })
+                    .dsEmptyOverlay(showing: rows.isEmpty) { emptyState.allowsHitTesting(false) }
+                Divider()
+                DSActionGroup {
+                    HStack(spacing: DS.Space.sm) {
+                        if model.scanning || filtered.working { PulseDot() }
+                        DSText(counts(shown: shown, picked: picked), .metadata)
+                    }
+                } trailing: {
+                    Button("Check All Listed") { model.mark(shown.map(\.marked)) }
+                        .disabled(shown.isEmpty || shown.allSatisfy { model.marked[$0.path] != nil })
+                        .help("Choose only the files shown by the current filters. Nothing moves until you confirm.")
+                    Button(picked.isEmpty ? "Choose Selected" : "Choose \(picked.count) Selected") {
+                        if MyMoleApp.sendToTextField(#selector(NSResponder.deleteToBeginningOfLine(_:))) { return }
+                        model.mark(picked.map(\.marked))
+                    }
+                    .keyboardShortcut(.delete, modifiers: .command)
+                    .disabled(picked.isEmpty)
                 }
-            } trailing: {
-                Button("Check All Listed") { model.mark(shown.map(\.marked)) }
-                    .disabled(shown.isEmpty || shown.allSatisfy { model.marked[$0.path] != nil })
-                    .help("Choose only the files shown by the current filters. Nothing moves until you confirm.")
-                Button(picked.isEmpty ? "Choose Selected" : "Choose \(picked.count) Selected") {
-                    if MyMoleApp.sendToTextField(#selector(NSResponder.deleteToBeginningOfLine(_:))) { return }
-                    model.mark(picked.map(\.marked))
-                }
-                .keyboardShortcut(.delete, modifiers: .command)
-                .disabled(picked.isEmpty)
+                .controlSize(.small)
+                .padding(.horizontal, DS.Space.page)
+                .padding(.vertical, DS.Space.sm)
             }
-            .controlSize(.small)
-            .padding(.horizontal, DS.Space.page)
-            .padding(.vertical, DS.Space.sm)
         }
         .task(id: FilterKey(files: model.largeFiles, kind: kind, place: place, date: date, query: query)) { await refilter() }
         .sheet(isPresented: $reviewingDownloads) { DownloadsReviewSheet(model: model) }
+    }
+
+    private struct SpillKey: Hashable {
+        let table: ObjectIdentifier
+        let kind: FileKind?
+        let place: Place
+        let date: DateFilter
+        let query: String
+        let removed: [String]
+    }
+
+    /// The list kept on disk because it's past the memory budget of Large
+    /// results: the same filters and choices, read a page at a time.
+    @ViewBuilder private func spilledList(_ spill: SpillTable) -> some View {
+        let (kind, place, date, search, inMap) = (kind, place, date, TextQuery(query), model.spillKeep)
+        let home = Home.path
+        let keep: @Sendable (SpillTable.Row) -> Bool = { r in
+            inMap(r) && (kind == nil || r.kind == kind) && place.contains(folder: r.folder, home: home)
+                && date.matches(r.modified) && search.matches(r.name, r.folder)
+        }
+        PagedFileTable(
+            table: spill, columns: [.name, .size, .modified, .kind, .location], hiddenByDefault: [.kind],
+            autosave: "diskMap.largeFiles",
+            filterKey: AnyHashable(SpillKey(table: ObjectIdentifier(spill), kind: kind, place: place, date: date, query: query, removed: model.spillRemoved)),
+            keep: keep, selection: $selection,
+            marks: model.opened == nil ? Set(model.marked.keys) : nil,
+            onToggleMark: { r in model.toggle(Marked(path: r.path, name: r.name, size: r.size, isFolder: false)) },
+            onOpen: { FileActions.reveal($0) },
+            menu: { ids in
+                var entries: [TableMenuEntry] = []
+                if model.opened == nil {
+                    entries += [.action(ids.count == 1 ? String(localized: "Choose for Removal") : String(localized: "Choose \(ids.count) for Removal")) {
+                        chooseSpilled(Set(ids), from: spill)
+                    }, .divider]
+                }
+                return entries + FileActions.menu(ids)
+            },
+            onOrdered: { spilledOrder = $0 })
+        Divider()
+        DSActionGroup {
+            HStack(spacing: DS.Space.sm) {
+                if model.scanning { PulseDot() }
+                DSText(String(localized: "\(spilledOrder.count.formatted()) files · kept on disk, past the memory set in Large results"), .metadata)
+            }
+        } trailing: {
+            Button("Check All Listed") { chooseSpilled(nil, from: spill) }
+                .disabled(spilledOrder.isEmpty || model.opened != nil)
+                .help("Choose only the files shown by the current filters. Nothing moves until you confirm.")
+            Button(selection.isEmpty ? "Choose Selected" : "Choose \(selection.count) Selected") {
+                if MyMoleApp.sendToTextField(#selector(NSResponder.deleteToBeginningOfLine(_:))) { return }
+                chooseSpilled(selection, from: spill)
+            }
+            .keyboardShortcut(.delete, modifiers: .command)
+            .disabled(selection.isEmpty || model.opened != nil)
+        }
+        .controlSize(.small)
+        .padding(.horizontal, DS.Space.page)
+        .padding(.vertical, DS.Space.sm)
+    }
+
+    /// Chooses the listed rows whose paths are in `paths` (every listed row
+    /// for nil), read from the table off the main thread.
+    private func chooseSpilled(_ paths: Set<String>?, from spill: SpillTable) {
+        let order = spilledOrder
+        Task {
+            let chosen = await Task.detached(priority: .userInitiated) { () -> [Marked] in
+                order.compactMap { n in
+                    guard let r = spill.row(at: Int(n)), paths?.contains(r.path) ?? true else { return nil }
+                    return Marked(path: r.path, name: r.name, size: r.size, isFolder: false)
+                }
+            }.value
+            guard model.largeFilesSpill === spill else { return }
+            model.mark(chosen)
+        }
     }
 
     @ViewBuilder private var emptyState: some View {
@@ -192,7 +273,9 @@ struct LargeFilesView: View {
     /// or how many of them are selected.
     private func counts(shown: [LargeFile], picked: [LargeFile]) -> String {
         func size(_ files: [LargeFile]) -> String {
-            ByteCountFormatter.string(fromByteCount: files.reduce(0) { $0 + $1.size }, countStyle: .file)
+            let bytes = files.reduce(0) { $0 + $1.size }
+            guard files.contains(where: { $0.reclaim != nil }) else { return ByteSize.format(bytes) }
+            return Freeing.phrase(bytes, frees: files.reduce(Reclaim()) { $0 + ($1.reclaim ?? Reclaim(bytes: $1.size)) }.bytes)
         }
         let all = shown.count.formatted()
         guard picked.isEmpty else {

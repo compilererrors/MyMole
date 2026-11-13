@@ -37,13 +37,18 @@ struct ProjectsView: View {
         } toast: {
             ProjectsNotice(model: model)
         }
+        .disabled(model.pendingRule != nil)
+        .allowsHitTesting(model.pendingRule == nil)
+        .overlay(alignment: .topTrailing) {
+            if let change = model.pendingRule { ProjectRuleConfirmation(model: model, change: change) }
+        }
         .paneToolbar("Projects", subtitle: "\(subtitle)") { tools }
         .actionConfirmation(
             String(localized: "Move \(model.chosenEntries.count.formatted()) item\(model.chosenEntries.count == 1 ? "" : "s") to the Trash?"),
             isPresented: $confirming, action: .projects,
-            message: String(localized: "\(ByteCountFormatter.string(fromByteCount: model.chosenBytes, countStyle: .file)) from \(Set(model.chosenEntries.map(\.project)).count) project(s):\n\(reviewList)\n\nAnything holding a Git repository, key files, files Git tracks or uncommitted work stays. You can undo right after, or put things back from the Trash later.")
+            message: String(localized: "\(Freeing.phrase(model.chosenBytes, frees: model.chosenFrees)) from \(Set(model.chosenEntries.map(\.project)).count) project(s):\n\(reviewList)\n\nAnything holding a Git repository, key files, files Git tracks or uncommitted work stays. You can undo right after, or put things back from the Trash later.")
         ) { model.trashChosen() }
-        .onAppear { model.scanIfNeeded() }
+        .onAppear { model.pins.refresh(); model.scanIfNeeded() }
     }
 
     /// The paths that go, for a last look before confirming.
@@ -73,9 +78,8 @@ struct ProjectsView: View {
         return model.incomplete ? line + String(localized: " · some folders couldn't be read") : line
     }
 
-    @ToolbarContentBuilder private var tools: some ToolbarContent {
-        ToolbarItemGroup(placement: .primaryAction) {
-            Menu {
+    @PaneToolsBuilder private var tools: [PaneTool] {
+            PaneTool.menu("projects.folders", "Project Folders", symbol: "folder.badge.plus", help: "Choose the folders searched for projects") {
                 Section("Looking in") {
                     ForEach(model.roots, id: \.self) { root in
                         Menu(Breakable.path(root).replacingOccurrences(of: "\u{200B}", with: "")) {
@@ -86,63 +90,59 @@ struct ProjectsView: View {
                     }
                 }
                 Divider()
+                Section("Pinned items") {
+                    ForEach(model.pins.paths.sorted(), id: \.self) { path in
+                        Menu(Breakable.path(path)) {
+                            Button("Show in Finder") { FileActions.reveal([path]) }
+                            Button("Unpin") { model.pins.set([path], pinned: false) }
+                        }
+                    }
+                    Button("Pin Folder…") { model.pinFolder() }
+                }
+                Divider()
                 Button("Add Folder…") { model.addRoot() }
                 Button("Use the Usual Folders") { model.resetRoots() }
-            } label: {
-                Label("Project Folders", systemImage: "folder.badge.plus")
             }
-            .help("Choose the folders searched for projects")
             if model.refreshing {
-                Button {
-                    model.stop()
-                } label: {
-                    Label("Stop", systemImage: "stop.fill")
-                }
-                .help("Stop measuring; the last complete result stays")
+                PaneTool.button("projects.stop", "Stop", symbol: "stop.fill", help: "Stop measuring; the last complete result stays") { model.stop() }
             } else {
-                Menu {
+                PaneTool.menu("projects.refresh", "\(model.refreshTitle)", symbol: "arrow.clockwise",
+                              help: "Refresh the current folder or project (⌘R), or choose Scan All Projects",
+                              enabled: !model.trashing, primary: { model.refreshCurrent() }) {
                     Button(model.refreshTitle, action: model.refreshCurrent)
                     Button("Scan All Projects") { model.scan() }
-                } label: {
-                    Label(model.refreshTitle, systemImage: "arrow.clockwise")
-                } primaryAction: {
-                    model.refreshCurrent()
                 }
-                .disabled(model.trashing)
-                .help("Refresh the current folder or project (⌘R), or choose Scan All Projects")
             }
-        }
     }
 
     // MARK: Summary
 
     /// The heat chips and the total. Never wider than the pane: where the
     /// whole line doesn't fit, the total says less (it's in the title too).
+    /// The chips are measured once per width; only the total's wording is
+    /// chosen among its fits. A resize measures this on every frame.
     private var summary: some View {
-        ViewThatFits(in: .horizontal) {
+        let counts = model.heatCounts()
+        return ViewThatFits(in: .horizontal) {
             HStack(spacing: DS.Space.sm) {
-                chips
+                chips(counts)
                 Spacer(minLength: DS.Space.sm)
-                total(full: true)
+                ViewThatFits(in: .horizontal) {
+                    total(full: true)
+                    total(full: false)
+                    Color.clear.frame(width: 0, height: 0)
+                }
             }
-            HStack(spacing: DS.Space.sm) {
-                chips
-                Spacer(minLength: DS.Space.sm)
-                total(full: false)
-            }
-            HStack(spacing: DS.Space.sm) {
-                chips
-                Spacer(minLength: 0)
-            }
-            DSFlow(spacing: DS.Space.sm) { chips }
+            DSFlow(spacing: DS.Space.sm) { chips(counts) }
         }
+        .withoutAlignmentGuides()
         .padding(.horizontal, DS.Space.page)
         .padding(.vertical, DS.Space.md)
     }
 
-    @ViewBuilder private var chips: some View {
+    @ViewBuilder private func chips(_ counts: [Heat: Int]) -> some View {
         ForEach(Heat.allCases, id: \.self) { h in
-            let n = model.count(h)
+            let n = counts[h] ?? 0
             Button {
                 model.selection = Set(model.footprints.filter { Heat($0.lastActivity) == h }.map(\.id))
             } label: {
@@ -185,6 +185,7 @@ struct ProjectsView: View {
                     HStack(spacing: DS.Space.sm) { projectSearch; projectFilterActions }
                     VStack(alignment: .leading, spacing: DS.Space.sm) { projectSearch; projectFilterActions }
                 }
+                .withoutAlignmentGuides()
                 if active != .any {
                     DSFilterChip(title: String(localized: "Last active: \(active.title)")) { active = .any }
                 }
@@ -215,6 +216,7 @@ struct ProjectsView: View {
                 }
             }
             TableColumnsButton(scope: "projects.list.5").fixedSize()
+            DSInfoButton(title: String(localized: "Whitelist, blacklist and pins"), detail: String(localized: "Whitelist excludes a folder and its contents, including when a parent is cleaned. Blacklist adds a cleanup suggestion; it doesn't delete or select anything. Pins keep apps and folders easy to reach and don't change protection. Right-click a folder to change these choices."))
         }
     }
 
@@ -265,12 +267,21 @@ struct ProjectsView: View {
             r.change = g
             r.changeHelp = g > 0 ? String(localized: "Grew since \(since.listText)") : String(localized: "Shrank since \(since.listText)")
         }
+        r.pinned = model.pins.contains(f.id)
+        if r.pinned {
+            r.badge = String(localized: "Pinned")
+            r.badgeHelp = String(localized: "Pinned for quick access. Pinning doesn't protect files or choose them for cleanup.")
+            r.badgeTint = .secondaryLabelColor
+        }
         return r
     }
 
     private func menu(_ ids: [String]) -> [TableMenuEntry] {
         guard !ids.isEmpty else { return [] }
         var out: [TableMenuEntry] = [
+            .action(ids.allSatisfy(model.pins.contains) ? String(localized: "Unpin") : String(localized: "Pin")) {
+                model.pins.set(ids, pinned: !ids.allSatisfy(model.pins.contains))
+            },
             .action(ids.count == 1 ? String(localized: "Choose Rebuildable Data") : String(localized: "Choose Rebuildable Data in \(ids.count) Projects")) {
                 model.chooseRebuildable(in: ids)
             }
@@ -313,7 +324,7 @@ struct ProjectsView: View {
 
     private var actionBar: some View {
         DSActionBar {
-            DSText("\(model.chosenEntries.count.formatted()) item\(model.chosenEntries.count == 1 ? "" : "s") chosen · \(fmt(model.chosenBytes))", .lead)
+            DSText("\(model.chosenEntries.count.formatted()) item\(model.chosenEntries.count == 1 ? "" : "s") chosen · \(Freeing.phrase(model.chosenBytes, frees: model.chosenFrees))", .lead)
                 .keepWhole()
             Button("Clear") { model.chosen = [] }
                 .accessibilityLabel("Clear the choice")
@@ -383,7 +394,7 @@ struct ProjectsOverview: View {
                 if !model.ruleList.isEmpty {
                     DSSection(
                         "Your rules",
-                        footer: String(localized: "Right-click anything in a project to add a rule. Rules apply on every scan.")
+                        footer: String(localized: "Whitelist excludes items and their contents from cleanup. Blacklist adds cleanup suggestions. Pinning is quick access only. Right-click a folder to change its rule; saved rules apply on every scan.")
                     ) {
                         ForEach(model.ruleList) { rule in
                             DSRow(title: rule.title) {
@@ -569,6 +580,10 @@ struct ProjectDetail: View {
                 out.append(.action(model.check(item) == .on ? String(localized: "Unchoose") : String(localized: "Choose")) { model.toggle(item) })
                 out.append(.divider)
             }
+            out.append(.action(item.entries.allSatisfy { model.pins.contains($0.path) } ? String(localized: "Unpin") : String(localized: "Pin")) {
+                let paths = item.entries.map(\.path)
+                model.pins.set(paths, pinned: !paths.allSatisfy(model.pins.contains))
+            })
             out += Self.rules(model, item: item, paths: item.entries.map(\.path), name: item.attribution == .inside ? item.title : nil, project: project)
             out.append(.divider)
             out += FileActions.menu(Array(item.entries.prefix(50).map(\.path)), canOpen: false)
@@ -580,6 +595,10 @@ struct ProjectDetail: View {
                 out.append(.divider)
             }
             let name = item.attribution == .inside && path != project ? (path as NSString).lastPathComponent : nil
+            out.append(.action(model.pins.contains(path) ? String(localized: "Unpin") : String(localized: "Pin")) {
+                let paths = [path]
+                model.pins.set(paths, pinned: !paths.allSatisfy(model.pins.contains))
+            })
             out += Self.rules(model, item: item, paths: [path], name: name, project: project)
             out.append(.divider)
             out += FileActions.menu([path], canOpen: false)
@@ -595,26 +614,30 @@ struct ProjectDetail: View {
             var out: [TableMenuEntry] = []
             let cleanable = paths.filter { ProjectRules.canClean($0, project: project) }
             if !cleanable.isEmpty {
-                out.append(.action(cleanable.count == 1 ? String(localized: "Clean This Folder") : String(localized: "Clean These \(cleanable.count) Folders")) {
-                    model.clean(cleanable, in: project)
+                out.append(.action(cleanable.count == 1 ? String(localized: "Blacklist — Suggest for Cleanup") : String(localized: "Blacklist These \(cleanable.count) Folders")) {
+                    model.requestRule(.blacklist(cleanable, project: project))
                 })
             }
             if paths.count == 1, let name, ProjectRules.canCleanEverywhere(name: name) {
-                out.append(.action(String(localized: "Clean Folders Named “\(name)” in Every Project")) { model.cleanEverywhere(named: name) })
+                out.append(.action(String(localized: "Blacklist Folders Named “\(name)” in Every Project")) { model.requestRule(.blacklistName(name)) })
             }
+            out.append(.action(String(localized: "Whitelist — Never Clean This")) { model.requestRule(.whitelist(paths, project: project)) })
             return out
         case .kept:
-            return [.action(String(localized: "Allow Cleaning Again")) { model.forget(paths, in: project) }]
+            return [.action(String(localized: "Remove from Whitelist")) { model.forget(paths, in: project) }]
         case .marked:
-            return [.action(paths.count == 1 ? String(localized: "Stop Cleaning This") : String(localized: "Stop Cleaning These")) { model.forget(paths, in: project) }]
+            return [
+                .action(String(localized: "Remove from Blacklist")) { model.forget(paths, in: project) },
+                .action(String(localized: "Whitelist — Never Clean This")) { model.requestRule(.whitelist(paths, project: project)) }
+            ]
         case .git:
             return []
         default:
             var out: [TableMenuEntry] = [
-                .action(paths.count == 1 ? String(localized: "Never Clean This") : String(localized: "Never Clean These \(paths.count)")) { model.keep(paths, in: project) }
+                .action(paths.count == 1 ? String(localized: "Whitelist — Never Clean This") : String(localized: "Whitelist These \(paths.count) Items")) { model.requestRule(.whitelist(paths, project: project)) }
             ]
             if let name, item.category != .worktrees {
-                out.append(.action(String(localized: "Never Clean “\(name)” in Any Project")) { model.keepEverywhere(named: name) })
+                out.append(.action(String(localized: "Whitelist “\(name)” in Every Project")) { model.requestRule(.whitelistName(name)) })
             }
             return out
         }

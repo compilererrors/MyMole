@@ -49,7 +49,10 @@ struct BarsChart: View {
         .padding(DS.Space.sm)
         .background(hot ? palette.accent.color.opacity(0.08) : .clear, in: .rect(cornerRadius: DS.Radius.control))
         .contentShape(Rectangle())
-        .onHover { inside in model.hovered = inside ? p : (model.hovered == p ? nil : model.hovered) }
+        .onHover { inside in
+            let next = inside ? p : (model.hovered == p ? nil : model.hovered)
+            if model.hovered != next { model.hovered = next }
+        }
         .onTapGesture { if case .folder(let f) = p { model.open(f) } }
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isButton)

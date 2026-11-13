@@ -7,6 +7,7 @@ struct StorageView: View {
     @AppStorage("diskMap.listWidth") private var listWidth = 0.0
     @AppStorage("diskMap.chartHidden") private var chartHidden = false
     @Bindable var model: StorageModel
+    @State private var places = PlacesModel()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -32,10 +33,13 @@ struct StorageView: View {
         .onReceive(NotificationCenter.default.publisher(for: KeepChanges.name)) { _ in model.invalidateRemovalHints() }
         .paneToolbar("Disk Map", subtitle: "\(subtitle)") { tools }
         .onAppear {
+            places.refresh()
             if model.root == nil && !model.scanning {
-                model.scan(path: Home.path)
+                model.scan(path: model.mapsOnOpen)
             }
         }
+        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didMountNotification)) { _ in places.refresh() }
+        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didUnmountNotification)) { _ in places.refresh() }
     }
 
     private var subtitle: String {
@@ -53,64 +57,49 @@ struct StorageView: View {
             ?? String(localized: "\(size) in \(files) files")
     }
 
-    @ToolbarContentBuilder private var tools: some ToolbarContent {
-        ToolbarItem(placement: .principal) {
-            Picker("Section", selection: $model.tab) {
-                Text("Browse").tag(StorageModel.Tab.browse)
-                Text("Large Files").tag(StorageModel.Tab.largeFiles)
-                Text("Changes").tag(StorageModel.Tab.changes)
-                if !model.denied.isEmpty { Text("Skipped (\(model.denied.count))").tag(StorageModel.Tab.skipped) }
-            }
-            .pickerStyle(.segmented)
-        }
-        ToolbarItemGroup(placement: .primaryAction) {
-            if model.tab == .browse {
-                Menu {
-                    Picker("View", selection: $model.chart) {
-                        ForEach(StorageModel.Chart.allCases) { c in
-                            Label {
-                                Text(c.title)
-                                Text(c.detail)
-                            } icon: {
-                                Image(systemName: c.symbol)
-                            }
-                            .tag(c)
+    @PaneToolsBuilder private var tools: [PaneTool] {
+        PaneTool.choice("disk-map.section", "Section", selection: $model.tab, options: [
+            (StorageModel.Tab.browse, String(localized: "Browse")),
+            (.largeFiles, String(localized: "Large Files")),
+            (.changes, String(localized: "Changes")),
+        ] + (model.denied.isEmpty ? [] : [(.skipped, String(localized: "Skipped (\(model.denied.count))"))]))
+        if model.tab == .browse {
+            PaneTool.menu("disk-map.chart", "\(model.chart.title)", symbol: model.chart.symbol, help: "How to draw the disk map") {
+                Picker("View", selection: $model.chart) {
+                    ForEach(StorageModel.Chart.allCases) { c in
+                        Label {
+                            Text(c.title)
+                            Text(c.detail)
+                        } icon: {
+                            Image(systemName: c.symbol)
                         }
+                        .tag(c)
                     }
-                    .pickerStyle(.inline)
-                } label: {
-                    Label(model.chart.title, systemImage: model.chart.symbol)
-                        .labelStyle(.titleAndIcon)
                 }
-                .help("How to draw the disk map")
-                Toggle(isOn: $chartHidden) {
-                    Label("Hide Chart", systemImage: "sidebar.leading")
-                }
-                .help(chartHidden ? String(localized: "Show the chart beside the list") : String(localized: "Hide the chart and give the list the whole pane"))
-                Toggle(isOn: $model.colorByKind) {
-                    Label("Color by Kind", systemImage: "paintpalette")
-                }
-                .help("Color by file kind instead of by folder")
+                .pickerStyle(.inline)
             }
-            if model.scanning {
-                Button(action: model.cancelScan) { Label("Stop Scan", systemImage: "stop.fill") }
-                    .help("Stop scanning")
-            } else {
-                Menu {
-                    Button(model.refreshTitle, action: model.refreshCurrent)
-                        .disabled(model.opened != nil)
-                    Button("Rescan Entire Map", action: model.rescan)
-                } label: {
-                    Label(model.refreshTitle, systemImage: "arrow.clockwise")
-                } primaryAction: {
-                    model.refreshCurrent()
-                }
-                .disabled(model.trashing || model.opened != nil)
-                .help("Refresh the open folder (⌘R), or choose Rescan Entire Map")
+            PaneTool.toggle("disk-map.hide-chart", "Hide Chart", symbol: "sidebar.leading",
+                            help: chartHidden ? "Show the chart beside the list" : "Hide the chart and give the list the whole pane",
+                            isOn: $chartHidden)
+            PaneTool.toggle("disk-map.kind-colors", "Color by Kind", symbol: "paintpalette",
+                            help: "Color by file kind instead of by folder", isOn: $model.colorByKind)
+        }
+        if model.scanning {
+            PaneTool.button("disk-map.stop", "Stop Scan", symbol: "stop.fill", help: "Stop scanning") { model.cancelScan() }
+        } else {
+            PaneTool.menu("disk-map.refresh", "\(model.refreshTitle)", symbol: "arrow.clockwise",
+                          help: "Refresh the open folder (⌘R), or choose Rescan Entire Map",
+                          enabled: !model.trashing && model.opened == nil, primary: { model.refreshCurrent() }) {
+                Button(model.refreshTitle, action: model.refreshCurrent)
+                    .disabled(model.opened != nil)
+                Button("Rescan Entire Map", action: model.rescan)
             }
-            PlacesMenu(model: model)
-            Button(action: model.chooseFolder) { Label("Choose Folder", systemImage: "folder.badge.plus") }
-                .help("Map another folder or disk (⌘O)")
+        }
+        PaneTool.menu("disk-map.places", "Places", symbol: "externaldrive", help: "Map a common folder or a disk") {
+            PlacesMenuItems(model: model, places: places)
+        }
+        PaneTool.button("disk-map.choose", "Choose Folder", symbol: "folder.badge.plus", help: "Map another folder or disk (⌘O)") {
+            model.chooseFolder()
         }
     }
 
@@ -118,18 +107,11 @@ struct StorageView: View {
     /// set the list's width, which is kept, or hides the chart for a list as
     /// wide as the pane. Neither ever runs past the window, whatever its size.
     private var browse: some View {
-        GeometryReader { g in
+        Group {
             if chartHidden {
                 InspectorList(model: model)
             } else {
-                let side = Self.listWidth(saved: listWidth, total: g.size.width)
-                HStack(spacing: 0) {
-                    chart
-                        .frame(width: max(0, g.size.width - side - DS.Size.splitHandle))
-                    SplitHandle(width: $listWidth, total: g.size.width)
-                    InspectorList(model: model)
-                        .frame(width: side)
-                }
+                ListSplit(width: $listWidth) { chart } list: { InspectorList(model: model) }
             }
         }
     }
@@ -199,36 +181,6 @@ extension StorageView {
         let size = ByteCountFormatter.string(fromByteCount: f.size, countStyle: .file)
         guard let parent, parent.size > 0 else { return size }
         return String(localized: "\(size), \(Int((Double(f.size) / Double(parent.size) * 100).rounded())) % of \(parent.name)")
-    }
-}
-
-/// The divider between chart and list: dragged to set the list's width,
-/// with the resize pointer, and no animation while it moves.
-private struct SplitHandle: View {
-    @Binding var width: Double
-    let total: CGFloat
-    @State private var start: CGFloat?
-
-    var body: some View {
-        Divider()
-            .frame(width: DS.Size.splitHandle)
-            .contentShape(Rectangle())
-            .onHover { inside in if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() } }
-            .gesture(
-                DragGesture(minimumDistance: 1)
-                    .onChanged { g in
-                        let from = start ?? StorageView.listWidth(saved: width, total: total)
-                        start = from
-                        width = Double(StorageView.listWidth(saved: Double(from - g.translation.width), total: total))
-                    }
-                    .onEnded { _ in start = nil }
-            )
-            .accessibilityElement()
-            .accessibilityLabel("List width")
-            .accessibilityAdjustableAction { direction in
-                let now = StorageView.listWidth(saved: width, total: total)
-                width = Double(StorageView.listWidth(saved: Double(now + (direction == .increment ? 40 : -40)), total: total))
-            }
     }
 }
 
@@ -443,7 +395,7 @@ struct BasketBar: View {
                 DSText(activity, .body)
             } else {
                 DSIcon(symbol: "checklist")
-                DSText("\(model.marked.count) chosen · \(ByteCountFormatter.string(fromByteCount: model.markedBytes, countStyle: .file))", .body)
+                DSText("\(model.marked.count) chosen · \(Freeing.phrase(model.markedBytes, frees: model.markedFrees))", .body)
             }
         } trailing: {
             if model.trashing {
@@ -494,7 +446,7 @@ struct ReviewSheet: View {
         VStack(alignment: .leading, spacing: Theme.gap) {
             Text("Move \(items.count) item\(items.count == 1 ? "" : "s") to the Trash?").font(.title2.bold())
             Text(
-                "\(ByteCountFormatter.string(fromByteCount: model.markedBytes, countStyle: .file)). Everything goes to the Trash, so you can undo right after or put things back from the Trash later."
+                "\(Freeing.phrase(model.markedBytes, frees: model.markedFrees)). Everything goes to the Trash, so you can undo right after or put things back from the Trash later."
             )
             .foregroundStyle(.secondary)
             if keepsUnreadable {
@@ -512,7 +464,7 @@ struct ReviewSheet: View {
                         warning(m)
                     }
                     Spacer()
-                    Text(ByteCountFormatter.string(fromByteCount: m.size, countStyle: .file)).monospacedDigit()
+                    Text(Freeing.phrase(m.size, frees: hints?.itemFrees[m.path])).monospacedDigit()
                     Button {
                         model.marked[m.path] = nil
                     } label: {
@@ -588,9 +540,9 @@ struct NoticeToast: View {
 }
 
 /// Common folders and the disks mounted now, to map with one choice.
-private struct PlacesMenu: View {
+private struct PlacesMenuItems: View {
     let model: StorageModel
-    @State private var places = PlacesModel()
+    let places: PlacesModel
 
     private var folders: [(String, String)] {
         let home = Home.path
@@ -602,7 +554,7 @@ private struct PlacesMenu: View {
     }
 
     var body: some View {
-        Menu {
+        Group {
             Section("Folders") {
                 ForEach(folders, id: \.1) { name, path in
                     Button(name) { model.map(place: path) }
@@ -616,12 +568,6 @@ private struct PlacesMenu: View {
                     }
                 }
             }
-        } label: {
-            Label("Places", systemImage: "externaldrive")
         }
-        .help("Map a common folder or a disk")
-        .onAppear { places.refresh() }
-        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didMountNotification)) { _ in places.refresh() }
-        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didUnmountNotification)) { _ in places.refresh() }
     }
 }

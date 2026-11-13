@@ -8,8 +8,12 @@ set -euo pipefail
 [ $# -eq 2 ] || { echo "usage: $0 <binary> <pattern>" >&2; exit 64; }
 binary="$1"
 pattern="$2"
-out="$(mktemp)"
-trap 'rm -f "$out"' EXIT
+cleanup_tool="$(cd "$(dirname "$0")" && pwd -P)/test-cleanup.py"
+work="$(mktemp -d "${TMPDIR:-/tmp}/mymole-binary-check-XXXXXX")"
+work="$(cd "$work" && pwd -P)"
+cleanup_lease=$(python3 -I "$cleanup_tool" lease "$work")
+out="$work/strings"
+trap 'cleanup_result=$?; trap - EXIT; python3 -I "$cleanup_tool" clean "$work" "$cleanup_lease" || cleanup_result=1; exit "$cleanup_result"' EXIT
 
 if ! strings -a "$binary" > "$out"; then
     echo "✗ couldn't read the strings of $binary" >&2

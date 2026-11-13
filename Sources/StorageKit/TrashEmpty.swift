@@ -25,6 +25,8 @@ public enum TrashEmptier {
         let device: Int32
         /// Part of it couldn't be opened to measure: `bytes` is a lower bound.
         public var partial = false
+        /// What deleting it frees: clones of files outside the Trash free nothing.
+        public var reclaim = Reclaim()
     }
 
     public struct Listing: Sendable, Equatable {
@@ -33,6 +35,8 @@ public enum TrashEmptier {
 
         public var count: Int { entries.count }
         public var bytes: Int64 { entries.reduce(0) { $0 + $1.bytes } }
+        /// What deleting all of it frees.
+        public var frees: Int64 { min(bytes, entries.reduce(Reclaim()) { $0 + $1.reclaim }.bytes) }
         /// Some of it couldn't be measured in full: the size is at least `bytes`.
         public var partial: Bool { entries.contains(where: \.partial) }
     }
@@ -41,6 +45,8 @@ public enum TrashEmptier {
         /// Items gone in full, and what they took.
         public var removed = 0
         public var bytes: Int64 = 0
+        /// What deleting them freed, as the listing measured it.
+        public var frees: Int64 = 0
         /// Items of which something stayed: locked, or not the user's to remove.
         public var failed = 0
         /// Items left alone: replaced since they were listed, or not reached before a stop.
@@ -48,9 +54,10 @@ public enum TrashEmptier {
         /// Items a stop came inside of: part of each went, the rest is still in the Trash.
         public var partly = 0
 
-        public init(removed: Int = 0, bytes: Int64 = 0, failed: Int = 0, skipped: Int = 0) {
+        public init(removed: Int = 0, bytes: Int64 = 0, frees: Int64 = 0, failed: Int = 0, skipped: Int = 0) {
             self.removed = removed
             self.bytes = bytes
+            self.frees = frees
             self.failed = failed
             self.skipped = skipped
         }
@@ -66,8 +73,9 @@ public enum TrashEmptier {
             var st = stat()
             guard fstatat(fd.fd, name, &st, AT_SYMLINK_NOFOLLOW) == 0 else { continue }
             var whole = true
-            let bytes = measure(name, in: fd.fd, st, device: fd.device, depth: 0, whole: &whole)
-            entries.append(Entry(name: name, bytes: bytes, inode: UInt64(st.st_ino), device: st.st_dev, partial: !whole))
+            var reclaim = Reclaim()
+            let bytes = measure(name, in: fd.fd, st, device: fd.device, depth: 0, whole: &whole, reclaim: &reclaim)
+            entries.append(Entry(name: name, bytes: bytes, inode: UInt64(st.st_ino), device: st.st_dev, partial: !whole, reclaim: reclaim))
         }
         return Listing(folder: folder, entries: entries.sorted { $0.name < $1.name })
     }
@@ -81,6 +89,7 @@ public enum TrashEmptier {
             return out
         }
         defer { close(fd.fd) }
+        var freed = Reclaim()
         for (i, entry) in listing.entries.enumerated() {
             if stop() {
                 out.skipped += listing.count - i
@@ -97,6 +106,7 @@ public enum TrashEmptier {
             if remove(entry.name, in: fd.fd, device: fd.device, depth: 0, stop: stop) {
                 out.removed += 1
                 out.bytes += entry.bytes
+                freed.add(entry.reclaim)
             } else if stop() {
                 // Stopped inside it: nothing more is started, and what's left stays.
                 out.partly += 1
@@ -106,6 +116,7 @@ public enum TrashEmptier {
                 out.failed += 1
             }
         }
+        out.frees = min(out.bytes, freed.bytes)
         return out
     }
 
@@ -124,10 +135,21 @@ public enum TrashEmptier {
     }
 
     /// What `name` takes; `whole` turns false when part of it couldn't be
-    /// opened or read, so the size is a lower bound.
-    private static func measure(_ name: String, in dir: Int32, _ st: stat, device: dev_t, depth: Int, whole: inout Bool) -> Int64 {
+    /// opened or read, so the size is a lower bound. `reclaim` gathers
+    /// what deleting it frees.
+    private static func measure(
+        _ name: String, in dir: Int32, _ st: stat, device: dev_t, depth: Int, whole: inout Bool, reclaim: inout Reclaim
+    ) -> Int64 {
         let own = Int64(st.st_blocks) * 512
-        guard st.st_mode & S_IFMT == S_IFDIR, st.st_dev == device else { return own }
+        if st.st_mode & S_IFMT == S_IFREG {
+            reclaim.add(.file(allocated: own, device: st.st_dev, sharing: FileSpace.sharing(at: dir, name)))
+            return own
+        }
+        guard st.st_mode & S_IFMT == S_IFDIR, st.st_dev == device else {
+            reclaim.add(Reclaim(bytes: own))
+            return own
+        }
+        reclaim.add(Reclaim(bytes: own))
         guard depth < maxDepth else {
             whole = false
             return own
@@ -146,7 +168,7 @@ public enum TrashEmptier {
         for child in children {
             var c = stat()
             if fstatat(fd, child, &c, AT_SYMLINK_NOFOLLOW) == 0 {
-                total += measure(child, in: fd, c, device: device, depth: depth + 1, whole: &whole)
+                total += measure(child, in: fd, c, device: device, depth: depth + 1, whole: &whole, reclaim: &reclaim)
             } else if errno != ENOENT {
                 whole = false
             }

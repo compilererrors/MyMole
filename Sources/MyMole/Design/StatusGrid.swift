@@ -85,7 +85,7 @@ struct StatusCard<Content: View, Actions: View>: View {
     @ViewBuilder var content: Content
     @ViewBuilder var actions: Actions
     @State private var proposedSize: StatusCardSize?
-    private enum Handle: Hashable { case move, resize }
+    private enum Handle: Hashable { case move }
     @FocusState private var focusedHandle: Handle?
 
     var body: some View {
@@ -99,6 +99,7 @@ struct StatusCard<Content: View, Actions: View>: View {
                             Label(card.title, systemImage: card.symbol).padding(DS.Space.md).dsCard()
                         }
                         .accessibilityLabel("Move \(card.title)")
+                        .accessibilityIdentifier("status.move." + card.rawValue)
                         .accessibilityAdjustableAction { direction in onMove(direction == .increment ? 1 : -1) }
                         .focusable()
                         .focused($focusedHandle, equals: .move)
@@ -136,45 +137,24 @@ struct StatusCard<Content: View, Actions: View>: View {
                 HStack {
                     Text(proposedSize?.title ?? size.title).font(.caption2).foregroundStyle(.secondary)
                     Spacer()
-                    Image(systemName: "arrow.left.and.right")
+                    HorizontalDragHandle(label: String(localized: "Resize \(card.title)"),
+                                         identifier: "status.resize." + card.rawValue, value: size.title,
+                                         enabled: canResize, onChange: { translation in
+                        proposedSize = abs(translation.width) < 40 ? size : translation.width > 0 ? .wide : .standard
+                    }, onEnd: { translation in
+                        let next: StatusCardSize = abs(translation.width) < 40 ? size : translation.width > 0 ? .wide : .standard
+                        if next != size { onResize(next) }
+                        proposedSize = nil
+                    }, onPress: {
+                        proposedSize = nil
+                        toggleWidth()
+                    }, onCancel: { proposedSize = nil }, onAdjust: { direction in
+                        onResize(direction > 0 ? .wide : .standard)
+                    })
                         .frame(width: 26, height: 22)
-                        .contentShape(Rectangle())
-                        .foregroundStyle(.tint)
                         .opacity(canResize ? 1 : 0.4)
-                        .accessibilityLabel("Resize \(card.title)")
-                        .accessibilityValue(size.title)
-                        .accessibilityAddTraits(.isButton)
-                        .accessibilityAction { toggleWidth() }
-                        .accessibilityAdjustableAction { direction in
-                            if canResize { onResize(direction == .increment ? .wide : .standard) }
-                        }
-                        .focusable(canResize)
-                        .focused($focusedHandle, equals: .resize)
-                        .onKeyPress(keys: [.leftArrow, .rightArrow, .space, .return]) { key in
-                            guard canResize, key.modifiers.intersection([.command, .control, .option, .shift]).isEmpty else { return .ignored }
-                            switch key.key {
-                            case .leftArrow: onResize(.standard)
-                            case .rightArrow: onResize(.wide)
-                            default: toggleWidth()
-                            }
-                            return .handled
-                        }
                         .help(canResize ? String(localized: "Drag sideways to resize, or click to toggle width. Cards in a row share a height.")
                               : String(localized: "Widen the window to change card width."))
-                        .highPriorityGesture(DragGesture(minimumDistance: 0)
-                            .onChanged { value in
-                                guard canResize else { return }
-                                focusedHandle = .resize
-                                proposedSize = abs(value.translation.width) < 40 ? size : value.translation.width > 0 ? .wide : .standard
-                            }
-                            .onEnded { value in
-                                if canResize, abs(value.translation.width) < 6, abs(value.translation.height) < 6 {
-                                    toggleWidth()
-                                } else if canResize, let proposedSize, proposedSize != size {
-                                    onResize(proposedSize)
-                                }
-                                proposedSize = nil
-                            })
                 }
             }
         }

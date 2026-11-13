@@ -3,9 +3,8 @@ import PrivilegedKit
 import StorageKit
 
 /// System tasks: what's safe to do as the user runs here, and what needs
-/// root runs in MyMole's privileged tool, which macOS starts once per request
-/// after the user enters an administrator's password in its own prompt.
-/// Nothing is installed. The App Store edition has none of this.
+/// root runs in MyMole's optional, approved service, or in a one-shot tool
+/// after macOS asks for administrator approval. The App Store edition has neither.
 @MainActor
 @Observable
 final class PrivilegedClient {
@@ -31,14 +30,14 @@ final class PrivilegedClient {
             }
         }
 
-        static let unknownText = String(localized: "MyMole stopped waiting for the privileged tool, which may still be running. What it changed isn't known yet, so no other system task runs until it has ended.")
+        static let unknownText = String(localized: "MyMole stopped waiting for the administrator task, which may still be running. What it changed isn't known yet, so no other system task runs until its completion can be verified.")
     }
 
     /// A system task is under way: the administrator prompt or the tool.
     /// One at a time, so System Clean, Optimize and uninstall never overlap.
     private(set) var busy = false
-    /// Set after MyMole stopped waiting on the tool without knowing it
-    /// ended. Cleared only once no copy of the tool is seen running.
+    /// Set after MyMole stopped waiting without knowing the task ended.
+    /// Cleared only after the service verifies idle, or a one-shot tool exits.
     private(set) var outcomeUnknown = false
 
     /// The tool's path inside this app, set only where system tasks exist.
@@ -50,20 +49,43 @@ final class PrivilegedClient {
     /// How often an unknown outcome is looked at again.
     private let recheckEvery: Duration
     private var watch: Task<Void, Never>?
+    #if !APPSTORE
+    let helper: HelperServiceController?
+    #endif
 
     init(
         toolPath: String? = PrivilegedClient.bundledTool(),
-        elevate: @escaping @Sendable (String, String, String) -> (code: Int32, output: String) = PrivilegedClient.adminPrompt,
+        elevate: (@Sendable (String, String, String) -> (code: Int32, output: String))? = nil,
         toolRunning: @escaping @Sendable () -> Bool? = { RunningTools.anyNamed(PrivilegedTool.name) },
         recheckEvery: Duration = .seconds(5)
     ) {
         self.toolPath = Edition.current.hasSystemTasks ? toolPath : nil
-        self.elevate = elevate
+        self.elevate = elevate ?? Self.adminPrompt
+        #if !APPSTORE
+        self.helper = elevate == nil ? HelperServiceController.live() : nil
+        #endif
         self.toolRunning = toolRunning
         self.recheckEvery = recheckEvery
     }
 
     var isAvailable: Bool { toolPath != nil }
+    var usesApprovedHelper: Bool {
+        #if !APPSTORE
+        helper?.status == .enabled
+        #else
+        false
+        #endif
+    }
+
+    #if !APPSTORE
+    /// Injected service and prompt: tests never register a daemon or ask for root.
+    init(helper: HelperServiceController, toolPath: String,
+         elevate: @escaping @Sendable (String, String, String) -> (code: Int32, output: String),
+         toolRunning: @escaping @Sendable () -> Bool? = { false }, recheckEvery: Duration = .seconds(5)) {
+        self.helper = helper; self.toolPath = toolPath; self.elevate = elevate
+        self.toolRunning = toolRunning; self.recheckEvery = recheckEvery
+    }
+    #endif
 
     /// Why no system task may start now, or nil.
     var blocker: String? {
@@ -90,6 +112,12 @@ final class PrivilegedClient {
     /// can't be read.
     func recheckOutcome() async {
         guard outcomeUnknown else { return }
+        #if !APPSTORE
+        if usedService, let helper {
+            if await helper.isIdle() == true { outcomeUnknown = false }
+            return
+        }
+        #endif
         let toolRunning = toolRunning
         if await Task.detached(priority: .utility, operation: { toolRunning() }).value == false { outcomeUnknown = false }
     }
@@ -185,7 +213,17 @@ final class PrivilegedClient {
         guard !outcomeUnknown else { throw Failure.outcomeUnknown }
         let argument = PrivilegedTool.argument(for: PrivilegedEnvelope(request: request))
         let elevate = elevate
-        let r = await Task.detached(priority: .userInitiated) { elevate(tool, argument, prompt) }.value
+        let r: (code: Int32, output: String)
+        #if !APPSTORE
+        usedService = try await helper?.prepare() == true
+        if usedService, let helper {
+            r = await helper.perform(argument)
+        } else {
+            r = await Task.detached(priority: .userInitiated) { elevate(tool, argument, prompt) }.value
+        }
+        #else
+        r = await Task.detached(priority: .userInitiated) { elevate(tool, argument, prompt) }.value
+        #endif
         do {
             return try Self.interpret(code: r.code, output: r.output)
         } catch Failure.outcomeUnknown {
@@ -194,6 +232,10 @@ final class PrivilegedClient {
             throw Failure.outcomeUnknown
         }
     }
+
+    #if !APPSTORE
+    private var usedService = false
+    #endif
 
     /// What a run of the tool came to: its reply, or why there's none.
     nonisolated static func interpret(code: Int32, output: String) throws -> PrivilegedReply {

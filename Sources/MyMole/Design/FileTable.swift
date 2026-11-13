@@ -36,6 +36,7 @@ struct FileRow: Identifiable, Equatable, Sendable {
     var bulkCheckable = true
     var choiceHelp: String?
     var sizePlaceholder: String?
+    var pinned = false
 }
 
 enum FileColumn: String, CaseIterable, Sendable {
@@ -120,6 +121,10 @@ struct FileTable: NSViewRepresentable {
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSScrollView, context: Context) -> CGSize? {
+        NativeListViewport.size(proposal)
+    }
+
     func makeNSView(context: Context) -> NSScrollView {
         let table = FileTableView()
         table.coordinator = context.coordinator
@@ -143,8 +148,7 @@ struct FileTable: NSViewRepresentable {
             col.isHidden = hiddenByDefault.contains(c)
             table.addTableColumn(col)
         }
-        table.autosaveName = autosave
-        table.autosaveTableColumns = true
+        table.persistColumns(as: autosave)
         table.sortDescriptors = [context.coordinator.savedSort ?? NSSortDescriptor(key: defaultSort.rawValue, ascending: defaultSort.ascendingFirst)]
         table.dataSource = context.coordinator
         table.delegate = context.coordinator
@@ -197,11 +201,13 @@ struct FileTable: NSViewRepresentable {
         func byName(_ i: Int, _ j: Int) -> Bool { rows[i].name.localizedStandardCompare(rows[j].name) == .orderedAscending }
         func order<T: Comparable>(_ keys: [T]) -> [Int] {
             rows.indices.sorted { i, j in
-                keys[i] == keys[j] ? byName(i, j) : (asc ? keys[i] < keys[j] : keys[i] > keys[j])
+                if rows[i].pinned != rows[j].pinned { return rows[i].pinned }
+                return keys[i] == keys[j] ? byName(i, j) : (asc ? keys[i] < keys[j] : keys[i] > keys[j])
             }
         }
         func text(_ keys: [String], tieByName: Bool) -> [Int] {
             rows.indices.sorted { i, j in
+                if rows[i].pinned != rows[j].pinned { return rows[i].pinned }
                 let r = keys[i].localizedStandardCompare(keys[j])
                 if r == .orderedSame { return tieByName && byName(i, j) }
                 return asc ? r == .orderedAscending : r == .orderedDescending
@@ -285,6 +291,7 @@ struct FileTable: NSViewRepresentable {
             column.isHidden = false
             table.sortDescriptors = [NSSortDescriptor(key: request.column.rawValue, ascending: request.ascending)]
             table.fitFlexibleColumn(FileColumn.name.rawValue)
+            table.columnsChanged()
         }
 
         var savedSort: NSSortDescriptor? {
@@ -742,7 +749,7 @@ extension FileTableView: @preconcurrency QLPreviewPanelDataSource {
 
 // MARK: - Cells (laid out by hand: cheap, and exact at a fixed row height)
 
-@MainActor private enum FileCellResources {
+@MainActor enum FileCellResources {
     static let byteCount: ByteCountFormatter = {
         let formatter = ByteCountFormatter()
         formatter.countStyle = .file
@@ -758,6 +765,12 @@ extension FileTableView: @preconcurrency QLPreviewPanelDataSource {
         cache.countLimit = 64
         return cache
     }()
+
+    /// Set from Settings → Responsiveness; NSCache also lets go under memory pressure.
+    static func setLimits(textWidths: Int, symbols: Int) {
+        widths.countLimit = textWidths
+        self.symbols.countLimit = symbols
+    }
 
     static func namePartWidth(_ text: String) -> CGFloat {
         if let width = widths.object(forKey: text as NSString) { return CGFloat(width.doubleValue) }

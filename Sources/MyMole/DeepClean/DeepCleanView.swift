@@ -53,32 +53,16 @@ struct DeepCleanView: View {
             + "\n\n" + costs.joined(separator: "\n")
     }
 
-    @ToolbarContentBuilder private var tools: some ToolbarContent {
-        ToolbarItemGroup(placement: .primaryAction) {
-            // System Clean exists only where MyMole may ask for root.
-            if Edition.current.hasSystemTasks {
-                Button {
-                    openSystemClean()
-                } label: {
-                    Label("System Items", systemImage: "lock.shield")
-                }
-                .help("System-wide caches need administrator rights; System Clean handles them")
-            }
-            if model.scanning {
-                Button {
-                    model.stop()
-                } label: {
-                    Label("Stop", systemImage: "stop.fill")
-                }
-                .help("Stop scanning; the last complete result stays")
-            } else {
-                Button {
-                    model.scan()
-                } label: {
-                    Label("Rescan", systemImage: "arrow.clockwise")
-                }
-                .help("Scan again")
-            }
+    @PaneToolsBuilder private var tools: [PaneTool] {
+        // System Clean exists only where MyMole may ask for root.
+        if Edition.current.hasSystemTasks {
+            PaneTool.button("deep-clean.system", "System Items", symbol: "lock.shield",
+                            help: "System-wide caches need administrator rights; System Clean handles them") { openSystemClean() }
+        }
+        if model.scanning {
+            PaneTool.button("deep-clean.scan", "Stop", symbol: "stop.fill", help: "Stop scanning; the last complete result stays") { model.stop() }
+        } else {
+            PaneTool.button("deep-clean.scan", "Rescan", symbol: "arrow.clockwise", help: "Scan again") { model.scan() }
         }
     }
 

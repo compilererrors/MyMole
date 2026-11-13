@@ -37,6 +37,8 @@ final class TrashModel {
     }
 
     var bytes: Int64? { listing?.bytes }
+    /// What emptying it frees: clones of files kept elsewhere free nothing.
+    var frees: Int64? { listing?.frees }
     var count: Int { listing?.count ?? 0 }
     /// Something lies in the Trash and nothing is working on it.
     var canEmpty: Bool { count > 0 && !emptying }
@@ -107,7 +109,7 @@ final class TrashModel {
             TrashEmptier.empty(confirmed, stop: { job.isStopped })
         }
         CleanupLog.submit(
-            CleanupRecord(source: Self.source, items: 0, bytes: out.bytes, failed: out.failed, deleted: out.removed), to: logURL)
+            CleanupRecord(source: Self.source, items: 0, bytes: out.frees, failed: out.failed, deleted: out.removed), to: logURL)
         emptying = false
         notice = Self.report(out)
         listing = await measure()
@@ -116,7 +118,7 @@ final class TrashModel {
     static func report(_ out: TrashEmptier.Outcome) -> String {
         var parts: [String] = []
         if out.removed > 0 {
-            parts.append(String(localized: "Deleted \(out.removed) item\(out.removed == 1 ? "" : "s") (\(ByteSize.format(out.bytes))) for good"))
+            parts.append(String(localized: "Deleted \(out.removed) item\(out.removed == 1 ? "" : "s") (\(Freeing.phrase(out.bytes, frees: out.frees))) for good"))
         } else {
             parts.append(String(localized: "Nothing was deleted"))
         }
@@ -142,8 +144,8 @@ extension View {
             Button("Cancel", role: .cancel) {}
         } message: { listing in
             Text(listing.partial
-                ? String(localized: "\(listing.count) item\(listing.count == 1 ? "" : "s"), at least \(ByteSize.format(listing.bytes)) (part couldn't be measured), will be deleted for good. This can't be undone. Anything you move to the Trash after this stays there.")
-                : String(localized: "\(listing.count) item\(listing.count == 1 ? "" : "s"), \(ByteSize.format(listing.bytes)), will be deleted for good. This can't be undone. Anything you move to the Trash after this stays there."))
+                ? String(localized: "\(listing.count) item\(listing.count == 1 ? "" : "s"), at least \(Freeing.phrase(listing.bytes, frees: listing.frees)) (part couldn't be measured), will be deleted for good. This can't be undone. Anything you move to the Trash after this stays there.")
+                : String(localized: "\(listing.count) item\(listing.count == 1 ? "" : "s"), \(Freeing.phrase(listing.bytes, frees: listing.frees)), will be deleted for good. This can't be undone. Anything you move to the Trash after this stays there."))
         }
         .confirmationKeyboard(isPresented: Binding(get: { trash.confirming != nil }, set: { if !$0 { trash.confirming = nil } }))
         .dsBottom(showing: false) {

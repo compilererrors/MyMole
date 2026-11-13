@@ -3,8 +3,8 @@ import PackageDescription
 
 // MyMole — a native SwiftUI Mac cleaner. Everything runs on MyMole's own
 // engine. In the direct edition, system-level work goes through a privileged
-// tool macOS runs as root for one request after an administrator's password;
-// nothing is installed. The App Store edition has no such tool.
+// tool for one request at a time, via an approved service or an administrator
+// prompt. The App Store edition has no such tool.
 let package = Package(
     name: "MyMole",
     platforms: [
@@ -34,14 +34,14 @@ let package = Package(
         ),
         // What runs as root, and the contract with it: maintenance tasks,
         // system cache rules, and the request and reply the tool reads and
-        // prints (JSON on its command line and output).
+        // prints (versioned JSON on its command line/output or authenticated XPC).
         .target(
             name: "PrivilegedKit",
             dependencies: ["StorageKit"],
             path: "Sources/PrivilegedKit"
         ),
-        // The privileged tool: started as root once per request, handles it
-        // under a lock shared by every copy, prints the reply and exits.
+        // The privileged tool: handles approved requests under a shared lock,
+        // as an on-demand service or a one-shot command.
         .executableTarget(
             name: "MyMoleHelper",
             dependencies: ["PrivilegedKit", "StorageKit"],

@@ -17,8 +17,9 @@ struct AppPresentation: Sendable {
     }
 
     init(_ inventory: [AppBundle], query: String, sort: UninstallView.Sort, showMacOS: Bool,
-         asList: Bool, running: Set<String>, ownPath: String?) {
-        apps = UninstallView.project(inventory, query: query, sort: sort, showMacOS: showMacOS)
+         asList: Bool, running: Set<String>, ownPath: String?, pinned: Set<String> = []) {
+        let sorted = UninstallView.project(inventory, query: query, sort: sort, showMacOS: showMacOS)
+        apps = sorted.filter { pinned.contains($0.path) } + sorted.filter { !pinned.contains($0.path) }
         byPath = Dictionary(inventory.map { ($0.path, $0) }, uniquingKeysWith: { a, _ in a })
         hiddenMacOS = showMacOS ? 0 : inventory.reduce(0) { $0 + ($1.isProtected ? 1 : 0) }
         totalBytes = apps.reduce(0) { $0 + $1.bytes }
@@ -41,6 +42,10 @@ struct AppPresentation: Sendable {
             } else if app.fromAppStore {
                 row.badge = String(localized: "App Store")
                 row.badgeTint = .systemBlue
+            }
+            row.pinned = pinned.contains(app.path)
+            if row.pinned {
+                row.subtitle = String(localized: "Pinned — quick access only")
             }
             return row
         } : []

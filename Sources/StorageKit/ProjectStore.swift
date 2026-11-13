@@ -133,16 +133,20 @@ public enum ProjectStore {
     /// Adds a scan's total. The newest sample moves with every scan; it's
     /// kept for good only once it's `sampleInterval` after the last kept one,
     /// so kept samples are always at least that far apart.
-    static func adding(_ sample: Sample, to samples: [Sample]) -> [Sample] {
+    /// At Hyperspeed every scan is kept and none is dropped
+    /// (`ResultSize.historyInterval`, `projectSamplesKept`).
+    static func adding(_ sample: Sample, to samples: [Sample],
+                       interval: TimeInterval = ResultSize.current().historyInterval,
+                       keep: Int = ResultSize.current().projectSamplesKept) -> [Sample] {
         var out = samples
         if let moving = out.last, out.count >= 2,
-            moving.date.timeIntervalSince(out[out.count - 2].date) < sampleInterval
+            moving.date.timeIntervalSince(out[out.count - 2].date) < interval
         {
             out[out.count - 1] = sample
         } else {
             out.append(sample)
         }
-        return Array(out.suffix(keep))
+        return out.count > keep ? Array(out.suffix(keep)) : out
     }
 
     /// Change of a project's total against the newest complete sample at

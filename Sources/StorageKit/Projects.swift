@@ -68,8 +68,8 @@ public enum FootprintCategory: String, CaseIterable, Sendable, Codable {
         case .worktrees: "Agent worktrees"
         case .agentSessions: "Agent sessions"
         case .appData: "App data"
-        case .marked: "Added by you"
-        case .kept: "Kept by you"
+        case .marked: "Blacklisted — cleanup suggestions"
+        case .kept: "Whitelisted — excluded from cleanup"
         }
     }
 
@@ -85,8 +85,8 @@ public enum FootprintCategory: String, CaseIterable, Sendable, Codable {
         case .worktrees: "Extra checkouts made by coding agents. Push anything you need, then run git worktree prune."
         case .agentSessions: "Transcripts kept by Codex and Claude Code. Removing them only loses the chat history."
         case .appData: "Containers, caches and settings of builds of this app. Removing them resets that app's data."
-        case .marked: "Folders you chose to clean. MyMole wouldn't have picked them on its own."
-        case .kept: "You chose never to clean these. They're shown for scale only."
+        case .marked: "Folders you added as cleanup suggestions. Nothing is removed until you choose and confirm it."
+        case .kept: "Excluded from cleanup, including everything inside. They stay even when a parent is chosen."
         }
     }
 
@@ -134,13 +134,22 @@ public struct FootprintEntry: Sendable, Hashable, Codable {
     public let modified: Date
     /// Advisory presentation metadata from the existing scan, never removal authority.
     public let isDirectory: Bool?
+    /// What moving it frees where clones share blocks; nil where it wasn't
+    /// read, and `bytes` stands.
+    public let reclaim: Reclaim?
 
-    public init(path: String, bytes: Int64, modified: Date, isDirectory: Bool? = nil) {
+    public init(path: String, bytes: Int64, modified: Date, isDirectory: Bool? = nil, reclaim: Reclaim? = nil) {
         self.path = path
         self.bytes = bytes
         self.modified = modified
         self.isDirectory = isDirectory
+        self.reclaim = reclaim
     }
+
+    /// What moving it alone frees.
+    public var frees: Int64 { min(bytes, reclaim?.bytes ?? bytes) }
+    /// What moving it frees, with the clone families it may complete.
+    public var freeing: Reclaim { reclaim ?? Reclaim(bytes: bytes) }
 }
 
 /// A group of entries of one kind in one place: every `node_modules` of a
@@ -198,7 +207,10 @@ public struct ProjectFootprint: Sendable, Hashable, Codable, Identifiable {
 
     public var id: String { project.path }
     public var bytes: Int64 { items.reduce(0) { $0 + $1.bytes } }
-    public var removableBytes: Int64 { items.filter(\.removable).reduce(0) { $0 + $1.bytes } }
+    /// What moving every removable entry frees: clones of files that stay
+    /// free nothing, and clones of one another free one copy.
+    public var removableReclaim: Reclaim { items.filter(\.removable).flatMap(\.entries).reduce(Reclaim()) { $0 + $1.freeing } }
+    public var removableBytes: Int64 { removableReclaim.bytes }
     public var outsideBytes: Int64 { items.filter { $0.attribution != .inside }.reduce(0) { $0 + $1.bytes } }
 
     public func bytes(_ category: FootprintCategory) -> Int64 {

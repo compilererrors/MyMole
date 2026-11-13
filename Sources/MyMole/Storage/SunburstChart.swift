@@ -18,14 +18,14 @@ struct SunburstChart: View {
             let g = Geometry(size: geo.size, rings: Self.rings)
             ZStack {
                 Canvas { ctx, _ in
-                    for arc in arcs {
+                    var batch = ShapeBatch()
+                    for arc in arcs where g.isVisible(arc) {
                         let hot = model.isHighlighted(arc.segment)
                         let color = ChartColors.color(
                             for: arc.segment, branch: arc.branch, depth: arc.depth, byKind: model.colorByKind)
-                        let path = g.path(arc)
-                        ctx.fill(path, with: .color(hot ? color.mix(with: .white, by: 0.35) : color))
-                        ctx.stroke(path, with: .color(palette.workspace.color), lineWidth: 1)
+                        batch.add(g.path(arc), color: hot ? color.mix(with: .white, by: 0.35) : color)
                     }
+                    batch.draw(in: ctx, edge: palette.workspace.color)
                 }
                 .dsCrossfade(value: drawing)
                 center(g)
@@ -49,7 +49,16 @@ struct SunburstChart: View {
             }
         }
         .task(id: LayoutKey(model)) {
-            let next = model.current.map { Sunburst.layout($0, rings: Self.rings, include: model.isReady) } ?? []
+            let key = LayoutKey(model)
+            // A map still being written is laid out afresh every time.
+            let map = model.showingLive ? nil : model.root.map(ObjectIdentifier.init)
+            let next: [Arc]
+            if let map, let kept = ChartLayouts.sunburst.value(key, map: map) {
+                next = kept
+            } else {
+                next = model.current.map { Sunburst.layout($0, rings: Self.rings, include: model.isReady) } ?? []
+                if let map { ChartLayouts.sunburst.keep(next, for: key, map: map) }
+            }
             withAnimation(model.showingLive ? nil : Motion.content) {
                 arcs = next
                 drawing = LayoutKey(model)
@@ -106,6 +115,13 @@ struct SunburstChart: View {
         }
 
         func inCenter(_ p: CGPoint) -> Bool { hypot(p.x - center.x, p.y - center.y) < hole }
+
+        /// At least half a pixel along its outer edge. A thinner segment is
+        /// covered by its own 1-point edge, drawn in the background color.
+        func isVisible(_ arc: Arc) -> Bool {
+            let outer = hole + CGFloat(arc.depth) * ring
+            return CGFloat(arc.end - arc.start) * outer >= 0.5
+        }
 
         /// Arc angles run clockwise from 12 o'clock; SwiftUI's from 3 o'clock.
         private func angle(_ a: Double) -> Angle { .radians(a - .pi / 2) }

@@ -244,9 +244,10 @@ import Testing
         #expect(ProjectStore.growth(history["/p"] ?? []) == nil)
         history = ProjectStore.save([sized(350)], roots: roots, date: Date(timeIntervalSince1970: 25 * hour), base: box.url)
         let g = try #require(ProjectStore.growth(history["/p"] ?? []))
-        // The sample from hour 1 was only an hour after the kept one, so it
-        // moved on; growth is against hour 0.
-        #expect(g.bytes == 250 && g.since == Date(timeIntervalSince1970: 0))
+        // At the default Large results step points are kept an hour apart,
+        // so hour 1 stays and is the newest point at least a day old.
+        #expect(ResultSize.current().historyInterval == hour)
+        #expect(g.bytes == 200 && g.since == Date(timeIntervalSince1970: hour))
         #expect(ProjectStore.loadLast(roots: roots, base: box.url)?.footprints.first?.bytes == 350)
         // Saved for other folders: not this result.
         #expect(ProjectStore.loadLast(roots: ["/other"], base: box.url) == nil)

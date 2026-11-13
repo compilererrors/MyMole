@@ -64,6 +64,8 @@ final class AppsModel {
     private let ownAppID: String?
     /// Only the app coordinator can prepare removal of this running copy.
     var prepareSelfRemoval: (@MainActor () async -> String?)?
+    var selfRemovalSource: RemovedApp.Source?
+    var selfRemovalIdentity: Trasher.Identity?
     private(set) var leftoverProblems: [SystemProblem] = []
     private(set) var appMoveFailures: [String: TrashOutcome.FailureInfo] = [:]
     private(set) var appMoveNeedsAdministrator = Set<String>()
@@ -756,7 +758,13 @@ final class AppsModel {
         if needsOwnership, let why = await refusal(for: app) { return .refused(why) }
         if job.isStopped { return .refused(String(localized: "Stopped before anything was moved.")) }
         if !itself, isRunning(app) { return .refused(String(localized: "\(app.name) is open. Quit it first.")) }
-        let sourceProof = await appMoveSource(for: app)
+        let sourceProof = itself && selfRemovalSource != nil ? selfRemovalSource : await appMoveSource(for: app)
+        if itself, let frozen = selfRemovalIdentity, sourceProof?.originalIdentity != frozen {
+            return .refused(String(localized: "The app changed after the review. Nothing was moved."))
+        }
+        if let sourceProof, !(await sourceIsCurrent(sourceProof)) {
+            return .refused(String(localized: "The app changed after the review. Nothing was moved."))
+        }
         if let why = await refusal(for: app) { return .refused(why) }
         if job.isStopped || (!itself && isRunning(app)) { return .refused(String(localized: "The move was stopped or the app started. Nothing was moved.")) }
         // Locked in Finder: unlocked to move, locked again if it stays.
@@ -784,50 +792,8 @@ final class AppsModel {
                 appOutcome = await fallbackRecycle(sourceURL)
             }
         }
-        if !itself, let finderTrash, appOutcome.moved.isEmpty,
-           appOutcome.failureInfo[app.path]?.permissionDenied == true, let sourceProof,
-           !job.isStopped, !isRunning(app), await sourceIsCurrent(sourceProof), await refusal(for: app) == nil {
-            authorizingApp = app.path
-            defer { authorizingApp = nil }
-            let permission = await finderTrash.authorize()
-            if permission == noErr {
-                let refreshed = needsOwnership ? await selectionApproval(of: app, leftovers: leftovers, hasSystem: !chosenSystem.isEmpty, manualReview: manualReview) : nil
-                if (!needsOwnership || refreshed != nil), !job.isStopped, !isRunning(app),
-                   await refusal(for: app) == nil, await sourceIsCurrent(sourceProof), !job.isStopped, !isRunning(app) {
-                    approved = refreshed
-                    let protections = protections
-                    let status = await finderTrash.move(.init(source: sourceURL, stillCurrent: {
-                        guard !job.isStopped, sourceProof.isAtOriginalPath,
-                              let kept = try? protections.read() else { return false }
-                        return !kept(app.path)
-                    }))
-                    let moved = await movedInFinder(sourceProof)
-                    if let moved {
-                        let record = TrashRecord(original: sourceURL, trashed: URL(fileURLWithPath: moved.app.path))
-                        appOutcome = TrashOutcome(moved: [record], failed: [])
-                        finderMove = FinderMove(record: record, source: sourceProof, location: record.trashed)
-                        if needsOwnership {
-                            approved = await selectionApproval(of: app, leftovers: leftovers, hasSystem: !chosenSystem.isEmpty,
-                                                               manualReview: manualReview, identityAt: moved.app)
-                        }
-                    } else {
-                        let error = FinderAppTrash.failure(status == noErr ? FinderAppTrash.unverified : status)
-                        appOutcome = TrashOutcome(moved: [], failed: [(app.path, error.localizedDescription)],
-                                                  failureInfo: [app.path: .init(error, area: .uninstall)])
-                        if status == FinderAppTrash.automationDenied || status == FinderAppTrash.consentRequired {
-                            appMoveNeedsAutomation.insert(app.path)
-                        }
-                    }
-                }
-            } else {
-                let error = FinderAppTrash.failure(permission)
-                appOutcome = TrashOutcome(moved: [], failed: [(app.path, error.localizedDescription)],
-                                          failureInfo: [app.path: .init(error, area: .uninstall)])
-                if permission == FinderAppTrash.automationDenied || permission == FinderAppTrash.consentRequired {
-                    appMoveNeedsAutomation.insert(app.path)
-                }
-            }
-        }
+        // Offer the optional helper before Finder can show a second, unrelated
+        // authorization prompt. Ineligible apps return nil and can still use Finder.
         if !itself, appOutcome.moved.isEmpty, appOutcome.failureInfo[app.path]?.permissionDenied == true,
            let sourceProof, let trashApp = system.trashApp, system.isReady(), system.blocker() == nil,
            await sourceIsCurrent(sourceProof), await refusal(for: app) == nil {
@@ -859,6 +825,50 @@ final class AppsModel {
                     job.record(.moveToTrash, done: [], failed: [app.path: error.localizedDescription], refused: [])
                     appMoveFailures[app.path] = .init(error, area: .uninstall)
                     return .failed(error.localizedDescription)
+                }
+            }
+        }
+        if let finderTrash, appOutcome.moved.isEmpty,
+           appOutcome.failureInfo[app.path]?.permissionDenied == true, let sourceProof,
+           !job.isStopped, (itself || !isRunning(app)), await sourceIsCurrent(sourceProof), await refusal(for: app) == nil {
+            authorizingApp = app.path
+            defer { authorizingApp = nil }
+            let permission = await finderTrash.authorize()
+            if permission == noErr {
+                let refreshed = needsOwnership ? await selectionApproval(of: app, leftovers: leftovers, hasSystem: !chosenSystem.isEmpty, manualReview: manualReview) : nil
+                if (!needsOwnership || refreshed != nil), !job.isStopped, (itself || !isRunning(app)),
+                   await refusal(for: app) == nil, await sourceIsCurrent(sourceProof), !job.isStopped, (itself || !isRunning(app)) {
+                    approved = refreshed
+                    let protections = protections
+                    let status = await finderTrash.move(.init(source: sourceURL, stillCurrent: {
+                        guard !job.isStopped, sourceProof.isAtOriginalPath,
+                              let kept = try? protections.read() else { return false }
+                        return !kept(app.path)
+                    }))
+                    let moved = await movedInFinder(sourceProof)
+                    if let moved {
+                        let record = TrashRecord(original: sourceURL, trashed: URL(fileURLWithPath: moved.app.path))
+                        appOutcome = TrashOutcome(moved: [record], failed: [])
+                        finderMove = FinderMove(record: record, source: sourceProof, location: record.trashed)
+                        if needsOwnership {
+                            approved = await selectionApproval(of: app, leftovers: leftovers, hasSystem: !chosenSystem.isEmpty,
+                                                               manualReview: manualReview, identityAt: moved.app)
+                        }
+                    } else {
+                        let error = FinderAppTrash.failure(status == noErr ? FinderAppTrash.unverified : status)
+                        appOutcome = TrashOutcome(moved: [], failed: [(app.path, error.localizedDescription)],
+                                                  failureInfo: [app.path: .init(error, area: .uninstall)])
+                        if status == FinderAppTrash.automationDenied || status == FinderAppTrash.consentRequired {
+                            appMoveNeedsAutomation.insert(app.path)
+                        }
+                    }
+                }
+            } else {
+                let error = FinderAppTrash.failure(permission)
+                appOutcome = TrashOutcome(moved: [], failed: [(app.path, error.localizedDescription)],
+                                          failureInfo: [app.path: .init(error, area: .uninstall)])
+                if permission == FinderAppTrash.automationDenied || permission == FinderAppTrash.consentRequired {
+                    appMoveNeedsAutomation.insert(app.path)
                 }
             }
         }

@@ -7,6 +7,23 @@ import Testing
 @testable import StorageKit
 
 @MainActor @Suite struct FootprintOutlineTests {
+    @Test func whitelistIsLabelledAndKeepsContrastWhenSelected() throws {
+        let h = try Fixture()
+        let item = FootprintItem(id: "synthetic.whitelist", category: .kept, title: "Whitelisted", location: h.entry,
+            attribution: .user, entries: [.init(path: h.entry, bytes: 1, modified: .distantPast)])
+        h.footprint = ProjectFootprint(project: h.footprint.project, items: [item])
+        h.start()
+        let node = try #require(h.outline.item(atRow: 1) as? FootprintOutline.Node)
+        let cell = try #require(h.coordinator.outlineView(h.outline, viewFor: h.outline.outlineTableColumn, item: node) as? NSTableCellView)
+        let lock = try #require(cell.subviews.compactMap { $0 as? NSImageView }.first {
+            $0.toolTip == String(localized: "Whitelisted — this folder and its contents stay during cleanup.")
+        })
+        #expect(!lock.isHidden && lock.contentTintColor == .systemGreen)
+        cell.backgroundStyle = .emphasized
+        #expect(lock.contentTintColor == .selectedControlTextColor)
+        cell.backgroundStyle = .normal
+        #expect(lock.contentTintColor == .systemGreen)
+    }
     @MainActor private final class Fixture {
         let base = FileManager.default.temporaryDirectory.appending(path: "project-outline-\(UUID().uuidString)")
         let model: ProjectsModel

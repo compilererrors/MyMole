@@ -1,4 +1,15 @@
 import AppKit
+import SwiftUI
+
+enum NativeListViewport {
+    /// A bounded scroll viewport takes the parent's proposal. Document rows
+    /// and manually widened columns must not resize the surrounding SwiftUI.
+    nonisolated static func size(_ proposal: ProposedViewSize) -> CGSize? {
+        guard let width = proposal.width, let height = proposal.height,
+              width.isFinite, height.isFinite else { return nil }
+        return CGSize(width: max(0, width), height: max(0, height))
+    }
+}
 
 @MainActor protocol ColumnWidthProviding {
     var preferredColumnWidth: CGFloat { get }
@@ -86,6 +97,7 @@ extension NSTableView {
             for (index, column) in tableColumns.enumerated() where !column.isHidden { column.width = visibleContentWidth(of: index) }
             (self as? any UserColumnTable)?.columnViewport?.rememberUserWidth()
             updateScrollableWidth()
+            columnsChanged()
         })
         menu.addItem(ClosureMenuItem(String(localized: "Reset Column Widths")) { [weak self] in
             guard let self else { return }
@@ -94,6 +106,7 @@ extension NSTableView {
             }
             (self as? any UserColumnTable)?.columnViewport?.rememberUserWidth()
             fitFlexibleColumn(FileColumn.name.rawValue)
+            columnsChanged()
         })
     }
 
@@ -128,6 +141,8 @@ extension NSTableView {
     private var userWidth: CGFloat
     private var expectedWidth: CGFloat
     private var fitting = false
+    /// Setting the width itself: no column change of the user's.
+    var isFitting: Bool { fitting }
     private let defaults: UserDefaults
     private let storageKey: String?
 
@@ -163,6 +178,8 @@ extension NSTableView {
         let available = clip.bounds.width - (table.columnsWidth - column.width)
         let target = min(column.maxWidth, max(column.minWidth, max(userWidth, available)))
         expectedWidth = target
+        // A fit follows the viewport and is not the user's choice, so it is
+        // not saved (`ColumnStore`): this runs on every frame of a resize.
         if abs(column.width - target) > 0.5 { column.width = target }
         table.updateScrollableWidth()
     }
@@ -180,6 +197,7 @@ extension NSTableView {
         userWidth = column.width
         expectedWidth = column.width
         saveUserWidth()
+        table?.columnsChanged()
     }
 
     private func saveUserWidth() {
