@@ -6,6 +6,7 @@ MyMole analyzes disk usage, removes apps and selected files, and displays
 system activity. Scans do not delete files.
 
 **[Download for Apple silicon](https://github.com/compilererrors/MyMole/releases/latest)** ·
+**[Install with Homebrew](#install-with-homebrew)** ·
 [Editions and permissions](#editions-and-permissions) · [License](#license)
 
 Requires **macOS 26 or later**. The interface is in English, Simplified and
